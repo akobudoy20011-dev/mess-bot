@@ -176,7 +176,14 @@ const groups = [
 ];
 
 function getTriggerReply(rawText, senderId) {
-  if (!rawText) return null;
+     if (
+      Object.prototype.hasOwnProperty.call(group, "onlySenderId") &&
+      (!group.onlySenderId ||
+        String(group.onlySenderId) !== String(senderId || ""))
+    ) {
+      continue;
+    }
+    if (!rawText) return null;
 
   const text = rawText.toLowerCase();
 
