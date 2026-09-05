@@ -172,7 +172,7 @@ function handleMessage(api, event) {
     return;
   }
 
-  const triggerReply = getTriggerReply(body);
+  const triggerReply = getTriggerReply(body, senderId);
 
   if (triggerReply) {
     api.sendMessage(triggerReply, threadID);
