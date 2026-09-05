@@ -32,7 +32,7 @@ const groups = [
       "dami ebas ni jaiden tol, di nga ako nag reklamo nung mukhang pinagtagpi tagpi na napkin bahay nila",
       "meta sa ml ngayon: jaiden",
       "naka full def si jaiden erp, pero tinagos lang nung regla ng mama niya",
-      "what if erp jaiden, at mga tol, tirahin ko mama neto?"
+      "what if erp jaiden, at mga tol, tirahin ko mama neto?",
       "moka ka loonie",
       "tito mong daga, mukhang nilaga",
       "medyo naiiyak na si jaiden, sadly wala akong pake",
