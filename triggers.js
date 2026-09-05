@@ -1,5 +1,4 @@
 const groups = [
-
     {
   name: "jaiden",
   triggers: ["jaiden"],
