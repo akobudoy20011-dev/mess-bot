@@ -1,85 +1,127 @@
-const ws3fca = require("ws3-fca");
-// Different versions/forks of ws3-fca export the login function differently:
-// sometimes as `module.exports = login`, sometimes as `module.exports = { login }`.
-// This handles both so we don't crash with "login is not a function".
-const login = typeof ws3fca === "function" ? ws3fca : ws3fca.login;
+const { login } = require("ws3-fca");
 const express = require("express");
 const { getTriggerReply } = require("./triggers");
 
-// ---------------------------------------------------------------------------
-// Tiny web server so Render sees an open port and keeps the service "alive".
-// Render web services expect something listening on process.env.PORT.
-// ---------------------------------------------------------------------------
+// Web server for Render
 const app = express();
-app.get("/", (req, res) => res.send("Bot is running ✅"));
+
+app.get("/", (req, res) => {
+  res.send("Bot is running ✅");
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log(`Web server listening on port ${process.env.PORT || 3000}`);
 });
 
-// ---------------------------------------------------------------------------
-// Load cookies (appState) from an environment variable, NOT a committed file.
-// On Render: Dashboard → your service → Environment → add FB_COOKIES
-// with the raw JSON array as the value.
-// Locally: create a real cookies.json (see cookies.example.json) and run
-//   FB_COOKIES=$(cat cookies.json) node index.js
-// ---------------------------------------------------------------------------
+// Read and validate Facebook cookies
+function readAppState() {
+  const rawCookies = process.env.FB_COOKIES;
+
+  if (!rawCookies || !rawCookies.trim()) {
+    throw new Error("FB_COOKIES is missing.");
+  }
+
+  let parsed;
+
+  try {
+    parsed = JSON.parse(rawCookies);
+
+    // Accept cookies with one extra layer of JSON quoting.
+    if (typeof parsed === "string") {
+      parsed = JSON.parse(parsed);
+    }
+  } catch {
+    throw new Error(
+      "FB_COOKIES must contain a JSON array of Facebook cookie objects."
+    );
+  }
+
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    parsed.some(
+      (cookie) =>
+        !cookie ||
+        typeof cookie !== "object" ||
+        typeof cookie.key !== "string" ||
+        typeof cookie.value !== "string"
+    )
+  ) {
+    throw new Error(
+      "FB_COOKIES parsed successfully, but it is not a valid cookie array. " +
+        "Expected objects with string key and value fields."
+    );
+  }
+
+  return parsed;
+}
+
 let appState;
+
 try {
-  appState = JSON.parse(process.env.FB_COOKIES);
+  appState = readAppState();
 } catch (err) {
-  console.error("FB_COOKIES is missing or not valid JSON. Aborting.");
+  console.error(`Configuration error: ${err.message}`);
   process.exit(1);
 }
 
-// Who the bot is allowed to auto-message / who counts as an "admin" for
-// commands. Fill in real Facebook user IDs, comma-separated, in the
-// ADMIN_IDS env var, e.g. ADMIN_IDS=1000123456,1000987654
-const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").filter(Boolean);
+// Admin Facebook user IDs
+const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
 
-login({ appState }, (err, api) => {
-  if (err) {
-    console.error("Login failed:", err);
-    process.exit(1);
-  }
-
-  console.log("Logged in successfully.");
-
-  api.setOptions({
-    listenEvents: true,
-    selfListen: false, // don't react to the bot's own messages
-  });
-
-  // -------------------------------------------------------------------
-  // Example: send one message on startup. Comment out if you don't want
-  // a message fired every time the service restarts/redeploys.
-  // -------------------------------------------------------------------
-  if (process.env.STARTUP_THREAD_ID) {
-    api.sendMessage("Bot is online ✅", process.env.STARTUP_THREAD_ID);
-  }
-
-  // -------------------------------------------------------------------
-  // Main listener: reacts to incoming messages/events.
-  // -------------------------------------------------------------------
-  api.listenMqtt((err, event) => {
+// ws3-fca v2 expects:
+// login(cookieArray, options, callback)
+//
+// Do not use login({ appState }, ...).
+login(
+  appState,
+  {
+    online: true,
+    updatePresence: true,
+    selfListen: false,
+    randomUserAgent: false,
+  },
+  (err, api) => {
     if (err) {
-      console.error("Listener error:", err);
-      return;
+      console.error("Login failed:", err);
+      process.exit(1);
     }
 
-    if (event.type === "message") {
-      handleMessage(api, event);
-    }
-  });
-});
+    console.log("Logged in successfully.");
 
-// ---------------------------------------------------------------------------
-// Command handling — extend this with whatever behavior you want.
-// ---------------------------------------------------------------------------
+    api.setOptions({
+      listenEvents: true,
+      selfListen: false,
+    });
+
+    if (process.env.STARTUP_THREAD_ID) {
+      api.sendMessage("Bot is online ✅", process.env.STARTUP_THREAD_ID);
+    }
+
+    api.listenMqtt((err, event) => {
+      if (err) {
+        console.error("Listener error:", err);
+        return;
+      }
+
+      if (event && event.type === "message") {
+        handleMessage(api, event);
+      }
+    });
+  }
+);
+
 function handleMessage(api, event) {
   const { threadID, senderID, body } = event;
-  if (!body) return;
+
+  if (!threadID || typeof body !== "string" || !body.trim()) {
+    return;
+  }
 
   const text = body.trim().toLowerCase();
+  const senderId = String(senderID || "");
 
   if (text === "!ping") {
     api.sendMessage("pong 🏓", threadID);
@@ -88,24 +130,24 @@ function handleMessage(api, event) {
 
   if (text === "!help") {
     api.sendMessage(
-      "Commands:\n!ping - health check\n!help - this message",
+      "Commands:\n" +
+        "!ping - health check\n" +
+        "!help - this message\n" +
+        "!broadcast <text> - admin only",
       threadID
     );
     return;
   }
 
-  // Example admin-only command
-  if (text.startsWith("!broadcast ") && ADMIN_IDS.includes(senderID)) {
+  if (text.startsWith("!broadcast ") && ADMIN_IDS.includes(senderId)) {
     const msg = body.slice("!broadcast ".length);
     api.sendMessage(`📢 ${msg}`, threadID);
     return;
   }
 
-  // Preset trigger-word banter (see triggers.js). Checked last so it never
-  // overrides the explicit commands above.
   const triggerReply = getTriggerReply(body);
+
   if (triggerReply) {
     api.sendMessage(triggerReply, threadID);
-    return;
   }
 }
