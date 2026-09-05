@@ -1,4 +1,8 @@
-const login = require("ws3-fca");
+const ws3fca = require("ws3-fca");
+// Different versions/forks of ws3-fca export the login function differently:
+// sometimes as `module.exports = login`, sometimes as `module.exports = { login }`.
+// This handles both so we don't crash with "login is not a function".
+const login = typeof ws3fca === "function" ? ws3fca : ws3fca.login;
 const express = require("express");
 const { getTriggerReply } = require("./triggers");
 
