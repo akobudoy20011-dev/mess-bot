@@ -2,7 +2,10 @@ const { login } = require("ws3-fca");
 const express = require("express");
 const { getTriggerReply } = require("./triggers");
 
-// Web server for Render
+// ---------------------------------------------------------------------------
+// Tiny web server so Render sees an open port and keeps the service "alive".
+// Render web services expect something listening on process.env.PORT.
+// ---------------------------------------------------------------------------
 const app = express();
 
 app.get("/", (req, res) => {
@@ -13,7 +16,9 @@ app.listen(process.env.PORT || 3000, () => {
   console.log(`Web server listening on port ${process.env.PORT || 3000}`);
 });
 
-// Read and validate Facebook cookies
+// ---------------------------------------------------------------------------
+// Load cookies from the FB_COOKIES environment variable.
+// ---------------------------------------------------------------------------
 function readAppState() {
   const rawCookies = process.env.FB_COOKIES;
 
@@ -26,7 +31,7 @@ function readAppState() {
   try {
     parsed = JSON.parse(rawCookies);
 
-    // Accept cookies with one extra layer of JSON quoting.
+    // Accept one extra layer of JSON quoting.
     if (typeof parsed === "string") {
       parsed = JSON.parse(parsed);
     }
@@ -36,10 +41,22 @@ function readAppState() {
     );
   }
 
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error(
+      "FB_COOKIES parsed successfully, but it is not a valid cookie array. " +
+        "Expected an array of cookie objects."
+    );
+  }
+
+  // Browser cookie exporters commonly use either `key` or `name`.
+  // Normalize both formats to `key`.
+  const normalizedCookies = parsed.map((cookie) => ({
+    ...cookie,
+    key: typeof cookie.key === "string" ? cookie.key : cookie.name,
+  }));
+
   if (
-    !Array.isArray(parsed) ||
-    parsed.length === 0 ||
-    parsed.some(
+    normalizedCookies.some(
       (cookie) =>
         !cookie ||
         typeof cookie !== "object" ||
@@ -48,12 +65,12 @@ function readAppState() {
     )
   ) {
     throw new Error(
-      "FB_COOKIES parsed successfully, but it is not a valid cookie array. " +
-        "Expected objects with string key and value fields."
+      "FB_COOKIES parsed successfully, but its cookies need string name/key " +
+        "and value fields."
     );
   }
 
-  return parsed;
+  return normalizedCookies;
 }
 
 let appState;
@@ -65,16 +82,21 @@ try {
   process.exit(1);
 }
 
-// Admin Facebook user IDs
+// ---------------------------------------------------------------------------
+// Admin Facebook user IDs.
+// Example: ADMIN_IDS=1000123456,1000987654
+// ---------------------------------------------------------------------------
 const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .split(",")
   .map((id) => id.trim())
   .filter(Boolean);
 
+// ---------------------------------------------------------------------------
 // ws3-fca v2 expects:
 // login(cookieArray, options, callback)
 //
 // Do not use login({ appState }, ...).
+// ---------------------------------------------------------------------------
 login(
   appState,
   {
@@ -96,10 +118,12 @@ login(
       selfListen: false,
     });
 
+    // Optional startup message.
     if (process.env.STARTUP_THREAD_ID) {
       api.sendMessage("Bot is online ✅", process.env.STARTUP_THREAD_ID);
     }
 
+    // Listen for incoming Messenger events.
     api.listenMqtt((err, event) => {
       if (err) {
         console.error("Listener error:", err);
@@ -113,6 +137,9 @@ login(
   }
 );
 
+// ---------------------------------------------------------------------------
+// Message handling.
+// ---------------------------------------------------------------------------
 function handleMessage(api, event) {
   const { threadID, senderID, body } = event;
 
