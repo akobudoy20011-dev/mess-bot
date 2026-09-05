@@ -175,7 +175,7 @@ const groups = [
   }
 ];
 
-function getTriggerReply(rawText) {
+function getTriggerReply(rawText, senderId) {
   if (!rawText) return null;
 
   const text = rawText.toLowerCase();
