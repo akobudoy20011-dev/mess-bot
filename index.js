@@ -3,8 +3,7 @@ const express = require("express");
 const { getTriggerReply } = require("./triggers");
 
 // ---------------------------------------------------------------------------
-// Tiny web server so Render sees an open port and keeps the service "alive".
-// Render web services expect something listening on process.env.PORT.
+// Tiny web server so Render sees an open port and keeps the service alive.
 // ---------------------------------------------------------------------------
 const app = express();
 
@@ -17,7 +16,7 @@ app.listen(process.env.PORT || 3000, () => {
 });
 
 // ---------------------------------------------------------------------------
-// Load cookies from the FB_COOKIES environment variable.
+// Load Facebook cookies from the FB_COOKIES environment variable.
 // ---------------------------------------------------------------------------
 function readAppState() {
   const rawCookies = process.env.FB_COOKIES;
@@ -31,7 +30,7 @@ function readAppState() {
   try {
     parsed = JSON.parse(rawCookies);
 
-    // Accept one extra layer of JSON quoting.
+    // Accept cookies that were accidentally JSON-stringified twice.
     if (typeof parsed === "string") {
       parsed = JSON.parse(parsed);
     }
@@ -43,13 +42,11 @@ function readAppState() {
 
   if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new Error(
-      "FB_COOKIES parsed successfully, but it is not a valid cookie array. " +
-        "Expected an array of cookie objects."
+      "FB_COOKIES parsed successfully, but it is not a valid cookie array."
     );
   }
 
-  // Browser cookie exporters commonly use either `key` or `name`.
-  // Normalize both formats to `key`.
+  // Some cookie exporters use "name"; ws3-fca expects "key".
   const normalizedCookies = parsed.map((cookie) => ({
     ...cookie,
     key: typeof cookie.key === "string" ? cookie.key : cookie.name,
@@ -65,8 +62,7 @@ function readAppState() {
     )
   ) {
     throw new Error(
-      "FB_COOKIES parsed successfully, but its cookies need string name/key " +
-        "and value fields."
+      "FB_COOKIES cookies need string name/key and value fields."
     );
   }
 
@@ -82,20 +78,14 @@ try {
   process.exit(1);
 }
 
-// ---------------------------------------------------------------------------
-// Admin Facebook user IDs.
-// Example: ADMIN_IDS=1000123456,1000987654
-// ---------------------------------------------------------------------------
+// Facebook IDs allowed to use !broadcast.
 const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .split(",")
   .map((id) => id.trim())
   .filter(Boolean);
 
 // ---------------------------------------------------------------------------
-// ws3-fca v2 expects:
-// login(cookieArray, options, callback)
-//
-// Do not use login({ appState }, ...).
+// Log in to Facebook.
 // ---------------------------------------------------------------------------
 login(
   appState,
@@ -115,22 +105,45 @@ login(
 
     api.setOptions({
       listenEvents: true,
+
+      // Prevents the bot from reacting to its own messages.
       selfListen: false,
     });
 
     // Optional startup message.
     if (process.env.STARTUP_THREAD_ID) {
-      api.sendMessage("Bot is online ✅", process.env.STARTUP_THREAD_ID);
+      Promise.resolve(
+        api.sendMessage(
+          "Bot is online ✅",
+          process.env.STARTUP_THREAD_ID
+        )
+      ).catch((sendError) => {
+        console.error("Startup message failed:", sendError);
+      });
     }
 
-    // Listen for incoming Messenger events.
+    console.log(
+      "Listener started. Send a message from a different Facebook account."
+    );
+
     api.listenMqtt((err, event) => {
       if (err) {
         console.error("Listener error:", err);
         return;
       }
 
-      if (event && event.type === "message") {
+      console.log("Incoming event:", {
+        type: event?.type,
+        senderID: event?.senderID,
+        threadID: event?.threadID,
+      });
+
+      // Normal messages and Messenger reply messages are both handled.
+      if (
+        event &&
+        (event.type === "message" ||
+          event.type === "message_reply")
+      ) {
         handleMessage(api, event);
       }
     });
@@ -150,11 +163,13 @@ function handleMessage(api, event) {
   const text = body.trim().toLowerCase();
   const senderId = String(senderID || "");
 
+  // Health check command.
   if (text === "!ping") {
     api.sendMessage("pong 🏓", threadID);
     return;
   }
 
+  // Help command.
   if (text === "!help") {
     api.sendMessage(
       "Commands:\n" +
@@ -166,15 +181,22 @@ function handleMessage(api, event) {
     return;
   }
 
-  if (text.startsWith("!broadcast ") && ADMIN_IDS.includes(senderId)) {
-    const msg = body.slice("!broadcast ".length);
-    api.sendMessage(`📢 ${msg}`, threadID);
+  // Admin-only command.
+  if (
+    text.startsWith("!broadcast ") &&
+    ADMIN_IDS.includes(senderId)
+  ) {
+    const message = body.slice("!broadcast ".length);
+
+    api.sendMessage(`📢 ${message}`, threadID);
     return;
   }
 
+  // Everyone can trigger the roast replies.
   const triggerReply = getTriggerReply(body, senderId);
 
   if (triggerReply) {
     api.sendMessage(triggerReply, threadID);
+    return;
   }
 }
