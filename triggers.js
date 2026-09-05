@@ -1,12 +1,8 @@
 const groups = [
-    {
-  name: "jaiden",
-  triggers: ["jaiden"],
-
-  // Put Jaiden's sender ID in Render as JAIDEN_ID.
-  onlySenderId: process.env.JAIDEN_ID || null,
-
-  index: 0,
+  {
+    name: "jaiden",
+    triggers: ["jaiden"],
+    index: 0,
     replies: [
       "jaiden na naman",
       "jaiden, yung mukhang paa ba?",
@@ -33,20 +29,13 @@ const groups = [
       "moka ka braided na bulbul",
       "moka ka tanga",
       "moka ka gago",
-      "dami ebas ni jaiden tol, di nga ako nag reklamo nung mukhang pinagtagpi tagpi na napkin bahay nila",
-      "meta sa ml ngayon: jaiden",
-      "naka full def si jaiden erp, pero tinagos lang nung regla ng mama niya",
-      "what if erp jaiden, at mga tol, tirahin ko mama neto?",
       "moka ka loonie",
-      "tito mong daga, mukhang nilaga",
-      "medyo naiiyak na si jaiden, sadly wala akong pake",
-      "jaiden, bakit yung mama mo mukhang pinaglihi sa paniki?",
       "moka ka beetle juice",
-      "mapagdamot pag dating sa ate si erp jaiden, eh kamukha naman ni wally ate niya",
       "si jaiden spotted namamakla",
       "yung tipong nag work out ka para lumaki katawan, eh kaso naging kamukha mo si jaiden",
     ],
   },
+
   {
     name: "bot",
     triggers: ["bot"],
@@ -64,17 +53,24 @@ const groups = [
       "ona bot na",
       "sige, on ko bot ko tapos deep talk kayo",
       "pumapalag ka pala sa bot e",
-      "deeptalk with jaiden and friends habang kinakantot ko sa backseat ate niya",
       "on mo lola mong bot",
-      "bot ko nga pala, nice to meet you raw",
       "kuha lang ako plato, tapos kain tayo kasama bot ko",
       "may bot pala?",
       "asan nga yung bot, kulit mo kalbo",
       "mamaya na, kausapin mo bot ko",
       "bilang ako mga 1 to 2 3 5 5 6 7 8 9 10 11 12 tapos mag on ako bot",
-      "aaahh moka ka bot nga"
-    ]
+      "aaahh moka ka bot nga",
+      "tangina, paulit-ulit",
+      "paulit-ulit ka ba?",
+      "bot ka nang bot, nagiging meme ka na",
+      "bobo, wala akong pake sa sinasabi mo",
+      "edi bot, kwento mo 'yan",
+      "eh walang bawi?",
+      "amoy basang aso tong kumag na 'to",
+      "puta, baho mo, layo ka nga",
+    ],
   },
+
   {
     name: "trash-talk",
     triggers: ["weak", "laro", "bubu", "sino yan"],
@@ -99,9 +95,10 @@ const groups = [
       "practice ka muna kahit kanina lang",
       "ano, tuloy mo pa yang tapang mo?",
       "maingay pero bano",
-      "cry me a river na lang beh"
-    ]
+      "cry me a river na lang beh",
+    ],
   },
+
   {
     name: "casual-comebacks",
     triggers: ["ano", "bakit", "sige"],
@@ -126,9 +123,10 @@ const groups = [
       "sige lang, push mo pa yan",
       "oo na lang para matapos na",
       "breath in, breath out lang idol",
-      "wala akong barya pambili ng pake mo"
-    ]
+      "wala akong barya pambili ng pake mo",
+    ],
   },
+
   {
     name: "one-liners",
     triggers: ["k", "lol", "haha", "o"],
@@ -148,9 +146,10 @@ const groups = [
       "hahahaha sige na nga",
       "ay wow",
       "grabe siya oh",
-      "wala man lang substance"
-    ]
+      "wala man lang substance",
+    ],
   },
+
   {
     name: "deflections",
     triggers: ["sino", "sino ka", "saan"],
@@ -170,32 +169,28 @@ const groups = [
       "bulong mo sa hangin",
       "tingin ka sa likod mo",
       "tanong mo sa star",
-      "basta ako, kumakain ng lumpia ngayon"
-    ]
-  }
+      "basta ako, kumakain ng lumpia ngayon",
+    ],
+  },
 ];
 
 function getTriggerReply(rawText, senderId) {
-  if (!rawText) return null;
+  if (!rawText) {
+    return null;
+  }
 
-  const text = rawText.toLowerCase();
+  const text = String(rawText).toLowerCase();
 
   for (const group of groups) {
-    if (
-      Object.prototype.hasOwnProperty.call(group, "onlySenderId") &&
-      (!group.onlySenderId ||
-        String(group.onlySenderId) !== String(senderId || ""))
-    ) {
-      continue;
-    }
-
     const hit = group.triggers.some((trigger) => {
-      if (trigger.includes(" ")) {
-        return text.includes(trigger);
+      const normalizedTrigger = String(trigger).toLowerCase();
+
+      if (normalizedTrigger.includes(" ")) {
+        return text.includes(normalizedTrigger);
       }
 
       const wordBoundary = new RegExp(
-        `\\b${escapeRegExp(trigger)}\\b`,
+        `\\b${escapeRegExp(normalizedTrigger)}\\b`,
         "i"
       );
 
@@ -203,11 +198,43 @@ function getTriggerReply(rawText, senderId) {
     });
 
     if (hit) {
-      const reply = group.replies[group.index];
-      group.index = (group.index + 1) % group.replies.length;
-      return reply;
+      return getNextReply(group);
     }
+  }
+
+  // If Jaiden sends a message without a trigger word,
+  // use the Jaiden roast group as a fallback.
+  const jaidenGroup = groups.find((group) => group.name === "jaiden");
+  const jaidenId = process.env.JAIDEN_ID || "";
+
+  if (
+    jaidenGroup &&
+    jaidenId &&
+    String(jaidenId) === String(senderId || "")
+  ) {
+    return getNextReply(jaidenGroup);
   }
 
   return null;
 }
+
+function getNextReply(group) {
+  if (!group || !Array.isArray(group.replies) || group.replies.length === 0) {
+    return null;
+  }
+
+  const reply = group.replies[group.index];
+
+  group.index = (group.index + 1) % group.replies.length;
+
+  return reply;
+}
+
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+module.exports = {
+  getTriggerReply,
+  groups,
+};
