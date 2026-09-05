@@ -1,14 +1,3 @@
-// Each group has:
-//  - triggers: words/phrases that activate this group (matched as whole words,
-//              case-insensitive; multi-word triggers matched as a substring)
-//  - replies: the preset lines, cycled in order (not random) — each new hit
-//             advances to the next line, wrapping back to the start after
-//             the last one
-//  - index: internal cursor, do not set manually
-//
-// Cycling is per-group and in-memory: it resets to 0 whenever the bot
-// restarts/redeploys (e.g. on every Render deploy).
-
 const groups = [
   {
     name: "bot",
@@ -33,8 +22,8 @@ const groups = [
       "asan nga yung bot, kulit mo kalbo",
       "mamaya na, kausapin mo bot ko",
       "bilang ako mga 1 to 2 3 5 5 6 7 8 9 10 11 12 tapos mag on ako bot",
-      "aaahh moka ka bot nga",
-    ],
+      "aaahh moka ka bot nga"
+    ]
   },
   {
     name: "trash-talk",
@@ -60,8 +49,8 @@ const groups = [
       "practice ka muna kahit kanina lang",
       "ano, tuloy mo pa yang tapang mo?",
       "maingay pero bano",
-      "cry me a river na lang beh",
-    ],
+      "cry me a river na lang beh"
+    ]
   },
   {
     name: "casual-comebacks",
@@ -87,8 +76,8 @@ const groups = [
       "sige lang, push mo pa yan",
       "oo na lang para matapos na",
       "breath in, breath out lang idol",
-      "wala akong barya pambili ng pake mo",
-    ],
+      "wala akong barya pambili ng pake mo"
+    ]
   },
   {
     name: "one-liners",
@@ -109,8 +98,8 @@ const groups = [
       "hahahaha sige na nga",
       "ay wow",
       "grabe siya oh",
-      "wala man lang substance",
-    ],
+      "wala man lang substance"
+    ]
   },
   {
     name: "deflections",
@@ -131,28 +120,27 @@ const groups = [
       "bulong mo sa hangin",
       "tingin ka sa likod mo",
       "tanong mo sa star",
-      "basta ako, kumakain ng lumpia ngayon",
-    ],
-  },
+      "basta ako, kumakain ng lumpia ngayon"
+    ]
+  }
 ];
 
-/**
- * Checks a lowercased message body against all groups and returns the next
- * cycled reply from the first matching group, or null if nothing matches.
- */
 function getTriggerReply(rawText) {
   if (!rawText) return null;
+
   const text = rawText.toLowerCase();
 
   for (const group of groups) {
     const hit = group.triggers.some((trigger) => {
       if (trigger.includes(" ")) {
-        // multi-word trigger: plain substring match
         return text.includes(trigger);
       }
-      // single-word trigger: whole-word match only, so "sige" doesn't
-      // fire inside "pasigenio" etc.
-      const wordBoundary = new RegExp(`\\b${escapeRegExp(trigger)}\\b`, "i");
+
+      const wordBoundary = new RegExp(
+        `\\b${escapeRegExp(trigger)}\\b`,
+        "i"
+      );
+
       return wordBoundary.test(text);
     });
 
@@ -170,4 +158,7 @@ function escapeRegExp(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-module.exports = { getTriggerReply, groups };
+module.exports = {
+  getTriggerReply,
+  groups
+};
