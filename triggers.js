@@ -1,8 +1,13 @@
 const groups = [
-  {
-    name: "jaiden",
-    triggers: ["jaiden"],
-    index: 0,
+
+    {
+  name: "jaiden",
+  triggers: ["jaiden"],
+
+  // Put Jaiden's sender ID in Render as JAIDEN_ID.
+  onlySenderId: process.env.JAIDEN_ID || null,
+
+  index: 0,
     replies: [
       "jaiden na naman",
       "jaiden, yung mukhang paa ba?",
