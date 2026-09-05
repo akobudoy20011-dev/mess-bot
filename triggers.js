@@ -176,18 +176,19 @@ const groups = [
 ];
 
 function getTriggerReply(rawText, senderId) {
-     if (
+  if (!rawText) return null;
+
+  const text = rawText.toLowerCase();
+
+  for (const group of groups) {
+    if (
       Object.prototype.hasOwnProperty.call(group, "onlySenderId") &&
       (!group.onlySenderId ||
         String(group.onlySenderId) !== String(senderId || ""))
     ) {
       continue;
     }
-    if (!rawText) return null;
 
-  const text = rawText.toLowerCase();
-
-  for (const group of groups) {
     const hit = group.triggers.some((trigger) => {
       if (trigger.includes(" ")) {
         return text.includes(trigger);
@@ -210,12 +211,3 @@ function getTriggerReply(rawText, senderId) {
 
   return null;
 }
-
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-module.exports = {
-  getTriggerReply,
-  groups
-};
