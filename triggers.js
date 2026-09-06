@@ -13,9 +13,9 @@ const groups = [
       "man everybody finna wish theyve seen this, yo brain is small as yo dick",
       "ngl, idc since i have a home, n yo big ass booty stays on the street of rome",
       "jaiden, yung mukhang paa ba?",
-      "ai nang ai tong utak kulugo na to", 
+      "ai nang ai tong utak kulugo na to",
       "mamaya ka na ulit mag kwento, jinajakol ako mama mo",
-      "while some people debate na its not a mental health disorder, marami pa rin nag o-opposed sa idea na 'yan but jaiden is a living proof that being gay is a mental illness", 
+      "while some people debate na its not a mental health disorder, marami pa rin nag o-opposed sa idea na 'yan but jaiden is a living proof that being gay is a mental illness",
       "yung pinanganak ka, tapos may extra package kasi kamukha mo yung airbender",
       "ano kaya thought process neto at puro bintang sakin?",
       "ate mo kinakain ko puke, nilagyan ko peanut",
@@ -106,7 +106,19 @@ const groups = [
 
   {
     name: "trash-talk",
-    triggers: ["weak", "laro", "tanginamo", " lala", "patawa", "gago", "bobo", "tanga", "HAHAHAAH ", "pake ko", "sino yan"],
+    triggers: [
+      "weak",
+      "laro",
+      "tanginamo",
+      " lala",
+      "patawa",
+      "gago",
+      "bobo",
+      "tanga",
+      "HAHAHAAH ",
+      "pake ko",
+      "sino yan",
+    ],
     index: 0,
     replies: [
       "lakas mo magsalita, tulog ka naman nung Clash",
@@ -208,33 +220,47 @@ const groups = [
       "basta ako, kumakain ng lumpia ngayon",
     ],
   },
+
+  {
+    name: "vincent",
+    triggers: ["og vincent", "øg vincent", "vincent"],
+    index: 0,
+    replies: [
+      "vincent na naman",
+      "vincent, tahimik ka muna",
+      "ayan na si vincent",
+      "'di valid opinion mo lalo't na ai abuser ka",
+      "kunware maniniwala ako sa sinabi mo",
+      "humulma ng katha under 2 mins hahahah aning moko baboy?",
+      "sige, deep talk kami ng ai mo",
+      "pake ko nga muna sa opinion mo?",
+      "angas, 100 percent chatgpt effort",
+      "copy paste mo ulit sa chatgpt",
+      "tanggalin ko freedom of speech mo baboy",
+      "aaaaaa pikon ka?",
+      "talk to dola, gemini, grok, or chatgpt",
+      "one bai one debate kayo ni ai mo",
+      "pake ko, akala neto may leverage siya eh ai abuser naman",
+      "vincent kailangan mo pa ba ng tutorial?",
+      "may sinabi ba si vincent?",
+    ],
+  },
+
+  {
+    name: "xeth",
+    triggers: ["xeth"],
+    index: 0,
+    replies: [
+      "xeth na naman",
+      "ayan na si xeth",
+      "xeth, kalma muna",
+      "may sinabi ba si xeth?",
+      "xeth kailangan mo pa ba ng tutorial?",
+      "tahimik ka muna, xeth",
+    ],
+  },
 ];
 
-{
-  name: "Øg vincent",
-  triggers: ["Øf vincent"],
-  index: 0,
-  replies: [
-    "alex na naman",
-    "alex, tahimik ka muna",
-    "ayan na si alex",
-    "'di valid opinion mo lalo't na ai abuser ka",
-    "kunware maniniwala ako sa sinabi mo",
-    "humulma ng katha under 2 mins hahahah aning moko baboy?",
-    "sige, deep talk kami ng ai mo",
-    "pake ko nga muna sa opinion mo?",
-    "angas, 100 percent chatgpt effort",
-    "copy paste mo ulit sa chatgpt",
-    "tanggalin ko freedom of speech mo baboy",
-    "aaaaaa pikon ka?",
-    "talk to dola, gemini, grok, or chatgpt",
-    "one bai one debate kayo ni ai mo",
-    "pake ko, akala neto may leverage siya eh ai abuser naman",
-    "alex kailangan mo pa ba ng tutorial?",
-    "may sinabi ba si alex?",
-  ],
-},
-    
 function getTriggerReply(rawText, senderId) {
   if (!rawText) {
     return null;
@@ -263,17 +289,40 @@ function getTriggerReply(rawText, senderId) {
     }
   }
 
-  // If Jaiden sends a message without a trigger word,
-  // use the Jaiden roast group as a fallback.
-  const jaidenGroup = groups.find((group) => group.name === "jaiden");
-  const jaidenId = process.env.JAIDEN_ID || "";
+  // Jaiden keeps working through JAIDEN_ID.
+  // Additional targets use:
+  // ROAST_TARGET_IDS=vincent:123456789,xeth:987654321
+  const roastTargets = {};
 
-  if (
-    jaidenGroup &&
-    jaidenId &&
-    String(jaidenId) === String(senderId || "")
-  ) {
-    return getNextReply(jaidenGroup);
+  if (process.env.JAIDEN_ID) {
+    roastTargets.jaiden = process.env.JAIDEN_ID;
+  }
+
+  for (const entry of (process.env.ROAST_TARGET_IDS || "").split(",")) {
+    const separatorIndex = entry.indexOf(":");
+
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    const groupName = entry.slice(0, separatorIndex).trim().toLowerCase();
+    const targetId = entry.slice(separatorIndex + 1).trim();
+
+    if (groupName && targetId) {
+      roastTargets[groupName] = targetId;
+    }
+  }
+
+  for (const [groupName, targetId] of Object.entries(roastTargets)) {
+    if (String(targetId) === String(senderId || "")) {
+      const targetGroup = groups.find(
+        (group) => group.name === groupName
+      );
+
+      if (targetGroup) {
+        return getNextReply(targetGroup);
+      }
+    }
   }
 
   return null;
