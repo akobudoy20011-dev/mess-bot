@@ -79,12 +79,15 @@ const groups = [
 
   {
     name: "trash-talk",
-    triggers: ["weak", "laro", "tanginamo", "gago", "bobo", "tanga", "HAHAHAAH ", "pake ko", "sino yan"],
+    triggers: ["weak", "laro", "tanginamo", " lala", "patawa", "gago", "bobo", "tanga", "HAHAHAAH ", "pake ko", "sino yan"],
     index: 0,
     replies: [
       "lakas mo magsalita, tulog ka naman nung Clash",
       "pabuhat ka pa rin hanggang ngayon bro",
       "umiyak ka na lang sa gilid",
+      "lalers netong kumag na to",
+      "bigyan niyo nga to piso, puta na pulubi tambay sa gc enoh?",
+      "makipag-talk a lot ka sa lolo mong patay na",
       "maingay lang sa chat pero bano sa laro",
       "brush ka muna ng ngipin bago ka mag-chat",
       "puro ka daldal, minus ka naman sa points",
