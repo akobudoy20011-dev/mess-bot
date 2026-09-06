@@ -210,6 +210,31 @@ const groups = [
   },
 ];
 
+{
+  name: "Øg vincent",
+  triggers: ["Øf vincent"],
+  index: 0,
+  replies: [
+    "alex na naman",
+    "alex, tahimik ka muna",
+    "ayan na si alex",
+    "'di valid opinion mo lalo't na ai abuser ka",
+    "kunware maniniwala ako sa sinabi mo",
+    "humulma ng katha under 2 mins hahahah aning moko baboy?",
+    "sige, deep talk kami ng ai mo",
+    "pake ko nga muna sa opinion mo?",
+    "angas, 100 percent chatgpt effort",
+    "copy paste mo ulit sa chatgpt",
+    "tanggalin ko freedom of speech mo baboy",
+    "aaaaaa pikon ka?",
+    "talk to dola, gemini, grok, or chatgpt",
+    "one bai one debate kayo ni ai mo",
+    "pake ko, akala neto may leverage siya eh ai abuser naman",
+    "alex kailangan mo pa ba ng tutorial?",
+    "may sinabi ba si alex?",
+  ],
+},
+    
 function getTriggerReply(rawText, senderId) {
   if (!rawText) {
     return null;
