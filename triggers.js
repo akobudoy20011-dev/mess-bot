@@ -7,6 +7,12 @@ const groups = [
       "jaiden na naman",
       "jaiden, yung mukhang paa ba?",
       "la, jaiden ulit",
+      "kinakantot ko ate mo sa backseat",
+      "geh geh kwento ka lang habang jinajakol moko",
+      "g na g mag talk a lot e wala naman akong pake",
+      "tito mong daga mukhang nilaga",
+      "ttkels lang kita",
+      "si jaiden nasa kmjs, title e batang pinaglihi sa burat",
       "kelan kaya map-phase out kagaya ni jaiden?",
       "si jaiden nakita ko nakatambay sa grinder e",
       "jaiden and his broke boys era",
@@ -73,7 +79,7 @@ const groups = [
 
   {
     name: "trash-talk",
-    triggers: ["weak", "laro", "bubu", "sino yan"],
+    triggers: ["weak", "laro", "tanginamo", "gago", "bobo", "tanga", "HAHAHAAH ", "pake ko", "sino yan"],
     index: 0,
     replies: [
       "lakas mo magsalita, tulog ka naman nung Clash",
@@ -101,7 +107,7 @@ const groups = [
 
   {
     name: "casual-comebacks",
-    triggers: ["ano", "bakit", "sige"],
+    triggers: ["ano", "sino ba", "ano na naman", "weh", "bakit", "sige"],
     index: 0,
     replies: [
       "bat ka galit? kain ka muna lugaw",
