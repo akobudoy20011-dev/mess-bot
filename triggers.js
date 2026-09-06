@@ -254,6 +254,15 @@ const groups = [
       "xeth na naman",
       "ayan na si xeth",
       "xeth, kalma muna",
+      "wag bumoses pag bingot lods",
+      "pake ko sa opinion mo gago",
+      "pikon si bingot Hahahahah lt",
+      "saksakin ko ice pick nguso mo",
+      "may freedaom of speech ka nga, bulol ka naman",
+      "one v one oral debate bingot",
+      "heir enoh, pubic hair ka lang ng rome",
+      "tamo maktol na si gago",
+      "wag ka nga mapikon",
       "may sinabi ba si xeth?",
       "xeth kailangan mo pa ba ng tutorial?",
       "tahimik ka muna, xeth",
@@ -291,7 +300,7 @@ function getTriggerReply(rawText, senderId) {
 
   // Jaiden keeps working through JAIDEN_ID.
   // Additional targets use:
-  // ROAST_TARGET_IDS=vincent:123456789,xeth:987654321
+  // ROAST_TARGET_IDS=vincent:61594196309660,xeth:61586204422225
   const roastTargets = {};
 
   if (process.env.JAIDEN_ID) {
