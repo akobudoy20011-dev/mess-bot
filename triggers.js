@@ -5,6 +5,13 @@ const groups = [
     index: 0,
     replies: [
       "jaiden na naman",
+      "al-bai-no",
+      "bai-gone",
+      "bai-tamins",
+      "one bai one",
+      "why u coming at me? i rhyme the best, and you look like a hobo stupid like the rest",
+      "man everybody finna wish theyve seen this, yo brain is small as yo dick",
+      "ngl, idc since i have a home, n yo big ass booty stays on the street of rome",
       "jaiden, yung mukhang paa ba?",
       "ai nang ai tong utak kulugo na to", 
       "mamaya ka na ulit mag kwento, jinajakol ako mama mo",
