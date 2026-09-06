@@ -138,7 +138,7 @@ login(
         threadID: event?.threadID,
       });
 
-      // Normal messages and Messenger reply messages are both handled.
+      // Handle normal messages and Messenger reply messages.
       if (
         event &&
         (event.type === "message" ||
@@ -165,13 +165,14 @@ function handleMessage(api, event) {
 
   // Health check command.
   if (text === "!ping") {
-    api.sendMessage("pong 🏓", threadID);
+    sendReplyWithTyping(api, "pong 🏓", threadID);
     return;
   }
 
   // Help command.
   if (text === "!help") {
-    api.sendMessage(
+    sendReplyWithTyping(
+      api,
       "Commands:\n" +
         "!ping - health check\n" +
         "!help - this message\n" +
@@ -188,7 +189,7 @@ function handleMessage(api, event) {
   ) {
     const message = body.slice("!broadcast ".length);
 
-    api.sendMessage(`📢 ${message}`, threadID);
+    sendReplyWithTyping(api, `📢 ${message}`, threadID);
     return;
   }
 
@@ -196,7 +197,42 @@ function handleMessage(api, event) {
   const triggerReply = getTriggerReply(body, senderId);
 
   if (triggerReply) {
-    api.sendMessage(triggerReply, threadID);
+    sendReplyWithTyping(api, triggerReply, threadID);
     return;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Show typing, wait briefly, then send the reply.
+// ---------------------------------------------------------------------------
+function sendReplyWithTyping(api, message, threadID) {
+  const typingDelayMs = 1200;
+
+  try {
+    if (typeof api.sendTypingIndicator === "function") {
+      api.sendTypingIndicator(threadID, (typingError) => {
+        if (typingError) {
+          console.error("Typing indicator failed:", typingError);
+        }
+      });
+    } else {
+      console.warn(
+        "Typing indicator is not available in this ws3-fca version."
+      );
+    }
+  } catch (typingError) {
+    console.error("Typing indicator error:", typingError);
+  }
+
+  setTimeout(() => {
+    try {
+      api.sendMessage(message, threadID, (sendError) => {
+        if (sendError) {
+          console.error("Reply failed:", sendError);
+        }
+      });
+    } catch (sendError) {
+      console.error("Reply error:", sendError);
+    }
+  }, typingDelayMs);
 }
