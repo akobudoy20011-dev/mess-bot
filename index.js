@@ -1,5 +1,7 @@
 const { login } = require("ws3-fca");
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 const { getTriggerReply } = require("./triggers");
 
 // ---------------------------------------------------------------------------
@@ -30,7 +32,6 @@ function readAppState() {
   try {
     parsed = JSON.parse(rawCookies);
 
-    // Accept cookies that were accidentally JSON-stringified twice.
     if (typeof parsed === "string") {
       parsed = JSON.parse(parsed);
     }
@@ -46,7 +47,6 @@ function readAppState() {
     );
   }
 
-  // Some cookie exporters use "name"; ws3-fca expects "key".
   const normalizedCookies = parsed.map((cookie) => ({
     ...cookie,
     key: typeof cookie.key === "string" ? cookie.key : cookie.name,
@@ -105,12 +105,9 @@ login(
 
     api.setOptions({
       listenEvents: true,
-
-      // Prevents the bot from reacting to its own messages.
       selfListen: false,
     });
 
-    // Optional startup message.
     if (process.env.STARTUP_THREAD_ID) {
       Promise.resolve(
         api.sendMessage(
@@ -138,7 +135,6 @@ login(
         threadID: event?.threadID,
       });
 
-      // Handle normal messages and Messenger reply messages.
       if (
         event &&
         (event.type === "message" ||
@@ -163,13 +159,11 @@ function handleMessage(api, event) {
   const text = body.trim().toLowerCase();
   const senderId = String(senderID || "");
 
-  // Health check command.
   if (text === "!ping") {
     sendReplyWithTyping(api, "pong 🏓", threadID);
     return;
   }
 
-  // Help command.
   if (text === "!help") {
     sendReplyWithTyping(
       api,
@@ -182,7 +176,6 @@ function handleMessage(api, event) {
     return;
   }
 
-  // Admin-only command.
   if (
     text.startsWith("!broadcast ") &&
     ADMIN_IDS.includes(senderId)
@@ -194,18 +187,65 @@ function handleMessage(api, event) {
   }
 
   // Everyone can trigger the roast replies.
+  // Roast replies also receive a random meme from the memes folder.
   const triggerReply = getTriggerReply(body, senderId);
 
   if (triggerReply) {
-    sendReplyWithTyping(api, triggerReply, threadID);
+    sendReplyWithTyping(api, triggerReply, threadID, true);
     return;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Show typing, wait briefly, then send the reply.
+// Select a random image from the memes folder.
 // ---------------------------------------------------------------------------
-function sendReplyWithTyping(api, message, threadID) {
+function getRandomMemePath() {
+  const memeDirectory = path.join(__dirname, "memes");
+
+  const supportedExtensions = new Set([
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+  ]);
+
+  try {
+    if (!fs.existsSync(memeDirectory)) {
+      return null;
+    }
+
+    const memeFiles = fs
+      .readdirSync(memeDirectory)
+      .filter((fileName) =>
+        supportedExtensions.has(
+          path.extname(fileName).toLowerCase()
+        )
+      );
+
+    if (memeFiles.length === 0) {
+      return null;
+    }
+
+    const randomFile =
+      memeFiles[Math.floor(Math.random() * memeFiles.length)];
+
+    return path.join(memeDirectory, randomFile);
+  } catch (error) {
+    console.error("Could not load memes:", error);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Show typing, then send the message and optional meme.
+// ---------------------------------------------------------------------------
+function sendReplyWithTyping(
+  api,
+  message,
+  threadID,
+  attachMeme = false
+) {
   const typingDelayMs = 1200;
 
   try {
@@ -226,11 +266,26 @@ function sendReplyWithTyping(api, message, threadID) {
 
   setTimeout(() => {
     try {
-      api.sendMessage(message, threadID, (sendError) => {
-        if (sendError) {
-          console.error("Reply failed:", sendError);
+      const memePath = attachMeme
+        ? getRandomMemePath()
+        : null;
+
+      const outgoingMessage = memePath
+        ? {
+            body: message,
+            attachment: fs.createReadStream(memePath),
+          }
+        : message;
+
+      api.sendMessage(
+        outgoingMessage,
+        threadID,
+        (sendError) => {
+          if (sendError) {
+            console.error("Reply failed:", sendError);
+          }
         }
-      });
+      );
     } catch (sendError) {
       console.error("Reply error:", sendError);
     }
