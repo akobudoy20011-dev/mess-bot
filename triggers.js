@@ -259,7 +259,7 @@ const groups = [
       "hula mo sino ope sa ruby",
       "aning na sa ope",
       "mukha kang minudo",
-      "deduce mo lahat ng available possibilities na autistic na may down syndrome si aselm, pero pag inapply mo yung empirical basis dito wala e, autistic na may down syndrome lalabas”,
+      "deduce mo lahat ng available possibilities na autistic na may down syndrome si aselm, pero pag inapply mo yung empirical basis dito wala e, autistic na may down syndrome lalabas",
       "party acc to, wag ka maktol",
       "diko sinabi mag dabog ka",
       "copy paste ko na lang 'to",
@@ -298,8 +298,7 @@ function getTriggerReply(rawText, senderId) {
     }
   }
 
-  // Jaiden keeps working through JAIDEN_ID.
-  // Vincent and Xeth can use VINCENT_ID and XETH_ID.
+  // Jaiden, Vincent, Aselm, and Xeth can use their matching *_ID variable.
   // ROAST_TARGET_IDS can also be used for additional targets.
   const roastTargets = {};
 
@@ -312,7 +311,12 @@ function getTriggerReply(rawText, senderId) {
   }
 
   if (process.env.ASELM_ID) {
-    roastTargets.ASELM = process.env.ASELM_ID;
+    roastTargets.aselm = process.env.ASELM_ID;
+  }
+
+  // Keep the old XETH_ID option working if it is still present in Render.
+  if (process.env.XETH_ID) {
+    roastTargets.xeth = process.env.XETH_ID;
   }
 
   for (const entry of (process.env.ROAST_TARGET_IDS || "").split(",")) {
@@ -338,9 +342,7 @@ function getTriggerReply(rawText, senderId) {
 
   for (const [groupName, targetId] of Object.entries(roastTargets)) {
     if (String(targetId) === String(senderId || "")) {
-      const targetGroup = groups.find(
-        (group) => group.name === groupName
-      );
+      const targetGroup = groups.find((group) => group.name === groupName);
 
       if (targetGroup) {
         return getNextReply(targetGroup);
@@ -349,6 +351,24 @@ function getTriggerReply(rawText, senderId) {
   }
 
   return null;
+}
+
+function getRandomRoastReply() {
+  // Only use generic groups here. Name-specific groups should remain tied to
+  // their trigger or configured target ID.
+  const genericRoastGroups = groups.filter((group) =>
+    ["trash-talk"].includes(group.name)
+  );
+
+  const replies = genericRoastGroups.flatMap((group) =>
+    Array.isArray(group.replies) ? group.replies : []
+  );
+
+  if (replies.length === 0) {
+    return null;
+  }
+
+  return replies[Math.floor(Math.random() * replies.length)];
 }
 
 function getNextReply(group) {
@@ -374,5 +394,6 @@ function escapeRegExp(str) {
 
 module.exports = {
   getTriggerReply,
+  getRandomRoastReply,
   groups,
 };
