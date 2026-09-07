@@ -270,12 +270,27 @@ const groups = [
   },
 ];
 
+// Jeø uses the same roast list as Jaiden, with the name changed.
+const jaidenGroupForJeo = groups.find((group) => group.name === "jaiden");
+
+if (jaidenGroupForJeo) {
+  groups.push({
+    name: "jeo",
+    triggers: ["jeø", "jeo"],
+    index: 0,
+    replies: jaidenGroupForJeo.replies.map((reply) =>
+      reply.replace(/\bjaiden\b/gi, "Jeø")
+    ),
+  });
+}
+
 function getTriggerReply(rawText, senderId) {
   if (!rawText) {
     return null;
   }
 
   const text = String(rawText).toLowerCase();
+  const normalizedSenderId = normalizeId(senderId);
 
   for (const group of groups) {
     const hit = group.triggers.some((trigger) => {
@@ -283,6 +298,18 @@ function getTriggerReply(rawText, senderId) {
 
       if (normalizedTrigger.includes(" ")) {
         return text.includes(normalizedTrigger);
+      }
+
+      // JavaScript's \b does not handle the ø character correctly.
+      if (/[^\x00-\x7F]/.test(normalizedTrigger)) {
+        const unicodeBoundary = new RegExp(
+          `(?:^|[^\\p{L}\\p{N}_])${escapeRegExp(
+            normalizedTrigger
+          )}(?=$|[^\\p{L}\\p{N}_])`,
+          "iu"
+        );
+
+        return unicodeBoundary.test(text);
       }
 
       const wordBoundary = new RegExp(
@@ -298,25 +325,29 @@ function getTriggerReply(rawText, senderId) {
     }
   }
 
-  // Jaiden, Vincent, Aselm, and Xeth can use their matching *_ID variable.
+  // Jaiden, Jeø, Vincent, Aselm, and Xeth can use their matching *_ID variable.
   // ROAST_TARGET_IDS can also be used for additional targets.
   const roastTargets = {};
 
   if (process.env.JAIDEN_ID) {
-    roastTargets.jaiden = process.env.JAIDEN_ID;
+    roastTargets.jaiden = normalizeId(process.env.JAIDEN_ID);
   }
 
   if (process.env.VINCENT_ID) {
-    roastTargets.vincent = process.env.VINCENT_ID;
+    roastTargets.vincent = normalizeId(process.env.VINCENT_ID);
   }
 
   if (process.env.ASELM_ID) {
-    roastTargets.aselm = process.env.ASELM_ID;
+    roastTargets.aselm = normalizeId(process.env.ASELM_ID);
+  }
+
+  if (process.env.JEO_ID) {
+    roastTargets.jeo = normalizeId(process.env.JEO_ID);
   }
 
   // Keep the old XETH_ID option working if it is still present in Render.
   if (process.env.XETH_ID) {
-    roastTargets.xeth = process.env.XETH_ID;
+    roastTargets.xeth = normalizeId(process.env.XETH_ID);
   }
 
   for (const entry of (process.env.ROAST_TARGET_IDS || "").split(",")) {
@@ -331,9 +362,9 @@ function getTriggerReply(rawText, senderId) {
       .trim()
       .toLowerCase();
 
-    const targetId = entry
-      .slice(separatorIndex + 1)
-      .trim();
+    const targetId = normalizeId(
+      entry.slice(separatorIndex + 1)
+    );
 
     if (groupName && targetId) {
       roastTargets[groupName] = targetId;
@@ -341,7 +372,7 @@ function getTriggerReply(rawText, senderId) {
   }
 
   for (const [groupName, targetId] of Object.entries(roastTargets)) {
-    if (String(targetId) === String(senderId || "")) {
+    if (normalizeId(targetId) === normalizedSenderId) {
       const targetGroup = groups.find((group) => group.name === groupName);
 
       if (targetGroup) {
@@ -353,8 +384,14 @@ function getTriggerReply(rawText, senderId) {
   return null;
 }
 
+function normalizeId(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^["']|["']$/g, "");
+}
+
 function getRandomRoastReply() {
-  // Only use generic groups here. Name-specific groups should remain tied to
+  // Only use generic groups here. Name-specific groups stay tied to
   // their trigger or configured target ID.
   const genericRoastGroups = groups.filter((group) =>
     ["trash-talk"].includes(group.name)
