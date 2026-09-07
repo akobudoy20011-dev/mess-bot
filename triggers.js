@@ -254,15 +254,6 @@ const groups = [
       "xeth na naman",
       "ayan na si xeth",
       "xeth, kalma muna",
-      "wag bumoses pag bingot lods",
-      "pake ko sa opinion mo gago",
-      "pikon si bingot Hahahahah lt",
-      "saksakin ko ice pick nguso mo",
-      "may freedaom of speech ka nga, bulol ka naman",
-      "one v one oral debate bingot",
-      "heir enoh, pubic hair ka lang ng rome",
-      "tamo maktol na si gago",
-      "wag ka nga mapikon",
       "may sinabi ba si xeth?",
       "xeth kailangan mo pa ba ng tutorial?",
       "tahimik ka muna, xeth",
@@ -299,12 +290,20 @@ function getTriggerReply(rawText, senderId) {
   }
 
   // Jaiden keeps working through JAIDEN_ID.
-  // Additional targets use:
-  // ROAST_TARGET_IDS=vincent:61594196309660,xeth:61586204422225
+  // Vincent and Xeth can use VINCENT_ID and XETH_ID.
+  // ROAST_TARGET_IDS can also be used for additional targets.
   const roastTargets = {};
 
   if (process.env.JAIDEN_ID) {
     roastTargets.jaiden = process.env.JAIDEN_ID;
+  }
+
+  if (process.env.VINCENT_ID) {
+    roastTargets.vincent = process.env.VINCENT_ID;
+  }
+
+  if (process.env.XETH_ID) {
+    roastTargets.xeth = process.env.XETH_ID;
   }
 
   for (const entry of (process.env.ROAST_TARGET_IDS || "").split(",")) {
@@ -314,8 +313,14 @@ function getTriggerReply(rawText, senderId) {
       continue;
     }
 
-    const groupName = entry.slice(0, separatorIndex).trim().toLowerCase();
-    const targetId = entry.slice(separatorIndex + 1).trim();
+    const groupName = entry
+      .slice(0, separatorIndex)
+      .trim()
+      .toLowerCase();
+
+    const targetId = entry
+      .slice(separatorIndex + 1)
+      .trim();
 
     if (groupName && targetId) {
       roastTargets[groupName] = targetId;
@@ -338,13 +343,18 @@ function getTriggerReply(rawText, senderId) {
 }
 
 function getNextReply(group) {
-  if (!group || !Array.isArray(group.replies) || group.replies.length === 0) {
+  if (
+    !group ||
+    !Array.isArray(group.replies) ||
+    group.replies.length === 0
+  ) {
     return null;
   }
 
   const reply = group.replies[group.index];
 
-  group.index = (group.index + 1) % group.replies.length;
+  group.index =
+    (group.index + 1) % group.replies.length;
 
   return reply;
 }
