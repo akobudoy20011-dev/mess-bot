@@ -2,7 +2,10 @@ const { login } = require("ws3-fca");
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const { getTriggerReply } = require("./triggers");
+const {
+  getTriggerReply,
+  getRandomRoastReply,
+} = require("./triggers");
 
 // ---------------------------------------------------------------------------
 // Tiny web server so Render sees an open port and keeps the service alive.
@@ -83,6 +86,24 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .split(",")
   .map((id) => id.trim())
   .filter(Boolean);
+
+// Optional no-trigger roast mode. Keep this probabilistic and rate-limited so
+// the bot does not reply to every single message in a busy group chat.
+const RANDOM_ROAST_ENABLED = /^(1|true|yes|on)$/i.test(
+  process.env.RANDOM_ROAST || ""
+);
+
+const RANDOM_ROAST_CHANCE = Math.max(
+  0,
+  Math.min(1, Number(process.env.RANDOM_ROAST_CHANCE || "0.1"))
+);
+
+const RANDOM_ROAST_COOLDOWN_MS = Math.max(
+  0,
+  Number(process.env.RANDOM_ROAST_COOLDOWN_MS || "30000")
+);
+
+const lastRandomRoastByThread = new Map();
 
 // ---------------------------------------------------------------------------
 // Log in to Facebook.
@@ -194,6 +215,42 @@ function handleMessage(api, event) {
     sendReplyWithTyping(api, triggerReply, threadID, true);
     return;
   }
+
+  // No trigger word is needed when RANDOM_ROAST is enabled in Render.
+  // Commands above are intentionally excluded from this random mode.
+  if (
+    RANDOM_ROAST_ENABLED &&
+    Math.random() < RANDOM_ROAST_CHANCE &&
+    canRandomRoastThread(threadID)
+  ) {
+    const randomRoast = getRandomRoastReply();
+
+    if (randomRoast) {
+      lastRandomRoastByThread.set(threadID, Date.now());
+
+      // true keeps the random meme attached to the roast.
+      sendReplyWithTyping(api, randomRoast, threadID, true);
+    }
+  }
+}
+
+function canRandomRoastThread(threadID) {
+  const lastRoastAt = lastRandomRoastByThread.get(threadID) || 0;
+
+  if (Date.now() - lastRoastAt < RANDOM_ROAST_COOLDOWN_MS) {
+    return false;
+  }
+
+  // Prevent unbounded memory growth if the bot sees many one-off threads.
+  if (lastRandomRoastByThread.size > 1000) {
+    for (const [knownThreadID, roastAt] of lastRandomRoastByThread) {
+      if (Date.now() - roastAt > RANDOM_ROAST_COOLDOWN_MS * 2) {
+        lastRandomRoastByThread.delete(knownThreadID);
+      }
+    }
+  }
+
+  return true;
 }
 
 // ---------------------------------------------------------------------------
