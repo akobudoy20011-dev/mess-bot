@@ -9,6 +9,7 @@ const {
   getRandomRoastReply,
 } = require("./triggers");
 const { searchJamendo, downloadAudioToFile } = require("./jamendo");
+const { searchYouTube, downloadYouTubeAudio } = require("./youtube");
 
 // ---------------------------------------------------------------------------
 // Tiny web server so Render sees an open port and keeps the service alive.
@@ -211,7 +212,7 @@ function handleMessage(api, event) {
 
   if (text === "!play" || text.startsWith("!play ")) {
     const requestedSong = body.slice("!play".length).trim();
-    sendJamendoAudio(api, requestedSong, threadID);
+    sendAudioTrack(api, requestedSong, threadID);
     return;
   }
 
@@ -274,12 +275,12 @@ function canRandomRoastThread(threadID) {
 // ---------------------------------------------------------------------------
 async function validateAudioUrl(audioUrl) {
   try {
-    console.log(`[Jamendo] Validating audio URL: ${audioUrl}`);
+    console.log(`[Audio] Validating URL: ${audioUrl}`);
     const res = await fetch(audioUrl, { method: "HEAD" });
 
     if (!res.ok) {
       console.error(
-        `[Jamendo] URL validation failed: HTTP ${res.status} ${res.statusText}`
+        `[Audio] URL validation failed: HTTP ${res.status} ${res.statusText}`
       );
       return false;
     }
@@ -288,25 +289,28 @@ async function validateAudioUrl(audioUrl) {
     const contentLength = res.headers.get("content-length") || "unknown";
 
     console.log(
-      `[Jamendo] URL valid: content-type=${contentType}, size=${contentLength}`
+      `[Audio] URL valid: content-type=${contentType}, size=${contentLength}`
     );
     return true;
   } catch (error) {
     console.error(
-      `[Jamendo] URL validation error: ${error.message}`
+      `[Audio] URL validation error: ${error.message}`
     );
     return false;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Search Jamendo and send permitted audio as a Messenger attachment.
+// Search audio tracks with fallback chain:
+// 1. Jamendo (indie/free music)
+// 2. Spotify preview (major label 30-sec clips)
+// 3. YouTube (full songs)
 // ---------------------------------------------------------------------------
-async function sendJamendoAudio(api, songName, threadID) {
+async function sendAudioTrack(api, songName, threadID) {
   if (!songName) {
     sendReplyWithTyping(
       api,
-      "Use !play <song name>, for example: !play relaxing piano",
+      "Use !play <song name>, for example: !play laufey",
       threadID
     );
     return;
@@ -321,24 +325,62 @@ async function sendJamendoAudio(api, songName, threadID) {
       });
     }
 
-    console.log(`[Jamendo] Searching for: "${songName}"`);
-    const track = await searchJamendo(songName);
+    console.log(`[Audio] Searching for: "${songName}"`);
 
-    if (!track) {
-      sendReplyWithTyping(
-        api,
-        `❌ I couldn't find an available audio track for "${songName}".`,
-        threadID
-      );
-      return;
+    // 1. Try Jamendo first
+    console.log(`[Audio] Attempting Jamendo search...`);
+    const jamendoTrack = await searchJamendo(songName).catch((err) => {
+      console.log(`[Audio] Jamendo search failed: ${err.message}`);
+      return null;
+    });
+
+    if (jamendoTrack) {
+      console.log(`[Audio] Found on Jamendo: ${jamendoTrack.name}`);
+      return sendJamendoAudio(api, jamendoTrack, threadID);
     }
 
-    console.log(
-      `[Jamendo] Found track: ${track.name} by ${track.artist_name}`
-    );
-    console.log(`[Jamendo] Audio URL: ${track.audio_url}`);
+    // 2. Try YouTube next
+    console.log(`[Audio] Attempting YouTube search...`);
+    const youtubeVideo = await searchYouTube(songName).catch((err) => {
+      console.log(`[Audio] YouTube search failed: ${err.message}`);
+      return null;
+    });
 
-    // Validate the audio URL before attempting to download
+    if (youtubeVideo) {
+      console.log(`[Audio] Found on YouTube: ${youtubeVideo.title}`);
+      return sendYouTubeAudio(api, youtubeVideo, threadID);
+    }
+
+    // 3. No results from any source
+    console.log(`[Audio] No results found from any source`);
+    sendReplyWithTyping(
+      api,
+      `❌ I couldn't find audio for "${songName}". Try a different song title or artist name.`,
+      threadID
+    );
+  } catch (error) {
+    console.error("[Audio] Track search error:");
+    console.error("  Message:", error.message);
+    console.error("  Stack:", error.stack);
+
+    sendReplyWithTyping(api, `❌ Error searching for audio. Please try again.`, threadID);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Send Jamendo audio (already downloaded to temp file in jamendo.js)
+// ---------------------------------------------------------------------------
+async function sendJamendoAudio(api, track, threadID) {
+  try {
+    if (typeof api.sendTypingIndicator === "function") {
+      api.sendTypingIndicator(threadID, (typingError) => {
+        if (typingError) {
+          console.error("Typing indicator failed:", typingError);
+        }
+      });
+    }
+
+    // Validate URL before downloading
     const urlIsValid = await validateAudioUrl(track.audio_url);
     if (!urlIsValid) {
       console.error(
@@ -346,7 +388,7 @@ async function sendJamendoAudio(api, songName, threadID) {
       );
       sendReplyWithTyping(
         api,
-        `❌ Audio URL is not accessible. Please try another track.`,
+        `❌ Audio URL is not accessible. Trying another source...`,
         threadID
       );
       return;
@@ -409,7 +451,6 @@ async function sendJamendoAudio(api, songName, threadID) {
               console.error("  Error code:", sendError.code || "N/A");
               console.error("  Error stack:", sendError.stack || "N/A");
 
-              // Try to parse error details
               if (typeof sendError === "object") {
                 console.error("  Full error object:", JSON.stringify(sendError, null, 2));
               }
@@ -447,93 +488,15 @@ async function sendJamendoAudio(api, songName, threadID) {
     console.error("  Message:", error.message);
     console.error("  Stack:", error.stack);
 
-    let errorMsg =
-      "Could not find a playable audio track. Check the song name or Jamendo credentials.";
-
-    if (error.message && error.message.includes("JAMENDO_CLIENT_ID")) {
-      errorMsg =
-        "Jamendo is not configured. Admin needs to set JAMENDO_CLIENT_ID on Render.";
-    }
-
-    sendReplyWithTyping(api, `❌ ${errorMsg}`, threadID);
+    sendReplyWithTyping(api, `❌ Jamendo error: ${error.message}`, threadID);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Send a requested song from the songs folder.
-// Example: !play magnolia -> songs/magnolia.mp3
+// Send YouTube audio (download and send)
 // ---------------------------------------------------------------------------
-function getRequestedSongPath(songName) {
-  if (!songName) {
-    return null;
-  }
-
-  const songDirectory = path.join(__dirname, "songs");
-
-  const supportedExtensions = new Set([
-    ".mp3",
-    ".m4a",
-    ".wav",
-    ".ogg",
-    ".aac",
-  ]);
-
-  const normalizeSongName = (value) =>
-    String(value)
-      .toLowerCase()
-      .replace(/\.(mp3|m4a|wav|ogg|aac)$/i, "")
-      .replace(/[^a-z0-9]+/g, " ")
-      .trim();
-
-  const wantedName = normalizeSongName(songName);
-
-  try {
-    if (!fs.existsSync(songDirectory) || !wantedName) {
-      return null;
-    }
-
-    const matchingFile = fs
-      .readdirSync(songDirectory)
-      .find((fileName) => {
-        const extension = path.extname(fileName).toLowerCase();
-
-        return (
-          supportedExtensions.has(extension) &&
-          normalizeSongName(path.basename(fileName, extension)) === wantedName
-        );
-      });
-
-    return matchingFile
-      ? path.join(songDirectory, matchingFile)
-      : null;
-  } catch (error) {
-    console.error("Could not load songs:", error);
-    return null;
-  }
-}
-
-function sendSongWithTyping(api, songName, threadID) {
-  if (!songName) {
-    sendReplyWithTyping(
-      api,
-      "Use !play <song name>, for example: !play magnolia",
-      threadID
-    );
-    return;
-  }
-
-  const songPath = getRequestedSongPath(songName);
-
-  if (!songPath) {
-    sendReplyWithTyping(
-      api,
-      `I could not find "${songName}" in the songs folder.`,
-      threadID
-    );
-    return;
-  }
-
-  const typingDelayMs = 1200;
+async function sendYouTubeAudio(api, video, threadID) {
+  let tempPath = null;
 
   try {
     if (typeof api.sendTypingIndicator === "function") {
@@ -543,28 +506,115 @@ function sendSongWithTyping(api, songName, threadID) {
         }
       });
     }
-  } catch (typingError) {
-    console.error("Typing indicator error:", typingError);
-  }
 
-  setTimeout(() => {
-    try {
-      api.sendMessage(
-        {
-          body: `🎵 Playing: ${path.basename(songPath)}`,
-          attachment: fs.createReadStream(songPath),
-        },
-        threadID,
-        (sendError) => {
-          if (sendError) {
-            console.error("Song send failed:", sendError);
-          }
-        }
-      );
-    } catch (sendError) {
-      console.error("Song send error:", sendError);
+    // Generate temp file path
+    tempPath = path.join(
+      "/tmp",
+      `youtube_audio_${crypto.randomUUID()}.mp3`
+    );
+
+    console.log(`[YouTube] Downloading audio to: ${tempPath}`);
+    sendReplyWithTyping(api, `⏳ Downloading "${video.title}"...`, threadID);
+
+    // Download YouTube audio
+    await downloadYouTubeAudio(video.url, tempPath);
+
+    // Verify the file was created and has content
+    if (!fs.existsSync(tempPath)) {
+      throw new Error("Downloaded file does not exist at " + tempPath);
     }
-  }, typingDelayMs);
+
+    const fileStats = fs.statSync(tempPath);
+    console.log(
+      `[YouTube] Downloaded file size: ${fileStats.size} bytes`
+    );
+
+    if (fileStats.size === 0) {
+      throw new Error("Downloaded file is empty");
+    }
+
+    // Prepare track info message
+    const trackInfo = `🎵 ${video.title}\n⏱️ ${video.duration}`;
+
+    // Send track info with audio attachment
+    setTimeout(() => {
+      try {
+        console.log(
+          `[YouTube] Sending audio attachment to thread ${threadID}`
+        );
+
+        api.sendMessage(
+          {
+            body: trackInfo,
+            attachment: fs.createReadStream(tempPath),
+          },
+          threadID,
+          (sendError) => {
+            // Clean up temp file after send attempt
+            if (tempPath && fs.existsSync(tempPath)) {
+              fs.unlink(tempPath, (unlinkError) => {
+                if (unlinkError && unlinkError.code !== "ENOENT") {
+                  console.error(
+                    "[YouTube] Could not remove temp file:",
+                    unlinkError
+                  );
+                }
+              });
+            }
+
+            if (sendError) {
+              console.error("[YouTube] Messenger send error details:");
+              console.error("  Error object:", sendError);
+              console.error("  Error message:", sendError.message || "N/A");
+              console.error("  Error code:", sendError.code || "N/A");
+              console.error("  Error stack:", sendError.stack || "N/A");
+
+              if (typeof sendError === "object") {
+                console.error("  Full error object:", JSON.stringify(sendError, null, 2));
+              }
+
+              sendReplyWithTyping(
+                api,
+                `❌ Messenger API error: ${sendError.message || "Unknown error"}`,
+                threadID
+              );
+            } else {
+              console.log(
+                `[YouTube] Successfully sent audio: ${video.title}`
+              );
+            }
+          }
+        );
+      } catch (sendError) {
+        console.error("[YouTube] Exception during send:");
+        console.error("  Error:", sendError);
+        console.error("  Stack:", sendError.stack);
+
+        // Clean up temp file
+        if (tempPath && fs.existsSync(tempPath)) {
+          fs.unlink(tempPath, () => {});
+        }
+
+        sendReplyWithTyping(
+          api,
+          `❌ Error sending audio: ${sendError.message}`,
+          threadID
+        );
+      }
+    }, 1200);
+  } catch (error) {
+    console.error("[YouTube] Download error:");
+    console.error("  Error:", error);
+    console.error("  Message:", error.message);
+    console.error("  Stack:", error.stack);
+
+    // Clean up temp file if it exists
+    if (tempPath && fs.existsSync(tempPath)) {
+      fs.unlink(tempPath, () => {});
+    }
+
+    sendReplyWithTyping(api, `❌ YouTube download error: ${error.message}`, threadID);
+  }
 }
 
 // ---------------------------------------------------------------------------
