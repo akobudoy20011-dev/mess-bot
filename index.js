@@ -109,6 +109,9 @@ const RANDOM_ROAST_COOLDOWN_MS = Math.max(
 
 const lastRandomRoastByThread = new Map();
 
+// Track all active threads the bot is in
+const activeThreads = new Set();
+
 // ---------------------------------------------------------------------------
 // Log in to Facebook.
 // ---------------------------------------------------------------------------
@@ -160,6 +163,12 @@ login(
         threadID: event?.threadID,
       });
 
+      // Track all threads the bot receives messages from
+      if (event?.threadID) {
+        activeThreads.add(String(event.threadID));
+        console.log(`[Threads] Active threads: ${activeThreads.size}`);
+      }
+
       if (
         event &&
         (event.type === "message" ||
@@ -204,7 +213,7 @@ function handleMessage(api, event) {
         "!ping - health check\n" +
         "!help - this message\n" +
         "!play <song> - send an audio track\n" +
-        "!broadcast <text> - admin only",
+        "!broadcast <text> - admin only (sends to all group chats)",
       threadID
     );
     return;
@@ -221,8 +230,7 @@ function handleMessage(api, event) {
     ADMIN_IDS.includes(senderId)
   ) {
     const message = body.slice("!broadcast ".length);
-
-    sendReplyWithTyping(api, `📢 ${message}`, threadID);
+    broadcastToAllThreads(api, message);
     return;
   }
 
@@ -268,6 +276,38 @@ function canRandomRoastThread(threadID) {
   }
 
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Broadcast message to all active threads the bot is in.
+// ---------------------------------------------------------------------------
+function broadcastToAllThreads(api, message) {
+  if (!message || !message.trim()) {
+    console.log("[Broadcast] No message to broadcast.");
+    return;
+  }
+
+  const threadArray = Array.from(activeThreads);
+  console.log(`[Broadcast] Broadcasting to ${threadArray.length} threads: "${message}"`);
+
+  if (threadArray.length === 0) {
+    console.log("[Broadcast] No active threads to broadcast to.");
+    return;
+  }
+
+  const broadcastMessage = `📢 ${message}`;
+
+  threadArray.forEach((threadID) => {
+    setTimeout(() => {
+      api.sendMessage(broadcastMessage, threadID, (err) => {
+        if (err) {
+          console.error(`[Broadcast] Failed to send to thread ${threadID}:`, err);
+        } else {
+          console.log(`[Broadcast] Sent to thread ${threadID}`);
+        }
+      });
+    }, 500); // Small delay between sends to avoid rate limiting
+  });
 }
 
 // ---------------------------------------------------------------------------
