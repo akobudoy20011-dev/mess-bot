@@ -7,87 +7,79 @@
 // YouTube's Terms of Service. Use at your own discretion.
 // This is intended for non-commercial, personal use only.
 
-const yts = require("yt-search");
-const ytdlp = require("yt-dlp-exec");
+const ytSearch = require("yt-search");
+const youtubeDl = require("youtube-dl-exec");
 const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
 
 /**
- * Searches YouTube for a song and returns video metadata.
- * @param {string} query - e.g. "laufey flowers"
- * @returns {Promise<{ title: string, url: string, duration: number, views: number } | null>}
+ * Search YouTube for a video.
+ *
+ * @param {string} query
+ * @returns {Promise<object|null>}
  */
 async function searchYouTube(query) {
-  try {
-    if (!query || !query.trim()) {
-      return null;
-    }
-
-    console.log(`[YouTube] Searching for: "${query}"`);
-
-    const searchResults = await yts(query);
-    const video = searchResults?.videos?.[0];
-
-    if (!video) {
-      console.log(`[YouTube] No results found for: "${query}"`);
-      return null;
-    }
-
-    console.log(`[YouTube] Found: ${video.title}`);
-    console.log(`[YouTube] URL: ${video.url}`);
-    console.log(`[YouTube] Duration: ${video.timestamp}`);
-    console.log(`[YouTube] Views: ${video.views}`);
-
-    return {
-      title: video.title,
-      url: video.url,
-      duration: video.timestamp,
-      views: video.views,
-    };
-  } catch (error) {
-    console.error("[YouTube] Search error:");
-    console.error("  Message:", error.message);
-    console.error("  Stack:", error.stack);
-    throw error;
+  if (!query || typeof query !== "string" || !query.trim()) {
+    return null;
   }
+
+  const searchResult = await ytSearch(query.trim());
+  const video = searchResult?.videos?.[0];
+
+  if (!video) {
+    return null;
+  }
+
+  return {
+    title: video.title || "Unknown title",
+    url: video.url,
+    duration: video.timestamp || "Unknown duration",
+    seconds: video.seconds || 0,
+    thumbnail: video.thumbnail || null
+  };
 }
 
 /**
- * Downloads audio from a YouTube URL using yt-dlp.
- * Caller is responsible for deleting the file after use.
+ * Download YouTube audio.
+ *
+ * This requires ffmpeg for MP3 conversion.
+ *
  * @param {string} videoUrl
- * @param {string} destPath - e.g. "/tmp/youtube_audio_12345.mp3"
+ * @param {string} outputPath
+ * @returns {Promise<string>}
  */
-async function downloadYouTubeAudio(videoUrl, destPath) {
-  try {
-    console.log(`[YouTube] Starting download from: ${videoUrl}`);
-    console.log(`[YouTube] Destination: ${destPath}`);
-
-    await ytdlp(videoUrl, {
-      extractAudio: true,
-      audioFormat: "mp3",
-      output: destPath,
-      noCheckCertificates: true,
-      noWarnings: true,
-      preferFreeFormats: true,
-      quiet: false,
-    });
-
-    if (!fs.existsSync(destPath)) {
-      throw new Error(`Downloaded file does not exist at ${destPath}`);
-    }
-
-    const fileStats = fs.statSync(destPath);
-    console.log(`[YouTube] Download complete. File size: ${fileStats.size} bytes`);
-
-    return destPath;
-  } catch (error) {
-    console.error("[YouTube] Download error:");
-    console.error("  Message:", error.message);
-    console.error("  Stack:", error.stack);
-    throw error;
+async function downloadYouTubeAudio(videoUrl, outputPath) {
+  if (!videoUrl || typeof videoUrl !== "string") {
+    throw new TypeError("A valid YouTube URL is required.");
   }
+
+  if (!outputPath || typeof outputPath !== "string") {
+    throw new TypeError("A valid output path is required.");
+  }
+
+  await youtubeDl(videoUrl, {
+    output: outputPath,
+    extractAudio: true,
+    audioFormat: "mp3",
+    audioQuality: "128K",
+    noPlaylist: true,
+    noWarnings: true,
+    preferFreeFormats: true
+  });
+
+  if (!fs.existsSync(outputPath)) {
+    throw new Error("YouTube downloader finished, but no output file was created.");
+  }
+
+  const stats = fs.statSync(outputPath);
+
+  if (stats.size === 0) {
+    throw new Error("The downloaded YouTube file is empty.");
+  }
+
+  return outputPath;
 }
 
-module.exports = { searchYouTube, downloadYouTubeAudio };
+module.exports = {
+  searchYouTube,
+  downloadYouTubeAudio
+};
