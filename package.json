@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "ws3-fca": "^2.0.0",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "yt-search": "^2.10.3",
+    "yt-dlp-exec": "^1.2.3"
   }
 }
