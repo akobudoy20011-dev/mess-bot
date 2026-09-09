@@ -44,53 +44,107 @@ async function searchJamendo(query) {
       client_id: clientId,
       format: "json",
       search: query.trim(),
-      limit: "10",
+      limit: "20",
     });
 
     const url = `${JAMENDO_BASE_URL}/tracks/?${params}`;
+    console.log(`[Jamendo] API Request URL: ${url}`);
+
     const res = await fetch(url);
+
+    console.log(`[Jamendo] API Response Status: ${res.status} ${res.statusText}`);
 
     if (!res.ok) {
       const text = await res.text();
+      console.error(
+        `[Jamendo] API Error Response Body: ${text.slice(0, 500)}`
+      );
       throw new Error(
         `Jamendo API failed (${res.status}): ${text.slice(0, 100)}`
       );
     }
 
     const data = await res.json();
+    console.log(`[Jamendo] Full API Response: ${JSON.stringify(data, null, 2)}`);
+
     const tracks = data?.results || [];
+    console.log(
+      `[Jamendo] Number of tracks returned: ${tracks.length}`
+    );
 
     if (!Array.isArray(tracks) || tracks.length === 0) {
+      console.log(
+        `[Jamendo] No tracks found for query: "${query}"`
+      );
       return null;
     }
 
-    // Find the first track with permitted audio
-    for (const track of tracks) {
+    // Iterate through all tracks and log their details
+    for (let i = 0; i < tracks.length; i++) {
+      const track = tracks[i];
+      console.log(`[Jamendo] Track ${i}:`, {
+        name: track.name,
+        artist_name: track.artist_name,
+        audiodownload_allowed: track.audiodownload_allowed,
+        audio: track.audio ? "present" : "missing",
+        audiodownload: track.audiodownload ? "present" : "missing",
+      });
+
       // Check if audio download/streaming is permitted
-      if (!track.audiodownload_allowed) {
+      // Accept tracks that have ANY playable audio (audio or audiodownload)
+      if (!track.audio && !track.audiodownload) {
+        console.log(
+          `[Jamendo] Track ${i} skipped: no audio or audiodownload field`
+        );
         continue;
       }
 
-      // Prefer audiodownload URL if available, fall back to audio (streaming)
-      const audioUrl = track.audiodownload || track.audio;
+      // Prefer audiodownload if available and permitted, otherwise use audio
+      let audioUrl = null;
 
-      if (!audioUrl || typeof audioUrl !== "string" || !audioUrl.trim()) {
+      if (track.audiodownload_allowed && track.audiodownload) {
+        audioUrl = track.audiodownload.trim();
+        console.log(
+          `[Jamendo] Track ${i} using audiodownload: ${audioUrl}`
+        );
+      } else if (track.audio) {
+        audioUrl = track.audio.trim();
+        console.log(
+          `[Jamendo] Track ${i} using audio stream: ${audioUrl}`
+        );
+      } else {
+        console.log(
+          `[Jamendo] Track ${i} skipped: audiodownload_allowed=${track.audiodownload_allowed} but no suitable URL`
+        );
         continue;
       }
+
+      if (!audioUrl || typeof audioUrl !== "string") {
+        console.log(`[Jamendo] Track ${i} skipped: invalid audio URL`);
+        continue;
+      }
+
+      console.log(
+        `[Jamendo] Track ${i} ACCEPTED: ${track.name} by ${track.artist_name}`
+      );
 
       return {
         name: track.name || "Unknown",
         artist_name: track.artist_name || "Unknown Artist",
-        audio_url: audioUrl.trim(),
+        audio_url: audioUrl,
         album_name: track.album_name || undefined,
         image: track.image || undefined,
       };
     }
 
-    // No permitted audio found
+    console.log(
+      `[Jamendo] No suitable tracks found after checking all ${tracks.length} results`
+    );
     return null;
   } catch (error) {
-    console.error("Jamendo search error:", error.message);
+    console.error("[Jamendo] Search error:");
+    console.error("  Message:", error.message);
+    console.error("  Stack:", error.stack);
     throw error;
   }
 }
@@ -105,16 +159,30 @@ async function downloadAudioToFile(audioUrl, destPath) {
   const fs = require("fs");
 
   try {
+    console.log(`[Jamendo] Starting download from: ${audioUrl}`);
     const res = await fetch(audioUrl);
+
+    console.log(
+      `[Jamendo] Download response status: ${res.status} ${res.statusText}`
+    );
+
     if (!res.ok) {
-      throw new Error(`Failed to download audio (${res.status})`);
+      throw new Error(
+        `Failed to download audio (${res.status}) ${res.statusText}`
+      );
     }
 
     const arrayBuffer = await res.arrayBuffer();
+    console.log(`[Jamendo] Downloaded ${arrayBuffer.byteLength} bytes`);
+
     fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
+    console.log(`[Jamendo] File written to: ${destPath}`);
+
     return destPath;
   } catch (error) {
-    console.error("Audio download error:", error.message);
+    console.error("[Jamendo] Audio download error:");
+    console.error("  Message:", error.message);
+    console.error("  Stack:", error.stack);
     throw error;
   }
 }
