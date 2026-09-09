@@ -8,10 +8,7 @@ const {
   getTriggerReply,
   getRandomRoastReply,
 } = require("./triggers");
-const {
-  getSpotifyPreview,
-  downloadPreviewToFile,
-} = require("./spotify");
+const { searchJamendo } = require("./jamendo");
 
 // ---------------------------------------------------------------------------
 // Tiny web server so Render sees an open port and keeps the service alive.
@@ -205,7 +202,7 @@ function handleMessage(api, event) {
       "Commands:\n" +
         "!ping - health check\n" +
         "!help - this message\n" +
-        "!play <song> - send a Spotify preview clip\n" +
+        "!play <song> - send an audio track\n" +
         "!broadcast <text> - admin only",
       threadID
     );
@@ -214,7 +211,7 @@ function handleMessage(api, event) {
 
   if (text === "!play" || text.startsWith("!play ")) {
     const requestedSong = body.slice("!play".length).trim();
-    sendSpotifyPreview(api, requestedSong, threadID);
+    sendJamendoAudio(api, requestedSong, threadID);
     return;
   }
 
@@ -273,13 +270,13 @@ function canRandomRoastThread(threadID) {
 }
 
 // ---------------------------------------------------------------------------
-// Search Spotify and send its official 30-second preview clip.
+// Search Jamendo and send permitted audio as a Messenger attachment.
 // ---------------------------------------------------------------------------
-async function sendSpotifyPreview(api, songName, threadID) {
+async function sendJamendoAudio(api, songName, threadID) {
   if (!songName) {
     sendReplyWithTyping(
       api,
-      "Use !play <song name>, for example: !play magnolia",
+      "Use !play <song name>, for example: !play relaxing piano",
       threadID
     );
     return;
@@ -294,64 +291,67 @@ async function sendSpotifyPreview(api, songName, threadID) {
       });
     }
 
-    const track = await getSpotifyPreview(songName);
+    const track = await searchJamendo(songName);
 
     if (!track) {
       sendReplyWithTyping(
         api,
-        `Spotify does not have a preview clip for "${songName}".`,
+        `❌ I couldn't find an available audio track for "${songName}".`,
         threadID
       );
       return;
     }
 
-    const tempPath = path.join(
-      "/tmp",
-      `spotify_preview_${crypto.randomUUID()}.mp3`
-    );
+    // Prepare track info message
+    const trackInfo = `🎵 Track: ${track.name}\n👤 Artist: ${track.artist_name}`;
 
-    await downloadPreviewToFile(track.url, tempPath);
-
-    const trackInfo = track.spotifyUrl
-      ? `🎵 ${track.name} — ${track.artists}\n${track.spotifyUrl}`
-      : `🎵 ${track.name} — ${track.artists}`;
-
+    // Send track info first, then the audio
     setTimeout(() => {
       try {
+        // Send the track information with the audio attachment
         api.sendMessage(
           {
             body: trackInfo,
-            attachment: fs.createReadStream(tempPath),
+            attachment: track.audio_url,
           },
           threadID,
           (sendError) => {
             if (sendError) {
-              console.error("Spotify preview send failed:", sendError);
+              console.error("Jamendo audio send failed:", sendError);
+              sendReplyWithTyping(
+                api,
+                `Failed to send audio for "${track.name}". Please try again.`,
+                threadID
+              );
+            } else {
+              console.log(
+                `Successfully sent Jamendo audio: ${track.name} by ${track.artist_name}`
+              );
             }
-
-            fs.unlink(tempPath, (unlinkError) => {
-              if (unlinkError && unlinkError.code !== "ENOENT") {
-                console.error(
-                  "Could not remove Spotify preview temp file:",
-                  unlinkError
-                );
-              }
-            });
           }
         );
       } catch (sendError) {
-        console.error("Spotify preview send error:", sendError);
-        fs.unlink(tempPath, () => {});
+        console.error("Jamendo audio send error:", sendError);
+        sendReplyWithTyping(
+          api,
+          `Error sending audio track. Please try again.`,
+          threadID
+        );
       }
     }, 1200);
   } catch (error) {
-    console.error("Spotify preview failed:", error);
+    console.error("Jamendo audio fetch failed:", error.message);
 
-    sendReplyWithTyping(
-      api,
-      "Spotify could not find a playable preview. Check the song title or the Spotify environment variables.",
-      threadID
-    );
+    // Determine the error message
+    let errorMsg =
+      "Could not find a playable audio track. Check the song name or Jamendo credentials.";
+
+    if (error.message && error.message.includes("JAMENDO_CLIENT_ID")) {
+      errorMsg =
+        "Jamendo is not configured. Admin needs to set JAMENDO_CLIENT_ID on Render.";
+    }
+
+    sendReplyWithTyping(api, `❌ ${errorMsg}`, threadID);
   }
 }
 
