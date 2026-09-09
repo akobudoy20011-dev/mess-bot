@@ -54,20 +54,26 @@ function readAppState() {
     );
   }
 
-  const normalizedCookies = parsed.map((cookie) => ({
-    ...cookie,
-    key: typeof cookie.key === "string" ? cookie.key : cookie.name,
-  }));
-
   if (
-    normalizedCookies.some(
-      (cookie) =>
-        !cookie ||
-        typeof cookie !== "object" ||
-        typeof cookie.key !== "string" ||
-        typeof cookie.value !== "string"
-    )
-  ) {
+  parsed.some(
+    (cookie) =>
+      !cookie ||
+      typeof cookie !== "object" ||
+      Array.isArray(cookie) ||
+      typeof cookie.value !== "string" ||
+      (typeof cookie.key !== "string" &&
+        typeof cookie.name !== "string")
+  )
+) {
+  throw new Error(
+    "FB_COOKIES cookies need string name/key and value fields."
+  );
+}
+
+const normalizedCookies = parsed.map((cookie) => ({
+  ...cookie,
+  key: typeof cookie.key === "string" ? cookie.key : cookie.name,
+}));
     throw new Error(
       "FB_COOKIES cookies need string name/key and value fields."
     );
