@@ -95,4 +95,28 @@ async function searchJamendo(query) {
   }
 }
 
-module.exports = { searchJamendo };
+/**
+ * Downloads an audio file from a URL to a temporary file path.
+ * Caller is responsible for deleting the file after use.
+ * @param {string} audioUrl
+ * @param {string} destPath - e.g. "/tmp/jamendo_audio_12345.mp3"
+ */
+async function downloadAudioToFile(audioUrl, destPath) {
+  const fs = require("fs");
+
+  try {
+    const res = await fetch(audioUrl);
+    if (!res.ok) {
+      throw new Error(`Failed to download audio (${res.status})`);
+    }
+
+    const arrayBuffer = await res.arrayBuffer();
+    fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
+    return destPath;
+  } catch (error) {
+    console.error("Audio download error:", error.message);
+    throw error;
+  }
+}
+
+module.exports = { searchJamendo, downloadAudioToFile };
