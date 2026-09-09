@@ -1,11 +1,17 @@
+
 const { login } = require("ws3-fca");
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const {
   getTriggerReply,
   getRandomRoastReply,
 } = require("./triggers");
+const {
+  getSpotifyPreview,
+  downloadPreviewToFile,
+} = require("./spotify");
 
 // ---------------------------------------------------------------------------
 // Tiny web server so Render sees an open port and keeps the service alive.
@@ -178,7 +184,15 @@ function handleMessage(api, event) {
   }
 
   const text = body.trim().toLowerCase();
-  const senderId = String(senderID || "");
+  const senderId = String(senderID || "").trim();
+
+  // Temporary diagnostic: compare this value with ASELM_ID in Render.
+  if (process.env.ASELM_ID) {
+    console.log("Roast ID check:", {
+      senderID: senderId,
+      ASELM_ID: process.env.ASELM_ID,
+    });
+  }
 
   if (text === "!ping") {
     sendReplyWithTyping(api, "pong 🏓", threadID);
@@ -191,9 +205,16 @@ function handleMessage(api, event) {
       "Commands:\n" +
         "!ping - health check\n" +
         "!help - this message\n" +
+        "!play <song> - send a Spotify preview clip\n" +
         "!broadcast <text> - admin only",
       threadID
     );
+    return;
+  }
+
+  if (text === "!play" || text.startsWith("!play ")) {
+    const requestedSong = body.slice("!play".length).trim();
+    sendSpotifyPreview(api, requestedSong, threadID);
     return;
   }
 
@@ -227,8 +248,6 @@ function handleMessage(api, event) {
 
     if (randomRoast) {
       lastRandomRoastByThread.set(threadID, Date.now());
-
-      // true keeps the random meme attached to the roast.
       sendReplyWithTyping(api, randomRoast, threadID, true);
     }
   }
@@ -251,6 +270,197 @@ function canRandomRoastThread(threadID) {
   }
 
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Search Spotify and send its official 30-second preview clip.
+// ---------------------------------------------------------------------------
+async function sendSpotifyPreview(api, songName, threadID) {
+  if (!songName) {
+    sendReplyWithTyping(
+      api,
+      "Use !play <song name>, for example: !play magnolia",
+      threadID
+    );
+    return;
+  }
+
+  try {
+    if (typeof api.sendTypingIndicator === "function") {
+      api.sendTypingIndicator(threadID, (typingError) => {
+        if (typingError) {
+          console.error("Typing indicator failed:", typingError);
+        }
+      });
+    }
+
+    const track = await getSpotifyPreview(songName);
+
+    if (!track) {
+      sendReplyWithTyping(
+        api,
+        `Spotify does not have a preview clip for "${songName}".`,
+        threadID
+      );
+      return;
+    }
+
+    const tempPath = path.join(
+      "/tmp",
+      `spotify_preview_${crypto.randomUUID()}.mp3`
+    );
+
+    await downloadPreviewToFile(track.url, tempPath);
+
+    const trackInfo = track.spotifyUrl
+      ? `🎵 ${track.name} — ${track.artists}\n${track.spotifyUrl}`
+      : `🎵 ${track.name} — ${track.artists}`;
+
+    setTimeout(() => {
+      try {
+        api.sendMessage(
+          {
+            body: trackInfo,
+            attachment: fs.createReadStream(tempPath),
+          },
+          threadID,
+          (sendError) => {
+            if (sendError) {
+              console.error("Spotify preview send failed:", sendError);
+            }
+
+            fs.unlink(tempPath, (unlinkError) => {
+              if (unlinkError && unlinkError.code !== "ENOENT") {
+                console.error(
+                  "Could not remove Spotify preview temp file:",
+                  unlinkError
+                );
+              }
+            });
+          }
+        );
+      } catch (sendError) {
+        console.error("Spotify preview send error:", sendError);
+        fs.unlink(tempPath, () => {});
+      }
+    }, 1200);
+  } catch (error) {
+    console.error("Spotify preview failed:", error);
+
+    sendReplyWithTyping(
+      api,
+      "Spotify could not find a playable preview. Check the song title or the Spotify environment variables.",
+      threadID
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Send a requested song from the songs folder.
+// Example: !play magnolia -> songs/magnolia.mp3
+// ---------------------------------------------------------------------------
+function getRequestedSongPath(songName) {
+  if (!songName) {
+    return null;
+  }
+
+  const songDirectory = path.join(__dirname, "songs");
+
+  const supportedExtensions = new Set([
+    ".mp3",
+    ".m4a",
+    ".wav",
+    ".ogg",
+    ".aac",
+  ]);
+
+  const normalizeSongName = (value) =>
+    String(value)
+      .toLowerCase()
+      .replace(/\.(mp3|m4a|wav|ogg|aac)$/i, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+
+  const wantedName = normalizeSongName(songName);
+
+  try {
+    if (!fs.existsSync(songDirectory) || !wantedName) {
+      return null;
+    }
+
+    const matchingFile = fs
+      .readdirSync(songDirectory)
+      .find((fileName) => {
+        const extension = path.extname(fileName).toLowerCase();
+
+        return (
+          supportedExtensions.has(extension) &&
+          normalizeSongName(path.basename(fileName, extension)) === wantedName
+        );
+      });
+
+    return matchingFile
+      ? path.join(songDirectory, matchingFile)
+      : null;
+  } catch (error) {
+    console.error("Could not load songs:", error);
+    return null;
+  }
+}
+
+function sendSongWithTyping(api, songName, threadID) {
+  if (!songName) {
+    sendReplyWithTyping(
+      api,
+      "Use !play <song name>, for example: !play magnolia",
+      threadID
+    );
+    return;
+  }
+
+  const songPath = getRequestedSongPath(songName);
+
+  if (!songPath) {
+    sendReplyWithTyping(
+      api,
+      `I could not find "${songName}" in the songs folder.`,
+      threadID
+    );
+    return;
+  }
+
+  const typingDelayMs = 1200;
+
+  try {
+    if (typeof api.sendTypingIndicator === "function") {
+      api.sendTypingIndicator(threadID, (typingError) => {
+        if (typingError) {
+          console.error("Typing indicator failed:", typingError);
+        }
+      });
+    }
+  } catch (typingError) {
+    console.error("Typing indicator error:", typingError);
+  }
+
+  setTimeout(() => {
+    try {
+      api.sendMessage(
+        {
+          body: `🎵 Playing: ${path.basename(songPath)}`,
+          attachment: fs.createReadStream(songPath),
+        },
+        threadID,
+        (sendError) => {
+          if (sendError) {
+            console.error("Song send failed:", sendError);
+          }
+        }
+      );
+    } catch (sendError) {
+      console.error("Song send error:", sendError);
+    }
+  }, typingDelayMs);
 }
 
 // ---------------------------------------------------------------------------
