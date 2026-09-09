@@ -8,7 +8,7 @@ const {
   getTriggerReply,
   getRandomRoastReply,
 } = require("./triggers");
-const { searchJamendo } = require("./jamendo");
+const { searchJamendo, downloadAudioToFile } = require("./jamendo");
 
 // ---------------------------------------------------------------------------
 // Tiny web server so Render sees an open port and keeps the service alive.
@@ -270,6 +270,36 @@ function canRandomRoastThread(threadID) {
 }
 
 // ---------------------------------------------------------------------------
+// Validate that a URL is publicly accessible and get its size.
+// ---------------------------------------------------------------------------
+async function validateAudioUrl(audioUrl) {
+  try {
+    console.log(`[Jamendo] Validating audio URL: ${audioUrl}`);
+    const res = await fetch(audioUrl, { method: "HEAD" });
+
+    if (!res.ok) {
+      console.error(
+        `[Jamendo] URL validation failed: HTTP ${res.status} ${res.statusText}`
+      );
+      return false;
+    }
+
+    const contentType = res.headers.get("content-type") || "";
+    const contentLength = res.headers.get("content-length") || "unknown";
+
+    console.log(
+      `[Jamendo] URL valid: content-type=${contentType}, size=${contentLength}`
+    );
+    return true;
+  } catch (error) {
+    console.error(
+      `[Jamendo] URL validation error: ${error.message}`
+    );
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Search Jamendo and send permitted audio as a Messenger attachment.
 // ---------------------------------------------------------------------------
 async function sendJamendoAudio(api, songName, threadID) {
@@ -291,6 +321,7 @@ async function sendJamendoAudio(api, songName, threadID) {
       });
     }
 
+    console.log(`[Jamendo] Searching for: "${songName}"`);
     const track = await searchJamendo(songName);
 
     if (!track) {
@@ -302,47 +333,120 @@ async function sendJamendoAudio(api, songName, threadID) {
       return;
     }
 
+    console.log(
+      `[Jamendo] Found track: ${track.name} by ${track.artist_name}`
+    );
+    console.log(`[Jamendo] Audio URL: ${track.audio_url}`);
+
+    // Validate the audio URL before attempting to download
+    const urlIsValid = await validateAudioUrl(track.audio_url);
+    if (!urlIsValid) {
+      console.error(
+        `[Jamendo] Audio URL is not accessible: ${track.audio_url}`
+      );
+      sendReplyWithTyping(
+        api,
+        `❌ Audio URL is not accessible. Please try another track.`,
+        threadID
+      );
+      return;
+    }
+
+    // Download audio to a temporary file
+    const tempPath = path.join(
+      "/tmp",
+      `jamendo_audio_${crypto.randomUUID()}.mp3`
+    );
+
+    console.log(`[Jamendo] Downloading audio to: ${tempPath}`);
+    await downloadAudioToFile(track.audio_url, tempPath);
+
+    // Verify the file was created and has content
+    if (!fs.existsSync(tempPath)) {
+      throw new Error("Downloaded file does not exist at " + tempPath);
+    }
+
+    const fileStats = fs.statSync(tempPath);
+    console.log(
+      `[Jamendo] Downloaded file size: ${fileStats.size} bytes`
+    );
+
+    if (fileStats.size === 0) {
+      throw new Error("Downloaded file is empty");
+    }
+
     // Prepare track info message
     const trackInfo = `🎵 Track: ${track.name}\n👤 Artist: ${track.artist_name}`;
 
-    // Send track info first, then the audio
+    // Send track info with audio attachment
     setTimeout(() => {
       try {
-        // Send the track information with the audio attachment
+        console.log(
+          `[Jamendo] Sending audio attachment to thread ${threadID}`
+        );
+
         api.sendMessage(
           {
             body: trackInfo,
-            attachment: track.audio_url,
+            attachment: fs.createReadStream(tempPath),
           },
           threadID,
           (sendError) => {
+            // Clean up temp file after send attempt
+            fs.unlink(tempPath, (unlinkError) => {
+              if (unlinkError && unlinkError.code !== "ENOENT") {
+                console.error(
+                  "[Jamendo] Could not remove temp file:",
+                  unlinkError
+                );
+              }
+            });
+
             if (sendError) {
-              console.error("Jamendo audio send failed:", sendError);
+              console.error("[Jamendo] Messenger send error details:");
+              console.error("  Error object:", sendError);
+              console.error("  Error message:", sendError.message || "N/A");
+              console.error("  Error code:", sendError.code || "N/A");
+              console.error("  Error stack:", sendError.stack || "N/A");
+
+              // Try to parse error details
+              if (typeof sendError === "object") {
+                console.error("  Full error object:", JSON.stringify(sendError, null, 2));
+              }
+
               sendReplyWithTyping(
                 api,
-                `Failed to send audio for "${track.name}". Please try again.`,
+                `❌ Messenger API error: ${sendError.message || "Unknown error"}`,
                 threadID
               );
             } else {
               console.log(
-                `Successfully sent Jamendo audio: ${track.name} by ${track.artist_name}`
+                `[Jamendo] Successfully sent audio: ${track.name} by ${track.artist_name}`
               );
             }
           }
         );
       } catch (sendError) {
-        console.error("Jamendo audio send error:", sendError);
+        console.error("[Jamendo] Exception during send:");
+        console.error("  Error:", sendError);
+        console.error("  Stack:", sendError.stack);
+
+        // Clean up temp file
+        fs.unlink(tempPath, () => {});
+
         sendReplyWithTyping(
           api,
-          `Error sending audio track. Please try again.`,
+          `❌ Error sending audio: ${sendError.message}`,
           threadID
         );
       }
     }, 1200);
   } catch (error) {
-    console.error("Jamendo audio fetch failed:", error.message);
+    console.error("[Jamendo] Track fetch/download error:");
+    console.error("  Error:", error);
+    console.error("  Message:", error.message);
+    console.error("  Stack:", error.stack);
 
-    // Determine the error message
     let errorMsg =
       "Could not find a playable audio track. Check the song name or Jamendo credentials.";
 
