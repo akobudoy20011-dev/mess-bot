@@ -270,8 +270,12 @@ const groups = [
   },
 ];
 
-// Jeø, aeix, and kikay all reuse the Jaiden roast list, with the name swapped.
-const jaidenGroupForClones = groups.find((group) => group.name === "jaiden");
+// Jeø, Aeix, Kikay, Sylora, Marcellus, and Theone
+// all reuse the Jaiden reply list, with the name swapped.
+
+const jaidenGroupForClones = groups.find(
+  (group) => group.name === "jaiden"
+);
 
 if (jaidenGroupForClones) {
   groups.push({
@@ -300,7 +304,35 @@ if (jaidenGroupForClones) {
       reply.replace(/\bjaiden\b/gi, "Kikay")
     ),
   });
+
+  groups.push({
+    name: "sylora",
+    triggers: ["sylora"],
+    index: 0,
+    replies: jaidenGroupForClones.replies.map((reply) =>
+      reply.replace(/\bjaiden\b/gi, "Sylora")
+    ),
+  });
+
+  groups.push({
+    name: "marcellus",
+    triggers: ["marcellus"],
+    index: 0,
+    replies: jaidenGroupForClones.replies.map((reply) =>
+      reply.replace(/\bjaiden\b/gi, "Marcellus")
+    ),
+  });
+
+  groups.push({
+    name: "theone",
+    triggers: ["theone"],
+    index: 0,
+    replies: jaidenGroupForClones.replies.map((reply) =>
+      reply.replace(/\bjaiden\b/gi, "Theone")
+    ),
+  });
 }
+
 
 function getTriggerReply(rawText, senderId) {
   if (!rawText) {
@@ -343,12 +375,24 @@ function getTriggerReply(rawText, senderId) {
     }
   }
 
-  // Jaiden, Jeø, Vincent, Aselm, Aeix, Kikay, and Xeth can use their matching
-  // *_ID variable. ROAST_TARGET_IDS can also be used for additional targets.
+  // Match people by their Messenger ID even when
+  // their name was NOT mentioned in the message.
   const roastTargets = {};
 
   if (process.env.JAIDEN_ID) {
     roastTargets.jaiden = normalizeId(process.env.JAIDEN_ID);
+  }
+
+  if (process.env.SYLORA_ID) {
+    roastTargets.sylora = normalizeId(process.env.SYLORA_ID);
+  }
+
+  if (process.env.MARCELLUS_ID) {
+    roastTargets.marcellus = normalizeId(process.env.MARCELLUS_ID);
+  }
+
+  if (process.env.THEONE_ID) {
+    roastTargets.theone = normalizeId(process.env.THEONE_ID);
   }
 
   if (process.env.VINCENT_ID) {
@@ -371,12 +415,16 @@ function getTriggerReply(rawText, senderId) {
     roastTargets.kikay = normalizeId(process.env.KIKAY_ID);
   }
 
-  // Keep the old XETH_ID option working if it is still present in Render.
+  // Keep the old XETH_ID option working.
   if (process.env.XETH_ID) {
     roastTargets.xeth = normalizeId(process.env.XETH_ID);
   }
 
-  for (const entry of (process.env.ROAST_TARGET_IDS || "").split(",")) {
+  // Optional additional targets:
+  // ROAST_TARGET_IDS=group:id,group:id
+  for (
+    const entry of (process.env.ROAST_TARGET_IDS || "").split(",")
+  ) {
     const separatorIndex = entry.indexOf(":");
 
     if (separatorIndex === -1) {
@@ -397,9 +445,17 @@ function getTriggerReply(rawText, senderId) {
     }
   }
 
-  for (const [groupName, targetId] of Object.entries(roastTargets)) {
+  // If the sender matches an ID,
+  // use that person's group even if their name wasn't mentioned.
+  for (
+    const [groupName, targetId]
+    of Object.entries(roastTargets)
+  ) {
     if (normalizeId(targetId) === normalizedSenderId) {
-      const targetGroup = groups.find((group) => group.name === groupName);
+
+      const targetGroup = groups.find(
+        (group) => group.name === groupName
+      );
 
       if (targetGroup) {
         return getNextReply(targetGroup);
@@ -410,29 +466,39 @@ function getTriggerReply(rawText, senderId) {
   return null;
 }
 
+
 function normalizeId(value) {
   return String(value || "")
     .trim()
     .replace(/^["']|["']$/g, "");
 }
 
+
 function getRandomRoastReply() {
-  // Only use generic groups here. Name-specific groups stay tied to
-  // their trigger or configured target ID.
-  const genericRoastGroups = groups.filter((group) =>
-    ["trash-talk"].includes(group.name)
+  // Only use generic groups here.
+  // Name-specific groups stay tied to their
+  // trigger or configured target ID.
+
+  const genericRoastGroups = groups.filter(
+    (group) => ["trash-talk"].includes(group.name)
   );
 
-  const replies = genericRoastGroups.flatMap((group) =>
-    Array.isArray(group.replies) ? group.replies : []
+  const replies = genericRoastGroups.flatMap(
+    (group) =>
+      Array.isArray(group.replies)
+        ? group.replies
+        : []
   );
 
   if (replies.length === 0) {
     return null;
   }
 
-  return replies[Math.floor(Math.random() * replies.length)];
+  return replies[
+    Math.floor(Math.random() * replies.length)
+  ];
 }
+
 
 function getNextReply(group) {
   if (
@@ -451,9 +517,14 @@ function getNextReply(group) {
   return reply;
 }
 
+
 function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return str.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&"
+  );
 }
+
 
 module.exports = {
   getTriggerReply,
