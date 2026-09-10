@@ -34,7 +34,26 @@ async function searchYouTube(query) {
   };
 }
 
-function runYtDlp(videoUrl, outputPath) {
+const extractorProfiles = [
+  {
+    name: "tv",
+    args: "youtube:player_client=tv",
+  },
+  {
+    name: "web_safari",
+    args: "youtube:player_client=web_safari",
+  },
+  {
+    name: "mweb",
+    args: "youtube:player_client=mweb",
+  },
+  {
+    name: "default",
+    args: null,
+  },
+];
+
+function runYtDlp(videoUrl, outputPath, profile) {
   return new Promise((resolve, reject) => {
     const args = [
       videoUrl,
@@ -48,10 +67,12 @@ function runYtDlp(videoUrl, outputPath) {
       "--retries", "3",
       "--fragment-retries", "3",
       "--ffmpeg-location", ffmpegPath,
-      "--extractor-args", "youtube:player_client=android,web",
     ];
 
-    // THIS FORCES THE BOT TO RUN OUR LOCAL FOLDER VERSION EXTRACTOR
+    if (profile.args) {
+      args.push("--extractor-args", profile.args);
+    }
+
     const child = spawn(localYtDlpBinary, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -100,21 +121,43 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.rm(outputPath, { force: true });
 
-  try {
-    await runYtDlp(videoUrl, outputPath);
-  } catch (error) {
-    throw new Error(
-      `YouTube audio download failed:\n${error.message || String(error)}`
-    );
+  const failures = [];
+
+  for (const profile of extractorProfiles) {
+    await fs.rm(outputPath, { force: true });
+
+    try {
+      console.log(
+        `[YouTube] Trying extractor profile: ${profile.name}`
+      );
+
+      await runYtDlp(videoUrl, outputPath, profile);
+
+      const fileInfo = await fs.stat(outputPath).catch(() => null);
+
+      if (fileInfo && fileInfo.size > 0) {
+        console.log(
+          `[YouTube] Download succeeded with profile: ${profile.name}`
+        );
+        return outputPath;
+      }
+
+      failures.push(
+        `${profile.name}: no audio file was created`
+      );
+    } catch (error) {
+      const message = error?.message || String(error);
+      failures.push(`${profile.name}: ${message}`);
+      console.error(
+        `[YouTube] Profile ${profile.name} failed:`,
+        message
+      );
+    }
   }
 
-  const fileInfo = await fs.stat(outputPath).catch(() => null);
-  if (!fileInfo || fileInfo.size === 0) {
-    throw new Error(
-      "The download completed, but no audio file was created."
-    );
-  }
-  return outputPath;
+  throw new Error(
+    `All YouTube extractor profiles failed:\n${failures.join("\n")}`
+  );
 }
 
 function isYouTubeUrl(value) {
