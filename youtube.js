@@ -5,6 +5,9 @@ const { spawn } = require("child_process");
 const ytSearch = require("yt-search");
 const ffmpegPath = require("ffmpeg-static");
 
+// THIS SPECIFIES THE PATH TO THE CORRECT UPDATED BINARY WE DOWNLOADED INTO YOUR PROJECT
+const localYtDlpBinary = path.join(__dirname, "node_modules", "youtube-dl-exec", "bin", "yt-dlp");
+
 async function searchYouTube(query) {
   if (typeof query !== "string" || !query.trim()) {
     return null;
@@ -48,7 +51,8 @@ function runYtDlp(videoUrl, outputPath) {
       "--extractor-args", "youtube:player_client=android,web",
     ];
 
-    const child = spawn("yt-dlp", args, {
+    // THIS FORCES THE BOT TO RUN OUR LOCAL FOLDER VERSION EXTRACTOR
+    const child = spawn(localYtDlpBinary, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
