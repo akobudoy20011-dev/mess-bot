@@ -22,6 +22,39 @@ const {
   downloadAudioToFile,
 } = require("./jamendo");
 
+const YOUTUBE_SEARCH_TIMEOUT_MS = 30_000;
+const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 180_000;
+
+function withTimeout(operation, timeoutMs, timeoutMessage) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(timeoutMessage));
+      }
+    }, timeoutMs);
+
+    Promise.resolve()
+      .then(operation)
+      .then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        }
+      );
+  });
+}
+
+
 /**
  * Searches YouTube, downloads the audio, sends it to Messenger,
  * and removes the temporary file afterward.
@@ -60,7 +93,11 @@ async function sendAudioTrack(api, requestedSong, threadID) {
       }
     );
 
-    const video = await searchYouTube(requestedSong);
+    const video = await withTimeout(
+      () => searchYouTube(requestedSong),
+      YOUTUBE_SEARCH_TIMEOUT_MS,
+      "YouTube search timed out after 30 seconds. Please try again."
+    );
 
     if (!video || !video.url) {
       throw new Error(
@@ -68,7 +105,11 @@ async function sendAudioTrack(api, requestedSong, threadID) {
       );
     }
 
-    await downloadYouTubeAudio(video.url, temporaryFile);
+    await withTimeout(
+      () => downloadYouTubeAudio(video.url, temporaryFile),
+      YOUTUBE_DOWNLOAD_TIMEOUT_MS,
+      "YouTube download timed out after 3 minutes. The host may be blocked by YouTube; please try again."
+    );
 
     const fileInfo = await fsp.stat(temporaryFile);
 
