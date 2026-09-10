@@ -4,7 +4,6 @@
   "description": "Facebook Messenger bot using saved session cookies",
   "main": "index.js",
   "scripts": {
-    "prestart": "npx youtube-dl-exec --update",
     "start": "node index.js"
   },
   "engines": {
