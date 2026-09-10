@@ -73,3 +73,10 @@ often in normal conversation. Edit the `triggers` arrays in `triggers.js` to
 narrow or change them.
 
 Add your own logic inside `handleMessage()` in `index.js`.
+
+
+## YouTube playback
+
+YouTube may block downloads from cloud-hosted server IPs with a bot check. If `!play` reports `Sign in to confirm you’re not a bot` or `Failed to extract any player response`, export a fresh **Netscape-format** cookie file for `youtube.com` and add its contents as the `YOUTUBE_COOKIES` environment variable.
+
+Do not commit YouTube cookies to GitHub. The bot writes this secret to a temporary file only while downloading and deletes it afterward. After adding the variable in Render, redeploy the service.
