@@ -33,13 +33,13 @@ const groups = [
       "tito mong daga mukhang nilaga",
       "ttkels lang kita",
       "si jaiden nasa kmjs, title e batang pinaglihi sa burat",
-      "kelan kaya map-phase out kagaya ni jaiden?",
+      "kelan kaya ma-phase out kagaya ni jaiden?",
       "si jaiden nakita ko nakatambay sa grinder e",
       "jaiden and his broke boys era",
       "pag broke jaiden, mamakla ka",
       "jaiden mukhang nahulugan langka e",
       "tangina mo, pake ko sa opinion mo",
-      "kelan kaya tatanggaling freedom of speech netong gago na to?",
+      "kelan kaya tatanggalin freedom of speech netong gago na to?",
       "onga e, mukha kang kumakain pwet",
       "todo sabat, akala mo naman may arit e anghit dala mo",
       "iyak si gago",
@@ -270,7 +270,7 @@ const groups = [
   },
 ];
 
-// Jeø, Aeix, Kikay, Sylora, Marcellus, and Theone
+// Jeø, Aeix, Kikay, Sylora, Marcellus, Theone, and Mizzy
 // all reuse the Jaiden reply list, with the name swapped.
 
 const jaidenGroupForClones = groups.find(
@@ -329,6 +329,15 @@ if (jaidenGroupForClones) {
     index: 0,
     replies: jaidenGroupForClones.replies.map((reply) =>
       reply.replace(/\bjaiden\b/gi, "Theone")
+    ),
+  });
+
+  groups.push({
+    name: "mizzy",
+    triggers: ["mizzy"],
+    index: 0,
+    replies: jaidenGroupForClones.replies.map((reply) =>
+      reply.replace(/\bjaiden\b/gi, "Mizzy")
     ),
   });
 }
@@ -413,6 +422,10 @@ function getTriggerReply(rawText, senderId) {
 
   if (process.env.KIKAY_ID) {
     roastTargets.kikay = normalizeId(process.env.KIKAY_ID);
+  }
+
+  if (process.env.MIZZY_ID) {
+    roastTargets.mizzy = normalizeId(process.env.MIZZY_ID);
   }
 
   // Keep the old XETH_ID option working.
