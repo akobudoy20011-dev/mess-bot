@@ -270,16 +270,34 @@ const groups = [
   },
 ];
 
-// Jeø uses the same roast list as Jaiden, with the name changed.
-const jaidenGroupForJeo = groups.find((group) => group.name === "jaiden");
+// Jeø, aeix, and kikay all reuse the Jaiden roast list, with the name swapped.
+const jaidenGroupForClones = groups.find((group) => group.name === "jaiden");
 
-if (jaidenGroupForJeo) {
+if (jaidenGroupForClones) {
   groups.push({
     name: "jeo",
     triggers: ["jeø", "jeo"],
     index: 0,
-    replies: jaidenGroupForJeo.replies.map((reply) =>
+    replies: jaidenGroupForClones.replies.map((reply) =>
       reply.replace(/\bjaiden\b/gi, "Jeø")
+    ),
+  });
+
+  groups.push({
+    name: "aeix",
+    triggers: ["aeix"],
+    index: 0,
+    replies: jaidenGroupForClones.replies.map((reply) =>
+      reply.replace(/\bjaiden\b/gi, "Aeix")
+    ),
+  });
+
+  groups.push({
+    name: "kikay",
+    triggers: ["kikay"],
+    index: 0,
+    replies: jaidenGroupForClones.replies.map((reply) =>
+      reply.replace(/\bjaiden\b/gi, "Kikay")
     ),
   });
 }
@@ -325,8 +343,8 @@ function getTriggerReply(rawText, senderId) {
     }
   }
 
-  // Jaiden, Jeø, Vincent, Aselm, and Xeth can use their matching *_ID variable.
-  // ROAST_TARGET_IDS can also be used for additional targets.
+  // Jaiden, Jeø, Vincent, Aselm, Aeix, Kikay, and Xeth can use their matching
+  // *_ID variable. ROAST_TARGET_IDS can also be used for additional targets.
   const roastTargets = {};
 
   if (process.env.JAIDEN_ID) {
@@ -343,6 +361,14 @@ function getTriggerReply(rawText, senderId) {
 
   if (process.env.JEO_ID) {
     roastTargets.jeo = normalizeId(process.env.JEO_ID);
+  }
+
+  if (process.env.AEIX_ID) {
+    roastTargets.aeix = normalizeId(process.env.AEIX_ID);
+  }
+
+  if (process.env.KIKAY_ID) {
+    roastTargets.kikay = normalizeId(process.env.KIKAY_ID);
   }
 
   // Keep the old XETH_ID option working if it is still present in Render.
