@@ -7,6 +7,7 @@ const ffmpegPath = require("ffmpeg-static");
 
 // youtube-dl-exec installs the current yt-dlp binary in this project.
 const localYtDlpBinary = path.join(__dirname, "node_modules", "youtube-dl-exec", "bin", "yt-dlp");
+const youtubeCookies = process.env.YOUTUBE_COOKIES?.trim() || null;
 
 async function searchYouTube(query) {
   if (typeof query !== "string" || !query.trim()) {
@@ -60,7 +61,7 @@ const extractorProfiles = [
   },
 ];
 
-function runYtDlp(videoUrl, outputPath, profile) {
+function runYtDlp(videoUrl, outputPath, profile, cookieFilePath) {
   return new Promise((resolve, reject) => {
     const args = [
       videoUrl,
@@ -70,12 +71,15 @@ function runYtDlp(videoUrl, outputPath, profile) {
       "--audio-format", "mp3",
       "--audio-quality", "0",
       "--no-playlist",
-      "--no-warnings",
       "--retries", "3",
       "--fragment-retries", "3",
       "--ffmpeg-location", ffmpegPath,
       ...ytDlpRuntimeArgs,
     ];
+
+    if (cookieFilePath) {
+      args.push("--cookies", cookieFilePath);
+    }
 
     if (profile.args) {
       args.push("--extractor-args", profile.args);
@@ -130,8 +134,14 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
   await fs.rm(outputPath, { force: true });
 
   const failures = [];
+  const cookieFilePath = youtubeCookies ? `${outputPath}.youtube-cookies.txt` : null;
 
-  for (const profile of extractorProfiles) {
+  try {
+    if (cookieFilePath) {
+      await fs.writeFile(cookieFilePath, `${youtubeCookies}\n`, { mode: 0o600 });
+    }
+
+    for (const profile of extractorProfiles) {
     await fs.rm(outputPath, { force: true });
 
     try {
@@ -139,7 +149,7 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
         `[YouTube] Trying extractor profile: ${profile.name}`
       );
 
-      await runYtDlp(videoUrl, outputPath, profile);
+      await runYtDlp(videoUrl, outputPath, profile, cookieFilePath);
 
       const fileInfo = await fs.stat(outputPath).catch(() => null);
 
@@ -163,9 +173,23 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
     }
   }
 
-  throw new Error(
-    `All YouTube extractor profiles failed:\n${failures.join("\n")}`
-  );
+    }
+
+    const botCheckDetected = !youtubeCookies && failures.some((failure) =>
+      /not a bot|player response/i.test(failure)
+    );
+    const hint = botCheckDetected
+      ? "\n\nYouTube is blocking this server as automated. Configure the YOUTUBE_COOKIES secret with a fresh Netscape-format YouTube cookie export."
+      : "";
+
+    throw new Error(
+      `All YouTube extractor profiles failed:\n${failures.join("\n")}${hint}`
+    );
+  } finally {
+    if (cookieFilePath) {
+      await fs.rm(cookieFilePath, { force: true });
+    }
+  }
 }
 
 function isYouTubeUrl(value) {
