@@ -1,10 +1,13 @@
-"use strict";
-
-const { login } = require("ws3-fca");
-const express = require("express");
 const fs = require("fs");
+const fsp = require("fs/promises");
+const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+
+const {
+  searchYouTube,
+  downloadYouTubeAudio,
+} = require("./youtube");
 
 const {
   getTriggerReply,
