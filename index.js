@@ -3,6 +3,8 @@ const fsp = require("fs/promises");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const express = require("express");
+const login = require("ws3-fca");
 
 const {
   searchYouTube,
@@ -18,6 +20,7 @@ const {
   searchJamendo,
   downloadAudioToFile,
 } = require("./jamendo");
+
 /**
  * Searches YouTube, downloads the audio, sends it to Messenger,
  * and removes the temporary file afterward.
@@ -116,7 +119,8 @@ function sendMessengerMessage(api, message, threadID) {
       reject(error);
     }
   });
-  
+}
+
 // ---------------------------------------------------------------------------
 // Render health-check web server
 // ---------------------------------------------------------------------------
@@ -149,7 +153,10 @@ server.on("error", (error) => {
 function readAppState() {
   const rawCookies = process.env.FB_COOKIES;
 
-  if (typeof rawCookies !== "string" || !rawCookies.trim()) {
+  if (
+    typeof rawCookies !== "string" ||
+    !rawCookies.trim()
+  ) {
     throw new Error("FB_COOKIES is missing.");
   }
 
@@ -158,57 +165,53 @@ function readAppState() {
   try {
     parsed = JSON.parse(rawCookies);
 
-    // Supports an environment variable containing a JSON-encoded JSON string.
+    // Supports a JSON-encoded JSON string.
     if (typeof parsed === "string") {
       parsed = JSON.parse(parsed);
     }
-  } catch (error) {
+  } catch {
     throw new Error(
-      "FB_COOKIES must contain a valid JSON array of Facebook cookie objects."
+      "FB_COOKIES must contain valid JSON."
     );
   }
 
   if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new Error(
-      "FB_COOKIES parsed successfully, but it is not a valid cookie array."
+      "FB_COOKIES must be a non-empty cookie array."
     );
   }
 
-  const invalidCookie = parsed.find((cookie) => {
+  return parsed.map((cookie) => {
     if (
       !cookie ||
       typeof cookie !== "object" ||
       Array.isArray(cookie)
     ) {
-      return true;
+      throw new Error(
+        "Each FB_COOKIES entry must be an object."
+      );
     }
 
-    const cookieName =
+    const key =
       typeof cookie.key === "string"
         ? cookie.key
         : cookie.name;
 
-    return (
-      typeof cookieName !== "string" ||
-      !cookieName.trim() ||
+    if (
+      typeof key !== "string" ||
+      !key.trim() ||
       typeof cookie.value !== "string"
-    );
+    ) {
+      throw new Error(
+        "Every cookie must contain string name/key and value fields."
+      );
+    }
+
+    return {
+      ...cookie,
+      key,
+    };
   });
-
-  if (invalidCookie) {
-    throw new Error(
-      "Every FB_COOKIES entry must contain string name/key and value fields."
-    );
-  }
-
-  // ws3-fca expects the cookie name in the `key` property.
-  return parsed.map((cookie) => ({
-    ...cookie,
-    key:
-      typeof cookie.key === "string"
-        ? cookie.key
-        : cookie.name,
-  }));
 }
 
 let appState;
