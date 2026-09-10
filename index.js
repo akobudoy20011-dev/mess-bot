@@ -19,11 +19,6 @@ const {
   downloadAudioToFile,
 } = require("./jamendo");
 
-const {
-  searchYouTube,
-  downloadYouTubeAudio,
-} = require("./youtube");
-
 // ---------------------------------------------------------------------------
 // Render health-check web server
 // ---------------------------------------------------------------------------
