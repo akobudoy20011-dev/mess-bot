@@ -4,7 +4,8 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
-const { login } = require("ws3-fca");⁠
+const { login } = require("ws3-fca");
+
 
 const {
   searchYouTube,
