@@ -5,7 +5,7 @@ const { spawn } = require("child_process");
 const ytSearch = require("yt-search");
 const ffmpegPath = require("ffmpeg-static");
 
-// THIS SPECIFIES THE PATH TO THE CORRECT UPDATED BINARY WE DOWNLOADED INTO YOUR PROJECT
+// youtube-dl-exec installs the current yt-dlp binary in this project.
 const localYtDlpBinary = path.join(__dirname, "node_modules", "youtube-dl-exec", "bin", "yt-dlp");
 
 async function searchYouTube(query) {
@@ -34,7 +34,18 @@ async function searchYouTube(query) {
   };
 }
 
+// Recent yt-dlp versions use EJS to solve YouTube's player challenges.
+// Node 22+ is supported as a JavaScript runtime for that solver.
+const ytDlpRuntimeArgs = [
+  "--js-runtimes",
+  `node:${process.execPath}`,
+];
+
 const extractorProfiles = [
+  {
+    name: "default",
+    args: null,
+  },
   {
     name: "tv",
     args: "youtube:player_client=tv",
@@ -46,10 +57,6 @@ const extractorProfiles = [
   {
     name: "mweb",
     args: "youtube:player_client=mweb",
-  },
-  {
-    name: "default",
-    args: null,
   },
 ];
 
@@ -67,6 +74,7 @@ function runYtDlp(videoUrl, outputPath, profile) {
       "--retries", "3",
       "--fragment-retries", "3",
       "--ffmpeg-location", ffmpegPath,
+      ...ytDlpRuntimeArgs,
     ];
 
     if (profile.args) {
@@ -92,7 +100,7 @@ function runYtDlp(videoUrl, outputPath, profile) {
       if (err.code === "ENOENT") {
         reject(
           new Error(
-            "yt-dlp was not found. Install it with: pip install yt-dlp"
+            "yt-dlp was not found. Install dependencies with: npm install"
           )
         );
       } else {
