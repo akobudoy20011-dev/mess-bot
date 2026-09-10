@@ -39,7 +39,7 @@ const groups = [
       "pag broke jaiden, mamakla ka",
       "jaiden mukhang nahulugan langka e",
       "tangina mo, pake ko sa opinion mo",
-      "kelan kaya tatanggalin freedom of speech netong gago na to?",
+      "kelan kaya tatangaling freedom of speech netong gago na to?",
       "onga e, mukha kang kumakain pwet",
       "todo sabat, akala mo naman may arit e anghit dala mo",
       "iyak si gago",
@@ -270,8 +270,10 @@ const groups = [
   },
 ];
 
-// Jeø, Aeix, Kikay, Sylora, Marcellus, Theone, and Mizzy
-// all reuse the Jaiden reply list, with the name swapped.
+
+// ============================================================
+// JAIDEN CLONES
+// ============================================================
 
 const jaidenGroupForClones = groups.find(
   (group) => group.name === "jaiden"
@@ -331,17 +333,44 @@ if (jaidenGroupForClones) {
       reply.replace(/\bjaiden\b/gi, "Theone")
     ),
   });
-
-  groups.push({
-    name: "mizzy",
-    triggers: ["mizzy"],
-    index: 0,
-    replies: jaidenGroupForClones.replies.map((reply) =>
-      reply.replace(/\bjaiden\b/gi, "Mizzy")
-    ),
-  });
 }
 
+
+// ============================================================
+// SANTA BISAYA SPECIAL GROUP
+// ============================================================
+//
+// Santa Bisaya is different from the normal Jaiden clones.
+//
+// Santa gets EVERY reply from EVERY group above,
+// from top to bottom, instead of only the Jaiden replies.
+//
+// The replies are copied after all normal groups and clones
+// have been created, so Santa's pool contains everything.
+//
+
+const santaBisayaGroup = {
+  name: "santa-bisaya",
+  triggers: ["santa bisaya", "santa-bisaya"],
+  index: 0,
+
+  replies: groups
+    .flatMap((group) =>
+      Array.isArray(group.replies)
+        ? group.replies
+        : []
+    )
+    .map((reply) =>
+      reply.replace(/\bjaiden\b/gi, "Santa Bisaya")
+    ),
+};
+
+groups.push(santaBisayaGroup);
+
+
+// ============================================================
+// TRIGGER / ID MATCHING
+// ============================================================
 
 function getTriggerReply(rawText, senderId) {
   if (!rawText) {
@@ -384,8 +413,11 @@ function getTriggerReply(rawText, senderId) {
     }
   }
 
-  // Match people by their Messenger ID even when
-  // their name was NOT mentioned in the message.
+
+  // ==========================================================
+  // MATCH PEOPLE BY MESSENGER ID
+  // ==========================================================
+
   const roastTargets = {};
 
   if (process.env.JAIDEN_ID) {
@@ -428,13 +460,24 @@ function getTriggerReply(rawText, senderId) {
     roastTargets.mizzy = normalizeId(process.env.MIZZY_ID);
   }
 
+  // Santa Bisaya
+  if (process.env.SANTA_BISAYA_ID) {
+    roastTargets["santa-bisaya"] = normalizeId(
+      process.env.SANTA_BISAYA_ID
+    );
+  }
+
   // Keep the old XETH_ID option working.
   if (process.env.XETH_ID) {
     roastTargets.xeth = normalizeId(process.env.XETH_ID);
   }
 
-  // Optional additional targets:
+
+  // ==========================================================
+  // OPTIONAL ADDITIONAL TARGETS
   // ROAST_TARGET_IDS=group:id,group:id
+  // ==========================================================
+
   for (
     const entry of (process.env.ROAST_TARGET_IDS || "").split(",")
   ) {
@@ -458,8 +501,11 @@ function getTriggerReply(rawText, senderId) {
     }
   }
 
-  // If the sender matches an ID,
-  // use that person's group even if their name wasn't mentioned.
+
+  // ==========================================================
+  // ID MATCH
+  // ==========================================================
+
   for (
     const [groupName, targetId]
     of Object.entries(roastTargets)
@@ -480,12 +526,20 @@ function getTriggerReply(rawText, senderId) {
 }
 
 
+// ============================================================
+// NORMALIZE ID
+// ============================================================
+
 function normalizeId(value) {
   return String(value || "")
     .trim()
     .replace(/^["']|["']$/g, "");
 }
 
+
+// ============================================================
+// RANDOM GENERIC ROAST
+// ============================================================
 
 function getRandomRoastReply() {
   // Only use generic groups here.
@@ -513,6 +567,10 @@ function getRandomRoastReply() {
 }
 
 
+// ============================================================
+// SEQUENTIAL REPLY
+// ============================================================
+
 function getNextReply(group) {
   if (
     !group ||
@@ -531,6 +589,10 @@ function getNextReply(group) {
 }
 
 
+// ============================================================
+// ESCAPE REGEX
+// ============================================================
+
 function escapeRegExp(str) {
   return str.replace(
     /[.*+?^${}()|[\]\\]/g,
@@ -538,6 +600,10 @@ function escapeRegExp(str) {
   );
 }
 
+
+// ============================================================
+// EXPORTS
+// ============================================================
 
 module.exports = {
   getTriggerReply,
