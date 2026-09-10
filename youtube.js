@@ -173,8 +173,6 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
     }
   }
 
-    }
-
     const botCheckDetected = !youtubeCookies && failures.some((failure) =>
       /not a bot|player response/i.test(failure)
     );
