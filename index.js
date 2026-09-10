@@ -18,7 +18,105 @@ const {
   searchJamendo,
   downloadAudioToFile,
 } = require("./jamendo");
+/**
+ * Searches YouTube, downloads the audio, sends it to Messenger,
+ * and removes the temporary file afterward.
+ */
+async function sendAudioTrack(api, requestedSong, threadID) {
+  if (
+    typeof requestedSong !== "string" ||
+    !requestedSong.trim()
+  ) {
+    api.sendMessage(
+      "Usage: !play <song name>",
+      threadID,
+      (error) => {
+        if (error) {
+          console.error("Usage message failed:", error);
+        }
+      }
+    );
 
+    return;
+  }
+
+  const temporaryFile = path.join(
+    os.tmpdir(),
+    `audio-${crypto.randomUUID()}.mp3`
+  );
+
+  try {
+    api.sendMessage(
+      "🔎 Searching for the song...",
+      threadID,
+      (error) => {
+        if (error) {
+          console.error("Search status message failed:", error);
+        }
+      }
+    );
+
+    const video = await searchYouTube(requestedSong);
+
+    if (!video || !video.url) {
+      throw new Error(
+        `No YouTube result found for "${requestedSong}".`
+      );
+    }
+
+    await downloadYouTubeAudio(video.url, temporaryFile);
+
+    const fileInfo = await fsp.stat(temporaryFile);
+
+    if (!fileInfo.isFile() || fileInfo.size === 0) {
+      throw new Error("The downloaded audio file is empty.");
+    }
+
+    await sendMessengerMessage(
+      api,
+      {
+        body: `🎵 ${video.title || requestedSong}`,
+        attachment: fs.createReadStream(temporaryFile),
+      },
+      threadID
+    );
+  } catch (error) {
+    console.error("Audio command failed:", error);
+
+    api.sendMessage(
+      `❌ Unable to download that song.\n${error.message}`,
+      threadID,
+      (sendError) => {
+        if (sendError) {
+          console.error("Audio error message failed:", sendError);
+        }
+      }
+    );
+  } finally {
+    await fsp.unlink(temporaryFile).catch(() => {
+      // The file may not have been created.
+    });
+  }
+}
+
+/**
+ * Converts ws3-fca's callback-based sendMessage API into a Promise.
+ */
+function sendMessengerMessage(api, message, threadID) {
+  return new Promise((resolve, reject) => {
+    try {
+      api.sendMessage(message, threadID, (error) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+  
 // ---------------------------------------------------------------------------
 // Render health-check web server
 // ---------------------------------------------------------------------------
