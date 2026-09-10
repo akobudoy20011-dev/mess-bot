@@ -4,8 +4,7 @@
   "description": "Facebook Messenger bot using saved session cookies",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "update-ytdlp": "node -e \"require('youtube-dl-exec').exec('--version').then(console.log).catch(console.error)\""
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=18.18.0"
@@ -13,7 +12,6 @@
   "dependencies": {
     "express": "^4.19.2",
     "ffmpeg-static": "^5.2.0",
-    "youtube-dl-exec": "^3.1.15",
     "yt-search": "^2.10.3",
     "ws3-fca": "^2.0.0"
   }
