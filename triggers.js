@@ -272,6 +272,79 @@ const groups = [
 
 
 // ============================================================
+// PUBLIC ROAST GROUP
+// ============================================================
+//
+// Unlike the named groups above, this one has NO trigger words —
+// it is never matched inside the normal trigger-matching loop.
+// Instead, index.js calls getNextPublicReply() directly whenever
+// a message comes from someone who is NOT a matched named target
+// and didn't hit any trigger word, so anyone in the chat can get
+// roasted without needing to type a specific word.
+//
+
+const publicRoastGroup = {
+  name: "public",
+  triggers: [],
+  index: 0,
+  replies: [
+    "bro talks like his Wi-Fi has 1 bar 📶💀",
+    "your brain loading screen got stuck 🧠⏳",
+    "you bring NPC energy to every conversation 🎮💀",
+    "bro really thought that was a comeback 😭",
+    "your confidence is doing all the heavy lifting 💀",
+    "bro's thoughts need subtitles 🧠😭",
+    "you have the reaction time of a loading screen 🐌💀",
+    "even autocorrect gave up on you 📱😭",
+    "bro argues with facts and still loses 📉💀",
+    "your comebacks have a 3–5 business day delay 📦😭",
+    "bro's brain is running on demo mode 🧠💀",
+    "you make silence sound intelligent 🤐😭",
+    "bro got the personality of an expired CAPTCHA 🤖💀",
+    "your logic just left the group chat 🚪💀",
+    "bro speaks fluent nonsense 🗣️💀",
+    "you really woke up and chose zero brain cells today 😭🧠",
+    "bro's vocabulary got nerfed 📉💀",
+    "your argument has more holes than Swiss cheese 🧀😭",
+    "bro's common sense is on airplane mode ✈️💀",
+    "you could lose an argument to a loading icon ⏳😭",
+    "bro has negative aura points 📉💀",
+    "your thoughts are buffering in 144p 🧠📺",
+    "bro's comeback expired before he sent it ⏰💀",
+    "you bring tutorial-level energy to boss fights 🎮😭",
+    "bro's brain said 'I'll sit this one out' 🧠🪑",
+    "your logic needs a software update 🔄💀",
+    "bro has the strategic thinking of a potato 🥔😭",
+    "even your excuses need an excuse 💀",
+    "bro's confidence is sponsored by delusion 😭💀",
+    "your brain has too many tabs open and none are useful 🧠🖥️",
+    "bro's insults hit like a wet tissue 🧻💀",
+    "you have the charisma of a mandatory update 📱😭",
+    "bro's processing power is fighting for its life 🧠🔥",
+    "your comeback came with dial-up internet 📞💀",
+    "bro's thoughts are still in beta testing 🧪😭",
+    "you make confusion look like a career 💼💀",
+    "bro's brain needs customer support 📞🧠",
+    "your logic took a wrong turn and never came back 🚗💀",
+    "bro has the energy of an unplugged controller 🎮😭",
+    "you really said that with confidence too 💀😭",
+    "bro's brain is running on 2% battery 🔋💀",
+    "your argument got rejected by basic arithmetic ➗😭",
+    "bro's personality is still downloading ⬇️💀",
+    "you could make a calculator question its purpose 🧮😭",
+    "bro's common sense is permanently AFK 🎮💀",
+    "your comeback has less impact than a notification sound 🔔😭",
+    "bro's brain took a lunch break mid-sentence 🧠🍔💀",
+    "you bring side-character energy to your own story 📖💀",
+    "bro's logic is held together by duct tape 🩹😭",
+    "even your shadow is distancing itself 🌑💀",
+  ],
+};
+
+groups.push(publicRoastGroup);
+
+
+// ============================================================
 // JAIDEN CLONES
 // ============================================================
 
@@ -342,8 +415,9 @@ if (jaidenGroupForClones) {
 //
 // Santa Bisaya is different from the normal Jaiden clones.
 //
-// Santa gets EVERY reply from EVERY group above,
-// from top to bottom, instead of only the Jaiden replies.
+// Santa gets EVERY reply from EVERY group above (including the
+// new public group), from top to bottom, instead of only the
+// Jaiden replies.
 //
 // The replies are copied after all normal groups and clones
 // have been created, so Santa's pool contains everything.
@@ -527,6 +601,16 @@ function getTriggerReply(rawText, senderId) {
 
 
 // ============================================================
+// PUBLIC REPLY (for anyone who isn't a matched trigger/target)
+// ============================================================
+
+function getNextPublicReply() {
+  const group = groups.find((g) => g.name === "public");
+  return getNextReply(group);
+}
+
+
+// ============================================================
 // NORMALIZE ID
 // ============================================================
 
@@ -608,5 +692,6 @@ function escapeRegExp(str) {
 module.exports = {
   getTriggerReply,
   getRandomRoastReply,
+  getNextPublicReply,
   groups,
 };
