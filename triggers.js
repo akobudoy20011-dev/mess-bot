@@ -390,6 +390,15 @@ if (jaidenGroupForClones) {
   });
 
   groups.push({
+    name: "rishan",
+    triggers: ["rishan"],
+    index: 0,
+    replies: jaidenGroupForClones.replies.map((reply) =>
+      reply.replace(/\bjaiden\b/gi, "Rishan")
+    ),
+  });
+
+  groups.push({
     name: "marcellus",
     triggers: ["marcellus"],
     index: 0,
