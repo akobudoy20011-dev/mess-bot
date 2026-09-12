@@ -3,104 +3,47 @@
  * =====
  * Neon PostgreSQL persistence
  *
- * Stores:
- * - wallet balance
- * - bank balance
- * - XP / levels / ranks
- * - game statistics
- * - inventory
- * - daily/work cooldowns
- * - credit score
- * - simulated loans
- * - per-group settings
+ * Includes:
+ * - Wallet balance
+ * - Bank balance
+ * - XP + levels
+ * - Ranks
+ * - Daily rewards
+ * - Work rewards
+ * - Transfers
+ * - Credit score
+ * - Loan simulation
+ * - Economy transactions
+ * - Inventory
+ * - Thread settings
  *
- * No real money is involved.
+ * NOTE:
+ * This is a virtual game economy.
+ * No real-money wagering is used.
  */
 
 const { Pool } = require("pg");
 
-// ============================================================
-// CONFIG
-// ============================================================
-
 const STARTING_BALANCE = 100;
-const STARTING_BANK = 0;
+const STARTING_CREDIT_SCORE = 600;
 
-const STARTING_CREDIT_SCORE = 500;
+// ============================================================
+// RANKS
+// ============================================================
 
 const RANKS = [
-  { name: "Beginner", minXP: 0 },
-  { name: "Bronze", minXP: 500 },
-  { name: "Silver", minXP: 2000 },
-  { name: "Gold", minXP: 5000 },
-  { name: "Platinum", minXP: 12000 },
-  { name: "Diamond", minXP: 25000 },
-  { name: "Master", minXP: 50000 },
-  { name: "Grandmaster", minXP: 100000 },
+  { name: "Beginner", xp: 0 },
+  { name: "Bronze", xp: 500 },
+  { name: "Silver", xp: 2000 },
+  { name: "Gold", xp: 5000 },
+  { name: "Platinum", xp: 12000 },
+  { name: "Diamond", xp: 25000 },
+  { name: "Master", xp: 50000 },
+  { name: "Grandmaster", xp: 100000 },
 ];
 
 // ============================================================
-// DATABASE SCHEMA
-// ============================================================
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS users (
-  thread_id        TEXT NOT NULL,
-  user_id          TEXT NOT NULL,
-
-  balance          INTEGER NOT NULL DEFAULT ${STARTING_BALANCE},
-  bank_balance     INTEGER NOT NULL DEFAULT ${STARTING_BANK},
-
-  xp               INTEGER NOT NULL DEFAULT 0,
-  level            INTEGER NOT NULL DEFAULT 1,
-
-  credit_score     INTEGER NOT NULL DEFAULT ${STARTING_CREDIT_SCORE},
-
-  loan_principal   INTEGER NOT NULL DEFAULT 0,
-  loan_remaining   INTEGER NOT NULL DEFAULT 0,
-  loan_due         BIGINT,
-
-  last_daily       BIGINT,
-  last_work        BIGINT,
-
-  daily_streak     INTEGER NOT NULL DEFAULT 0,
-
-  games_played     INTEGER NOT NULL DEFAULT 0,
-  wins             INTEGER NOT NULL DEFAULT 0,
-
-  PRIMARY KEY (thread_id, user_id)
-);
-
-CREATE TABLE IF NOT EXISTS thread_settings (
-  thread_id     TEXT PRIMARY KEY,
-  roast_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-  fun_enabled   BOOLEAN NOT NULL DEFAULT TRUE
-);
-
-CREATE TABLE IF NOT EXISTS inventory (
-  thread_id  TEXT NOT NULL,
-  user_id    TEXT NOT NULL,
-  item_id    TEXT NOT NULL,
-  amount     INTEGER NOT NULL DEFAULT 0,
-
-  PRIMARY KEY (thread_id, user_id, item_id)
-);
-
-CREATE TABLE IF NOT EXISTS economy_transactions (
-  id         BIGSERIAL PRIMARY KEY,
-
-  thread_id  TEXT NOT NULL,
-  user_id    TEXT NOT NULL,
-
-  type       TEXT NOT NULL,
-  amount     INTEGER NOT NULL,
-
-  created_at BIGINT NOT NULL
-);
-`;
-
-// ============================================================
-// CONNECTION
+// DATABASE
 // ============================================================
 
 let pool = null;
@@ -119,36 +62,90 @@ async function connect() {
     },
   });
 
-  // Create tables if they don't exist.
-  await pool.query(SCHEMA);
+  // ----------------------------------------------------------
+  // ORIGINAL TABLES
+  // ----------------------------------------------------------
 
-  // ==========================================================
-  // MIGRATION
-  // ==========================================================
-  //
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      thread_id     TEXT NOT NULL,
+      user_id       TEXT NOT NULL,
+      balance       INTEGER NOT NULL DEFAULT ${STARTING_BALANCE},
+      last_daily    BIGINT,
+      last_work     BIGINT,
+      daily_streak  INTEGER NOT NULL DEFAULT 0,
+      games_played  INTEGER NOT NULL DEFAULT 0,
+      wins          INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (thread_id, user_id)
+    );
+  `);
+
+  // ----------------------------------------------------------
   // IMPORTANT:
-  // CREATE TABLE IF NOT EXISTS does NOT update an old table.
+  // ADD NEW COLUMNS TO EXISTING USERS TABLE
   //
-  // These ALTER TABLE statements make sure existing Neon
-  // databases receive the new economy columns.
-  //
+  // This fixes the "column xp does not exist" error.
+  // ----------------------------------------------------------
 
   await pool.query(`
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS bank_balance INTEGER NOT NULL DEFAULT 0,
       ADD COLUMN IF NOT EXISTS xp INTEGER NOT NULL DEFAULT 0,
       ADD COLUMN IF NOT EXISTS level INTEGER NOT NULL DEFAULT 1,
-      ADD COLUMN IF NOT EXISTS credit_score INTEGER NOT NULL DEFAULT 500,
+      ADD COLUMN IF NOT EXISTS credit_score INTEGER NOT NULL DEFAULT ${STARTING_CREDIT_SCORE},
       ADD COLUMN IF NOT EXISTS loan_principal INTEGER NOT NULL DEFAULT 0,
       ADD COLUMN IF NOT EXISTS loan_remaining INTEGER NOT NULL DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS loan_due BIGINT;
+      ADD COLUMN IF NOT EXISTS loan_due BIGINT,
+      ADD COLUMN IF NOT EXISTS display_name TEXT;
   `);
 
-  console.log("[db] connected + schema ready");
+  // ----------------------------------------------------------
+  // THREAD SETTINGS
+  // ----------------------------------------------------------
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS thread_settings (
+      thread_id      TEXT PRIMARY KEY,
+      roast_enabled   BOOLEAN NOT NULL DEFAULT TRUE,
+      fun_enabled     BOOLEAN NOT NULL DEFAULT TRUE
+    );
+  `);
+
+  // ----------------------------------------------------------
+  // INVENTORY
+  // ----------------------------------------------------------
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS inventory (
+      thread_id  TEXT NOT NULL,
+      user_id    TEXT NOT NULL,
+      item_id     TEXT NOT NULL,
+      amount      INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (thread_id, user_id, item_id)
+    );
+  `);
+
+  // ----------------------------------------------------------
+  // ECONOMY TRANSACTIONS
+  // ----------------------------------------------------------
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS economy_transactions (
+      id            BIGSERIAL PRIMARY KEY,
+      thread_id     TEXT NOT NULL,
+      user_id       TEXT NOT NULL,
+      type          TEXT NOT NULL,
+      amount        INTEGER NOT NULL,
+      description   TEXT,
+      created_at    BIGINT NOT NULL
+    );
+  `);
+
+  console.log("[db] connected + schema/migrations ready");
 }
 
 // ============================================================
-// INTERNAL HELPERS
+// CONNECTION CHECK
 // ============================================================
 
 function requireConn() {
@@ -161,23 +158,15 @@ function requireConn() {
   return pool;
 }
 
-function normalizeId(value) {
-  return String(value);
-}
-
-function now() {
-  return Date.now();
-}
-
 // ============================================================
-// USER FUNCTIONS
+// USER HELPERS
 // ============================================================
 
 async function getUser(threadId, userId) {
   const conn = requireConn();
 
-  threadId = normalizeId(threadId);
-  userId = normalizeId(userId);
+  threadId = String(threadId);
+  userId = String(userId);
 
   const { rows } = await conn.query(
     `
@@ -192,20 +181,16 @@ async function getUser(threadId, userId) {
   if (rows.length === 0) {
     await conn.query(
       `
-      INSERT INTO users
-        (
-          thread_id,
-          user_id,
-          balance,
-          bank_balance,
-          xp,
-          level,
-          credit_score,
-          loan_principal,
-          loan_remaining
-        )
-      VALUES
-        ($1, $2, $3, $4, 0, 1, $5, 0, 0)
+      INSERT INTO users (
+        thread_id,
+        user_id,
+        balance,
+        bank_balance,
+        xp,
+        level,
+        credit_score
+      )
+      VALUES ($1, $2, $3, 0, 0, 1, $4)
       ON CONFLICT (thread_id, user_id)
       DO NOTHING
       `,
@@ -213,7 +198,6 @@ async function getUser(threadId, userId) {
         threadId,
         userId,
         STARTING_BALANCE,
-        STARTING_BANK,
         STARTING_CREDIT_SCORE,
       ]
     );
@@ -241,34 +225,33 @@ async function getUser(threadId, userId) {
 async function updateUser(threadId, userId, fields) {
   const conn = requireConn();
 
-  threadId = normalizeId(threadId);
-  userId = normalizeId(userId);
+  threadId = String(threadId);
+  userId = String(userId);
 
   await getUser(threadId, userId);
 
   const allowedFields = [
     "balance",
     "bank_balance",
+    "last_daily",
+    "last_work",
+    "daily_streak",
+    "games_played",
+    "wins",
     "xp",
     "level",
     "credit_score",
     "loan_principal",
     "loan_remaining",
     "loan_due",
-    "last_daily",
-    "last_work",
-    "daily_streak",
-    "games_played",
-    "wins",
+    "display_name",
   ];
 
   const safeKeys = Object.keys(fields).filter((key) =>
     allowedFields.includes(key)
   );
 
-  if (safeKeys.length === 0) {
-    return;
-  }
+  if (safeKeys.length === 0) return;
 
   const setClause = safeKeys
     .map((key, index) => `${key} = $${index + 3}`)
@@ -288,35 +271,34 @@ async function updateUser(threadId, userId, fields) {
 }
 
 // ============================================================
+// DISPLAY NAME
+// ============================================================
+
+async function setUserDisplayName(threadId, userId, displayName) {
+  await getUser(threadId, userId);
+
+  await updateUser(threadId, userId, {
+    display_name: String(displayName || "").slice(0, 100),
+  });
+}
+
+// ============================================================
 // WALLET
 // ============================================================
 
 async function addBalance(threadId, userId, amount) {
-  const conn = requireConn();
+  const user = await getUser(threadId, userId);
 
-  threadId = normalizeId(threadId);
-  userId = normalizeId(userId);
-
-  await getUser(threadId, userId);
-
-  const value = Number(amount);
-
-  if (!Number.isFinite(value)) {
-    throw new Error("Invalid balance amount.");
-  }
-
-  const { rows } = await conn.query(
-    `
-    UPDATE users
-    SET balance = GREATEST(0, balance + $3)
-    WHERE thread_id = $1
-      AND user_id = $2
-    RETURNING balance
-    `,
-    [threadId, userId, Math.trunc(value)]
+  const newBalance = Math.max(
+    0,
+    Number(user.balance) + Number(amount)
   );
 
-  return Number(rows[0].balance);
+  await updateUser(threadId, userId, {
+    balance: newBalance,
+  });
+
+  return newBalance;
 }
 
 // ============================================================
@@ -324,24 +306,12 @@ async function addBalance(threadId, userId, amount) {
 // ============================================================
 
 async function incrementGameStats(threadId, userId, won) {
-  const conn = requireConn();
+  const user = await getUser(threadId, userId);
 
-  threadId = normalizeId(threadId);
-  userId = normalizeId(userId);
-
-  await getUser(threadId, userId);
-
-  await conn.query(
-    `
-    UPDATE users
-    SET
-      games_played = games_played + 1,
-      wins = wins + $3
-    WHERE thread_id = $1
-      AND user_id = $2
-    `,
-    [threadId, userId, won ? 1 : 0]
-  );
+  await updateUser(threadId, userId, {
+    games_played: Number(user.games_played) + 1,
+    wins: Number(user.wins) + (won ? 1 : 0),
+  });
 }
 
 // ============================================================
@@ -349,79 +319,19 @@ async function incrementGameStats(threadId, userId, won) {
 // ============================================================
 
 function calculateLevel(xp) {
-  const value = Math.max(0, Number(xp) || 0);
+  xp = Math.max(0, Number(xp) || 0);
 
-  return Math.floor(Math.sqrt(value / 100)) + 1;
+  return Math.floor(Math.sqrt(xp / 100)) + 1;
 }
-
-async function addXP(threadId, userId, amount) {
-  const conn = requireConn();
-
-  threadId = normalizeId(threadId);
-  userId = normalizeId(userId);
-
-  await getUser(threadId, userId);
-
-  const xpAmount = Math.max(0, Math.trunc(Number(amount)));
-
-  const { rows } = await conn.query(
-    `
-    UPDATE users
-    SET
-      xp = xp + $3,
-      level = $4
-    WHERE thread_id = $1
-      AND user_id = $2
-    RETURNING xp, level
-    `,
-    [
-      threadId,
-      userId,
-      xpAmount,
-      calculateLevel(
-        (
-          await getUser(threadId, userId)
-        ).xp
-      ) + 0,
-    ]
-  );
-
-  // Recalculate level correctly from the resulting XP.
-  const newXP = Number(rows[0].xp);
-  const newLevel = calculateLevel(newXP);
-
-  if (Number(rows[0].level) !== newLevel) {
-    await conn.query(
-      `
-      UPDATE users
-      SET level = $3
-      WHERE thread_id = $1
-        AND user_id = $2
-      `,
-      [threadId, userId, newLevel]
-    );
-  }
-
-  return {
-    xp: newXP,
-    level: newLevel,
-  };
-}
-
-// ============================================================
-// RANKS
-// ============================================================
 
 function getRank(xp) {
-  const value = Math.max(0, Number(xp) || 0);
+  xp = Number(xp) || 0;
 
   let current = RANKS[0];
 
   for (const rank of RANKS) {
-    if (value >= rank.minXP) {
+    if (xp >= rank.xp) {
       current = rank;
-    } else {
-      break;
     }
   }
 
@@ -429,10 +339,10 @@ function getRank(xp) {
 }
 
 function getNextRank(xp) {
-  const value = Math.max(0, Number(xp) || 0);
+  xp = Number(xp) || 0;
 
   for (const rank of RANKS) {
-    if (value < rank.minXP) {
+    if (xp < rank.xp) {
       return rank;
     }
   }
@@ -440,35 +350,46 @@ function getNextRank(xp) {
   return null;
 }
 
-function getRankProgress(xp) {
-  const value = Math.max(0, Number(xp) || 0);
+async function addXP(threadId, userId, amount) {
+  const user = await getUser(threadId, userId);
 
-  const current = getRank(value);
-  const next = getNextRank(value);
+  const oldXP = Number(user.xp) || 0;
+  const newXP = Math.max(0, oldXP + Number(amount));
 
-  if (!next) {
-    return {
-      current,
-      next: null,
-      progress: 100,
-      remaining: 0,
-    };
-  }
+  const newLevel = calculateLevel(newXP);
 
-  const range = next.minXP - current.minXP;
-  const progress =
-    range <= 0
-      ? 100
-      : Math.floor(
-          ((value - current.minXP) / range) * 100
-        );
+  await updateUser(threadId, userId, {
+    xp: newXP,
+    level: newLevel,
+  });
 
   return {
-    current,
-    next,
-    progress: Math.max(0, Math.min(100, progress)),
-    remaining: Math.max(0, next.minXP - value),
+    xp: newXP,
+    level: newLevel,
+    rank: getRank(newXP),
+    nextRank: getNextRank(newXP),
   };
+}
+
+// ============================================================
+// WALLET LEADERBOARD
+// ============================================================
+
+async function leaderboard(threadId, limit = 10) {
+  const conn = requireConn();
+
+  const { rows } = await conn.query(
+    `
+    SELECT *
+    FROM users
+    WHERE thread_id = $1
+    ORDER BY balance DESC
+    LIMIT $2
+    `,
+    [String(threadId), Number(limit)]
+  );
+
+  return rows;
 }
 
 // ============================================================
@@ -478,76 +399,55 @@ function getRankProgress(xp) {
 async function moneyLeaderboard(threadId, limit = 10) {
   const conn = requireConn();
 
-  const safeLimit = Math.max(
-    1,
-    Math.min(50, Number(limit) || 10)
-  );
-
   const { rows } = await conn.query(
     `
-    SELECT *
+    SELECT
+      *,
+      (balance + bank_balance) AS total_money
     FROM users
     WHERE thread_id = $1
-    ORDER BY (balance + bank_balance) DESC
+    ORDER BY total_money DESC
     LIMIT $2
     `,
-    [normalizeId(threadId), safeLimit]
+    [String(threadId), Number(limit)]
   );
 
   return rows;
 }
 
 // ============================================================
-// OLD LEADERBOARD COMPATIBILITY
-// ============================================================
-
-async function leaderboard(threadId, limit = 10) {
-  return moneyLeaderboard(threadId, limit);
-}
-
-// ============================================================
-// BANK
+// BANK DEPOSIT
 // ============================================================
 
 async function deposit(threadId, userId, amount) {
-  const conn = requireConn();
+  amount = Math.floor(Number(amount));
 
-  threadId = normalizeId(threadId);
-  userId = normalizeId(userId);
-
-  const value = Math.trunc(Number(amount));
-
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error("Deposit amount must be greater than 0.");
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Invalid deposit amount.");
   }
 
-  // Make sure the user exists BEFORE starting the transaction.
   await getUser(threadId, userId);
 
-  const client = await conn.connect();
+  const client = await requireConn().connect();
 
   try {
     await client.query("BEGIN");
 
     const { rows } = await client.query(
       `
-      SELECT balance, bank_balance
+      SELECT *
       FROM users
       WHERE thread_id = $1
         AND user_id = $2
       FOR UPDATE
       `,
-      [threadId, userId]
+      [String(threadId), String(userId)]
     );
 
-    if (!rows.length) {
-      throw new Error("User does not exist.");
-    }
+    const user = rows[0];
 
-    const wallet = Number(rows[0].balance);
-
-    if (wallet < value) {
-      throw new Error("Insufficient wallet balance.");
+    if (Number(user.balance) < amount) {
+      throw new Error("Not enough wallet coins.");
     }
 
     await client.query(
@@ -559,17 +459,22 @@ async function deposit(threadId, userId, amount) {
       WHERE thread_id = $1
         AND user_id = $2
       `,
-      [threadId, userId, value]
+      [String(threadId), String(userId), amount]
     );
 
     await client.query(
       `
       INSERT INTO economy_transactions
-        (thread_id, user_id, type, amount, created_at)
+        (thread_id, user_id, type, amount, description, created_at)
       VALUES
-        ($1, $2, 'deposit', $3, $4)
+        ($1, $2, 'deposit', $3, 'Bank deposit', $4)
       `,
-      [threadId, userId, value, now()]
+      [
+        String(threadId),
+        String(userId),
+        amount,
+        Date.now(),
+      ]
     );
 
     await client.query("COMMIT");
@@ -583,44 +488,39 @@ async function deposit(threadId, userId, amount) {
   }
 }
 
+// ============================================================
+// BANK WITHDRAW
+// ============================================================
+
 async function withdraw(threadId, userId, amount) {
-  const conn = requireConn();
+  amount = Math.floor(Number(amount));
 
-  threadId = normalizeId(threadId);
-  userId = normalizeId(userId);
-
-  const value = Math.trunc(Number(amount));
-
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error("Withdrawal amount must be greater than 0.");
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Invalid withdrawal amount.");
   }
 
   await getUser(threadId, userId);
 
-  const client = await conn.connect();
+  const client = await requireConn().connect();
 
   try {
     await client.query("BEGIN");
 
     const { rows } = await client.query(
       `
-      SELECT balance, bank_balance
+      SELECT *
       FROM users
       WHERE thread_id = $1
         AND user_id = $2
       FOR UPDATE
       `,
-      [threadId, userId]
+      [String(threadId), String(userId)]
     );
 
-    if (!rows.length) {
-      throw new Error("User does not exist.");
-    }
+    const user = rows[0];
 
-    const bank = Number(rows[0].bank_balance);
-
-    if (bank < value) {
-      throw new Error("Insufficient bank balance.");
+    if (Number(user.bank_balance) < amount) {
+      throw new Error("Not enough money in the bank.");
     }
 
     await client.query(
@@ -632,17 +532,22 @@ async function withdraw(threadId, userId, amount) {
       WHERE thread_id = $1
         AND user_id = $2
       `,
-      [threadId, userId, value]
+      [String(threadId), String(userId), amount]
     );
 
     await client.query(
       `
       INSERT INTO economy_transactions
-        (thread_id, user_id, type, amount, created_at)
+        (thread_id, user_id, type, amount, description, created_at)
       VALUES
-        ($1, $2, 'withdraw', $3, $4)
+        ($1, $2, 'withdraw', $3, 'Bank withdrawal', $4)
       `,
-      [threadId, userId, value, now()]
+      [
+        String(threadId),
+        String(userId),
+        amount,
+        Date.now(),
+      ]
     );
 
     await client.query("COMMIT");
@@ -660,79 +565,43 @@ async function withdraw(threadId, userId, amount) {
 // TRANSFER
 // ============================================================
 
-async function transfer(
-  threadId,
-  fromUserId,
-  toUserId,
-  amount
-) {
-  const conn = requireConn();
+async function transfer(threadId, fromUserId, toUserId, amount) {
+  amount = Math.floor(Number(amount));
 
-  threadId = normalizeId(threadId);
-  fromUserId = normalizeId(fromUserId);
-  toUserId = normalizeId(toUserId);
-
-  const value = Math.trunc(Number(amount));
-
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error("Transfer amount must be greater than 0.");
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Invalid transfer amount.");
   }
 
+  fromUserId = String(fromUserId);
+  toUserId = String(toUserId);
+
   if (fromUserId === toUserId) {
-    throw new Error("You cannot transfer to yourself.");
+    throw new Error("You cannot transfer coins to yourself.");
   }
 
   await getUser(threadId, fromUserId);
   await getUser(threadId, toUserId);
 
-  const client = await conn.connect();
+  const client = await requireConn().connect();
 
   try {
     await client.query("BEGIN");
 
-    // Lock both users in deterministic order.
-    const firstId =
-      fromUserId < toUserId ? fromUserId : toUserId;
-
-    const secondId =
-      fromUserId < toUserId ? toUserId : fromUserId;
-
-    await client.query(
+    const senderResult = await client.query(
       `
-      SELECT user_id
+      SELECT *
       FROM users
       WHERE thread_id = $1
         AND user_id = $2
       FOR UPDATE
       `,
-      [threadId, firstId]
+      [String(threadId), fromUserId]
     );
 
-    await client.query(
-      `
-      SELECT user_id
-      FROM users
-      WHERE thread_id = $1
-        AND user_id = $2
-      FOR UPDATE
-      `,
-      [threadId, secondId]
-    );
+    const sender = senderResult.rows[0];
 
-    const { rows } = await client.query(
-      `
-      SELECT balance
-      FROM users
-      WHERE thread_id = $1
-        AND user_id = $2
-      `,
-      [threadId, fromUserId]
-    );
-
-    const senderBalance = Number(rows[0].balance);
-
-    if (senderBalance < value) {
-      throw new Error("Insufficient wallet balance.");
+    if (Number(sender.balance) < amount) {
+      throw new Error("You don't have enough wallet coins.");
     }
 
     await client.query(
@@ -742,7 +611,7 @@ async function transfer(
       WHERE thread_id = $1
         AND user_id = $2
       `,
-      [threadId, fromUserId, value]
+      [String(threadId), fromUserId, amount]
     );
 
     await client.query(
@@ -752,105 +621,50 @@ async function transfer(
       WHERE thread_id = $1
         AND user_id = $2
       `,
-      [threadId, toUserId, value]
+      [String(threadId), toUserId, amount]
     );
 
     await client.query(
       `
       INSERT INTO economy_transactions
-        (thread_id, user_id, type, amount, created_at)
+        (thread_id, user_id, type, amount, description, created_at)
       VALUES
-        ($1, $2, 'transfer_sent', $3, $4),
-        ($1, $5, 'transfer_received', $3, $4)
+        ($1, $2, 'transfer_sent', $3, $4, $5)
       `,
       [
-        threadId,
+        String(threadId),
         fromUserId,
-        value,
-        now(),
+        amount,
+        `Transfer to ${toUserId}`,
+        Date.now(),
+      ]
+    );
+
+    await client.query(
+      `
+      INSERT INTO economy_transactions
+        (thread_id, user_id, type, amount, description, created_at)
+      VALUES
+        ($1, $2, 'transfer_received', $3, $4, $5)
+      `,
+      [
+        String(threadId),
         toUserId,
+        amount,
+        `Transfer from ${fromUserId}`,
+        Date.now(),
       ]
     );
 
     await client.query("COMMIT");
 
-    return {
-      amount: value,
-      from: await getUser(threadId, fromUserId),
-      to: await getUser(threadId, toUserId),
-    };
+    return true;
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
   } finally {
     client.release();
   }
-}
-
-// ============================================================
-// BANK INTEREST
-// ============================================================
-
-async function applyBankInterest(threadId, userId) {
-  const conn = requireConn();
-
-  threadId = normalizeId(threadId);
-  userId = normalizeId(userId);
-
-  await getUser(threadId, userId);
-
-  // 1% simulated interest.
-  const INTEREST_RATE = 0.01;
-
-  const { rows } = await conn.query(
-    `
-    SELECT bank_balance
-    FROM users
-    WHERE thread_id = $1
-      AND user_id = $2
-    `,
-    [threadId, userId]
-  );
-
-  if (!rows.length) {
-    return 0;
-  }
-
-  const bankBalance = Number(rows[0].bank_balance);
-
-  if (bankBalance <= 0) {
-    return 0;
-  }
-
-  const interest = Math.floor(
-    bankBalance * INTEREST_RATE
-  );
-
-  if (interest <= 0) {
-    return 0;
-  }
-
-  await conn.query(
-    `
-    UPDATE users
-    SET bank_balance = bank_balance + $3
-    WHERE thread_id = $1
-      AND user_id = $2
-    `,
-    [threadId, userId, interest]
-  );
-
-  await conn.query(
-    `
-    INSERT INTO economy_transactions
-      (thread_id, user_id, type, amount, created_at)
-    VALUES
-      ($1, $2, 'bank_interest', $3, $4)
-    `,
-    [threadId, userId, interest, now()]
-  );
-
-  return interest;
 }
 
 // ============================================================
@@ -858,248 +672,130 @@ async function applyBankInterest(threadId, userId) {
 // ============================================================
 
 async function applyLoan(threadId, userId, amount) {
-  const conn = requireConn();
+  amount = Math.floor(Number(amount));
 
-  threadId = normalizeId(threadId);
-  userId = normalizeId(userId);
-
-  const value = Math.trunc(Number(amount));
-
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error("Loan amount must be greater than 0.");
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Invalid loan amount.");
   }
 
-  await getUser(threadId, userId);
+  const user = await getUser(threadId, userId);
 
-  const client = await conn.connect();
-
-  try {
-    await client.query("BEGIN");
-
-    const { rows } = await client.query(
-      `
-      SELECT
-        credit_score,
-        loan_remaining
-      FROM users
-      WHERE thread_id = $1
-        AND user_id = $2
-      FOR UPDATE
-      `,
-      [threadId, userId]
-    );
-
-    const user = rows[0];
-
-    if (Number(user.loan_remaining) > 0) {
-      throw new Error(
-        "You already have an active loan."
-      );
-    }
-
-    const creditScore = Number(user.credit_score);
-
-    if (creditScore < 400) {
-      throw new Error(
-        "Your credit score is too low for another loan."
-      );
-    }
-
-    const maxLoan = Math.max(
-      500,
-      Math.floor(creditScore * 10)
-    );
-
-    if (value > maxLoan) {
-      throw new Error(
-        `Your current maximum loan is ${maxLoan} coins.`
-      );
-    }
-
-    // 10% simulated interest.
-    const totalDue = Math.ceil(value * 1.1);
-
-    const dueDate =
-      Date.now() +
-      7 * 24 * 60 * 60 * 1000;
-
-    await client.query(
-      `
-      UPDATE users
-      SET
-        balance = balance + $3,
-        loan_principal = $3,
-        loan_remaining = $4,
-        loan_due = $5
-      WHERE thread_id = $1
-        AND user_id = $2
-      `,
-      [
-        threadId,
-        userId,
-        value,
-        totalDue,
-        dueDate,
-      ]
-    );
-
-    await client.query(
-      `
-      INSERT INTO economy_transactions
-        (thread_id, user_id, type, amount, created_at)
-      VALUES
-        ($1, $2, 'loan', $3, $4)
-      `,
-      [threadId, userId, value, now()]
-    );
-
-    await client.query("COMMIT");
-
-    return await getUser(threadId, userId);
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
+  if (Number(user.loan_remaining) > 0) {
+    throw new Error("You already have an active loan.");
   }
+
+  const maxLoan = Math.max(
+    500,
+    Math.floor(Number(user.credit_score) * 10)
+  );
+
+  if (amount > maxLoan) {
+    throw new Error(
+      `Your credit score allows a maximum loan of ${maxLoan} coins.`
+    );
+  }
+
+  const interestRate = 0.10;
+
+  const totalDue = Math.ceil(
+    amount * (1 + interestRate)
+  );
+
+  const dueDate =
+    Date.now() + 7 * 24 * 60 * 60 * 1000;
+
+  await updateUser(threadId, userId, {
+    balance: Number(user.balance) + amount,
+    loan_principal: amount,
+    loan_remaining: totalDue,
+    loan_due: dueDate,
+  });
+
+  return {
+    principal: amount,
+    totalDue,
+    dueDate,
+  };
 }
 
 async function payLoan(threadId, userId, amount) {
-  const conn = requireConn();
+  amount = Math.floor(Number(amount));
 
-  threadId = normalizeId(threadId);
-  userId = normalizeId(userId);
-
-  const value = Math.trunc(Number(amount));
-
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(
-      "Loan payment must be greater than 0."
-    );
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Invalid payment amount.");
   }
 
-  await getUser(threadId, userId);
+  const user = await getUser(threadId, userId);
 
-  const client = await conn.connect();
-
-  try {
-    await client.query("BEGIN");
-
-    const { rows } = await client.query(
-      `
-      SELECT
-        balance,
-        loan_remaining
-      FROM users
-      WHERE thread_id = $1
-        AND user_id = $2
-      FOR UPDATE
-      `,
-      [threadId, userId]
-    );
-
-    const user = rows[0];
-
-    const balance = Number(user.balance);
-    const remaining = Number(user.loan_remaining);
-
-    if (remaining <= 0) {
-      throw new Error("You do not have an active loan.");
-    }
-
-    if (balance < value) {
-      throw new Error(
-        "You do not have enough wallet coins."
-      );
-    }
-
-    const payment = Math.min(value, remaining);
-    const newRemaining = remaining - payment;
-
-    // Successful repayment improves credit score.
-    const newCreditScore =
-      newRemaining === 0
-        ? Math.min(
-            850,
-            Number(
-              (
-                await client.query(
-                  `
-                  SELECT credit_score
-                  FROM users
-                  WHERE thread_id = $1
-                    AND user_id = $2
-                  `,
-                  [threadId, userId]
-                )
-              ).rows[0].credit_score
-            ) + 25
-          )
-        : Number(
-            (
-              await client.query(
-                `
-                SELECT credit_score
-                FROM users
-                WHERE thread_id = $1
-                  AND user_id = $2
-                `,
-                [threadId, userId]
-              )
-            ).rows[0].credit_score
-          );
-
-    await client.query(
-      `
-      UPDATE users
-      SET
-        balance = balance - $3,
-        loan_remaining = $4,
-        credit_score = $5,
-
-        loan_principal =
-          CASE
-            WHEN $4 = 0 THEN 0
-            ELSE loan_principal
-          END,
-
-        loan_due =
-          CASE
-            WHEN $4 = 0 THEN NULL
-            ELSE loan_due
-          END
-
-      WHERE thread_id = $1
-        AND user_id = $2
-      `,
-      [
-        threadId,
-        userId,
-        payment,
-        newRemaining,
-        newCreditScore,
-      ]
-    );
-
-    await client.query(
-      `
-      INSERT INTO economy_transactions
-        (thread_id, user_id, type, amount, created_at)
-      VALUES
-        ($1, $2, 'loan_payment', $3, $4)
-      `,
-      [threadId, userId, payment, now()]
-    );
-
-    await client.query("COMMIT");
-
-    return await getUser(threadId, userId);
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
+  if (Number(user.loan_remaining) <= 0) {
+    throw new Error("You don't have an active loan.");
   }
+
+  if (Number(user.balance) < amount) {
+    throw new Error("You don't have enough wallet coins.");
+  }
+
+  const payment = Math.min(
+    amount,
+    Number(user.loan_remaining)
+  );
+
+  const remaining =
+    Number(user.loan_remaining) - payment;
+
+  let creditScore =
+    Number(user.credit_score) || STARTING_CREDIT_SCORE;
+
+  if (remaining === 0) {
+    creditScore = Math.min(850, creditScore + 20);
+  }
+
+  await updateUser(threadId, userId, {
+    balance: Number(user.balance) - payment,
+    loan_remaining: remaining,
+    credit_score: creditScore,
+    loan_principal:
+      remaining === 0
+        ? 0
+        : Number(user.loan_principal),
+    loan_due:
+      remaining === 0
+        ? null
+        : user.loan_due,
+  });
+
+  return {
+    payment,
+    remaining,
+    creditScore,
+  };
+}
+
+// ============================================================
+// BANK INTEREST
+// ============================================================
+
+async function applyBankInterest(threadId, userId) {
+  const user = await getUser(threadId, userId);
+
+  const bankBalance = Number(user.bank_balance) || 0;
+
+  if (bankBalance <= 0) {
+    return 0;
+  }
+
+  // 1% interest
+  const interest = Math.floor(bankBalance * 0.01);
+
+  if (interest <= 0) {
+    return 0;
+  }
+
+  await updateUser(threadId, userId, {
+    bank_balance: bankBalance + interest,
+  });
+
+  return interest;
 }
 
 // ============================================================
@@ -1117,27 +813,18 @@ async function addItem(
   await conn.query(
     `
     INSERT INTO inventory
-      (
-        thread_id,
-        user_id,
-        item_id,
-        amount
-      )
+      (thread_id, user_id, item_id, amount)
     VALUES
       ($1, $2, $3, $4)
-
-    ON CONFLICT
-      (thread_id, user_id, item_id)
-
+    ON CONFLICT (thread_id, user_id, item_id)
     DO UPDATE SET
       amount =
-        inventory.amount +
-        excluded.amount
+        inventory.amount + excluded.amount
     `,
     [
-      normalizeId(threadId),
-      normalizeId(userId),
-      normalizeId(itemId),
+      String(threadId),
+      String(userId),
+      String(itemId),
       Number(amount),
     ]
   );
@@ -1155,8 +842,8 @@ async function getInventory(threadId, userId) {
       AND amount > 0
     `,
     [
-      normalizeId(threadId),
-      normalizeId(userId),
+      String(threadId),
+      String(userId),
     ]
   );
 
@@ -1176,7 +863,7 @@ async function getInventory(threadId, userId) {
 async function getThreadSettings(threadId) {
   const conn = requireConn();
 
-  const id = normalizeId(threadId);
+  const id = String(threadId);
 
   const { rows } = await conn.query(
     `
@@ -1191,14 +878,9 @@ async function getThreadSettings(threadId) {
     await conn.query(
       `
       INSERT INTO thread_settings
-        (
-          thread_id,
-          roast_enabled,
-          fun_enabled
-        )
+        (thread_id, roast_enabled, fun_enabled)
       VALUES
         ($1, TRUE, TRUE)
-
       ON CONFLICT (thread_id)
       DO NOTHING
       `,
@@ -1215,13 +897,10 @@ async function getThreadSettings(threadId) {
   return rows[0];
 }
 
-async function setThreadSettings(
-  threadId,
-  fields
-) {
+async function setThreadSettings(threadId, fields) {
   const conn = requireConn();
 
-  const id = normalizeId(threadId);
+  const id = String(threadId);
 
   await getThreadSettings(id);
 
@@ -1262,7 +941,7 @@ async function setThreadSettings(
 }
 
 // ============================================================
-// ROAST / BANAT
+// BANAT
 // ============================================================
 
 async function isRoastEnabled(threadId) {
@@ -1306,12 +985,12 @@ async function setGameEnabled(
 // ============================================================
 
 module.exports = {
-  // Connection
   connect,
 
   // Users
   getUser,
   updateUser,
+  setUserDisplayName,
 
   // Wallet
   addBalance,
@@ -1319,14 +998,11 @@ module.exports = {
   // Stats
   incrementGameStats,
 
-  // XP / levels
+  // XP / ranks
   addXP,
   calculateLevel,
-
-  // Ranks
   getRank,
   getNextRank,
-  getRankProgress,
 
   // Leaderboards
   leaderboard,
@@ -1335,8 +1011,10 @@ module.exports = {
   // Bank
   deposit,
   withdraw,
-  transfer,
   applyBankInterest,
+
+  // Transfers
+  transfer,
 
   // Loans
   applyLoan,
@@ -1350,7 +1028,7 @@ module.exports = {
   getThreadSettings,
   setThreadSettings,
 
-  // Roast
+  // Banat
   isRoastEnabled,
   setRoastEnabled,
 
