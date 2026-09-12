@@ -15,12 +15,21 @@ const {
 const {
   getTriggerReply,
   getRandomRoastReply,
+  getNextPublicReply,
 } = require("./triggers");
 
 const {
   searchJamendo,
   downloadAudioToFile,
 } = require("./jamendo");
+
+const {
+  getRizz,
+  getAura,
+  getIQ,
+  getSimp,
+  getClown,
+} = require("./funcommands");
 
 const YOUTUBE_SEARCH_TIMEOUT_MS = 30_000;
 const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 180_000;
@@ -274,17 +283,12 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .map((id) => id.trim())
   .filter(Boolean);
 
-const RANDOM_ROAST_ENABLED = /^(1|true|yes|on)$/i.test(
+// NOTE: this flag now gates the deterministic "public roast" behavior
+// (anyone who isn't a matched trigger/target gets roasted on cooldown),
+// not a percentage-chance roll anymore.
+const RANDOM_ROAST_ENABLED = !/^(0|false|no|off)$/i.test(
   process.env.RANDOM_ROAST || ""
 );
-
-const parsedRoastChance = Number(
-  process.env.RANDOM_ROAST_CHANCE || "0.1"
-);
-
-const RANDOM_ROAST_CHANCE = Number.isFinite(parsedRoastChance)
-  ? Math.max(0, Math.min(1, parsedRoastChance))
-  : 0.1;
 
 const parsedCooldown = Number(
   process.env.RANDOM_ROAST_COOLDOWN_MS || "30000"
@@ -415,6 +419,11 @@ function handleMessage(api, event) {
         "!ping - health check",
         "!help - this message",
         "!play <song> - send an audio track",
+        "!rizz <name> - random rizz meter",
+        "!aura <name> - random aura points",
+        "!iq <name> - random IQ score",
+        "!simp <name> - random simp meter",
+        "!clown <name> - random clown meter",
         "!broadcast <text> - admin only",
       ].join("\n"),
       threadID
@@ -428,6 +437,36 @@ function handleMessage(api, event) {
       .trim();
 
     void sendAudioTrack(api, requestedSong, threadID);
+    return;
+  }
+
+  if (text === "!rizz" || text.startsWith("!rizz ")) {
+    const name = originalText.slice("!rizz".length).trim() || "You";
+    sendReplyWithTyping(api, getRizz(name).text, threadID);
+    return;
+  }
+
+  if (text === "!aura" || text.startsWith("!aura ")) {
+    const name = originalText.slice("!aura".length).trim() || "You";
+    sendReplyWithTyping(api, getAura(name).text, threadID);
+    return;
+  }
+
+  if (text === "!iq" || text.startsWith("!iq ")) {
+    const name = originalText.slice("!iq".length).trim() || "You";
+    sendReplyWithTyping(api, getIQ(name).text, threadID);
+    return;
+  }
+
+  if (text === "!simp" || text.startsWith("!simp ")) {
+    const name = originalText.slice("!simp".length).trim() || "You";
+    sendReplyWithTyping(api, getSimp(name).text, threadID);
+    return;
+  }
+
+  if (text === "!clown" || text.startsWith("!clown ")) {
+    const name = originalText.slice("!clown".length).trim() || "You";
+    sendReplyWithTyping(api, getClown(name).text, threadID);
     return;
   }
 
@@ -450,14 +489,15 @@ function handleMessage(api, event) {
     return;
   }
 
+  // Anyone who isn't a matched trigger/target gets a public roast line,
+  // once per cooldown window per thread (no random chance — deterministic).
   if (
     RANDOM_ROAST_ENABLED &&
-    Math.random() < RANDOM_ROAST_CHANCE &&
     canRandomRoastThread(String(threadID))
   ) {
-    const randomRoast = getRandomRoastReply();
+    const publicReply = getNextPublicReply();
 
-    if (randomRoast) {
+    if (publicReply) {
       lastRandomRoastByThread.set(
         String(threadID),
         Date.now()
@@ -465,7 +505,7 @@ function handleMessage(api, event) {
 
       sendReplyWithTyping(
         api,
-        randomRoast,
+        publicReply,
         threadID,
         true
       );
