@@ -45,14 +45,14 @@ const STARTING_CREDIT_SCORE = 600;
 // ═══════════════════════════════════════════════════════════
 
 const RANKS = [
-  { name: "Beginner",    xp: 0 },
-  { name: "Bronze",      xp: 500 },
-  { name: "Silver",      xp: 2_000 },
-  { name: "Gold",        xp: 5_000 },
-  { name: "Platinum",    xp: 12_000 },
-  { name: "Diamond",     xp: 25_000 },
-  { name: "Master",      xp: 50_000 },
-  { name: "Grandmaster", xp: 100_000 },
+  { name: "Beginner",    xp: 0,       emoji: "🌱" },
+  { name: "Bronze",      xp: 500,     emoji: "🥉" },
+  { name: "Silver",      xp: 2_000,   emoji: "🥈" },
+  { name: "Gold",        xp: 5_000,   emoji: "🥇" },
+  { name: "Platinum",    xp: 12_000,  emoji: "💠" },
+  { name: "Diamond",     xp: 25_000,  emoji: "💎" },
+  { name: "Master",      xp: 50_000,  emoji: "🔥" },
+  { name: "Grandmaster", xp: 100_000, emoji: "👑" },
 ];
 
 
@@ -618,6 +618,12 @@ async function addXP(
   const oldXP =
     Number(user.xp) || 0;
 
+  // Captured BEFORE the update so callers (games.js's
+  // awardPlayer) can detect a rank-up by comparing this
+  // against the post-update rank.
+  const previousRank =
+    getRank(oldXP);
+
 
   const newXP =
     Math.max(
@@ -649,6 +655,8 @@ async function addXP(
 
     rank:
       getRank(newXP),
+
+    previousRank,
 
     nextRank:
       getNextRank(newXP),
@@ -1683,6 +1691,8 @@ async function applyLoan(
   return {
     principal:
       amount,
+
+    interestRate,
 
     totalDue,
 
