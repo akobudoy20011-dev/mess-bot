@@ -1,132 +1,68 @@
-/**
- * games.js
- * =========
- * Messenger Mini-Games
- *
- * Features:
- * - Single-message animations using api.editMessage()
- * - Aesthetic game UI
- * - Persistent !game on/off
- * - Persistent game sessions
- * - Trivia / RPS / Dice / Guess / Coinflip / Slots /
- *   Blackjack / 8-Ball
- *
- * Requires:
- *   ./db.js
- *   ./util.js
- *   ./trivia-questions.js
- */
-
-const db = require('./db');
-const { reply } = require('./util');
-const TRIVIA_QUESTIONS = require('./trivia-questions');
+const db = require("./db");
+const { reply } = require("./util");
+const triviaQuestions = require("./trivia-questions");
 
 // ============================================================
-// CONFIG
+// GAME CONFIG
 // ============================================================
 
 const SESSION_TIMEOUT_MS = 30_000;
 
-const ANIMATION = {
-  veryFast: 250,
-  fast: 400,
-  normal: 600,
-  slow: 800
-};
+// Every edit waits a random 3.2–3.8 seconds.
+// This feels more natural than exactly 3500ms every time.
+const EDIT_MIN_MS = 3200;
+const EDIT_MAX_MS = 3800;
+
+const sessions = new Map();
+const sessionTimers = new Map();
 
 // ============================================================
 // BASIC HELPERS
 // ============================================================
 
 function randInt(min, max) {
-  return Math.floor(
-    Math.random() * (max - min + 1)
-  ) + min;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function money(amount) {
-  return Number(amount || 0).toLocaleString();
+function editDelay() {
+  return randInt(EDIT_MIN_MS, EDIT_MAX_MS);
 }
 
-async function send(api, threadID, text) {
-  await reply(api, threadID, text);
+function money(n) {
+  return Number(n).toLocaleString("en-US");
 }
 
-/**
- * Direct Messenger send.
- *
- * Unlike util.reply(), this keeps the returned messageInfo
- * because we need messageID for editing animations.
- */
+function sessionKey(threadID, userID) {
+  return `${threadID}:${userID}`;
+}
+
+// ============================================================
+// MESSENGER MESSAGE HELPERS
+// ============================================================
+
 function sendMessageAsync(api, threadID, text) {
   return new Promise((resolve, reject) => {
     try {
-      api.sendMessage(
-        text,
-        threadID,
-        (error, messageInfo) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-
-          resolve(messageInfo);
+      api.sendMessage(text, threadID, (error, messageInfo) => {
+        if (error) {
+          reject(error);
+          return;
         }
-      );
+
+        resolve(messageInfo || null);
+      });
     } catch (error) {
       reject(error);
     }
   });
 }
 
-/**
- * Edit an existing bot message.
- */
-function editMessageAsync(api, text, messageID) {
-  return new Promise((resolve, reject) => {
-    try {
-      if (
-        !messageID ||
-        typeof api.editMessage !== 'function'
-      ) {
-        reject(
-          new Error(
-            'Message editing is unavailable.'
-          )
-        );
-
-        return;
-      }
-
-      api.editMessage(
-        text,
-        messageID,
-        error => {
-          if (error) {
-            reject(error);
-            return;
-          }
-
-          resolve();
-        }
-      );
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-/**
- * Extract message ID from different FCA/ws3-fca formats.
- */
 function getMessageID(messageInfo) {
-  if (!messageInfo) {
-    return null;
-  }
+  if (!messageInfo) return null;
 
   return (
     messageInfo.messageID ||
@@ -136,1338 +72,1078 @@ function getMessageID(messageInfo) {
   );
 }
 
-/**
- * Send the first frame and then edit that same message.
- *
- * If editing isn't available, only the FIRST frame and FINAL
- * frame are sent instead of spamming every animation frame.
- */
-async function animate(
-  api,
-  threadID,
-  frames,
-  delays = []
-) {
-  if (
-    !Array.isArray(frames) ||
-    frames.length === 0
-  ) {
-    return null;
-  }
+function editMessageAsync(api, text, messageID) {
+  return new Promise((resolve, reject) => {
+    try {
+      if (typeof api.editMessage !== "function") {
+        reject(new Error("editMessage() is not supported by this FCA version."));
+        return;
+      }
 
-  let messageInfo;
+      api.editMessage(text, messageID, error => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// ============================================================
+// ANIMATOR
+// ============================================================
+//
+// Sends ONE message and keeps editing that same message.
+//
+// If editing fails, it does NOT spam the chat with every frame.
+// It simply sends the final result once.
+// ============================================================
+
+async function createAnimator(api, threadID, firstText) {
+  const sent = await sendMessageAsync(api, threadID, firstText);
+
+  const messageID = getMessageID(sent);
+
+  let editable =
+    Boolean(messageID) &&
+    typeof api.editMessage === "function";
+
+  return {
+    messageID,
+
+    async edit(text) {
+      if (!editable) return false;
+
+      try {
+        await editMessageAsync(api, text, messageID);
+        return true;
+      } catch (error) {
+        console.warn("[games] message edit failed:", error.message);
+        editable = false;
+        return false;
+      }
+    },
+
+    async waitAndEdit(text) {
+      await sleep(editDelay());
+      return this.edit(text);
+    },
+
+    async final(text) {
+      if (editable) {
+        try {
+          await editMessageAsync(api, text, messageID);
+          return true;
+        } catch (error) {
+          console.warn("[games] final message edit failed:", error.message);
+          editable = false;
+        }
+      }
+
+      try {
+        await sendMessageAsync(api, threadID, text);
+      } catch (error) {
+        console.error("[games] failed to send final message:", error);
+      }
+
+      return false;
+    }
+  };
+}
+
+async function safeReply(api, event, text) {
+  try {
+    await reply(api, event, text);
+  } catch (error) {
+    console.error("[games] reply failed:", error);
+  }
+}
+
+async function editOrSend(api, threadID, messageID, text) {
+  if (messageID && typeof api.editMessage === "function") {
+    try {
+      await editMessageAsync(api, text, messageID);
+      return true;
+    } catch (error) {
+      console.warn("[games] edit failed:", error.message);
+    }
+  }
 
   try {
-    messageInfo =
-      await sendMessageAsync(
-        api,
-        threadID,
-        frames[0]
-      );
+    await sendMessageAsync(api, threadID, text);
   } catch (error) {
-    console.error(
-      '[games] initial animation send failed:',
-      error
-    );
-
-    return null;
+    console.error("[games] send failed:", error);
   }
 
-  const messageID =
-    getMessageID(messageInfo);
-
-  if (
-    !messageID ||
-    typeof api.editMessage !== 'function'
-  ) {
-    // Editing unavailable.
-    // Do not spam all animation frames.
-    if (frames.length > 1) {
-      try {
-        await sleep(
-          delays[delays.length - 1] ||
-          ANIMATION.normal
-        );
-
-        await sendMessageAsync(
-          api,
-          threadID,
-          frames[frames.length - 1]
-        );
-      } catch (error) {
-        console.error(
-          '[games] animation fallback failed:',
-          error
-        );
-      }
-    }
-
-    return messageID;
-  }
-
-  for (
-    let i = 1;
-    i < frames.length;
-    i++
-  ) {
-    await sleep(
-      delays[i - 1] ||
-      ANIMATION.normal
-    );
-
-    try {
-      await editMessageAsync(
-        api,
-        frames[i],
-        messageID
-      );
-    } catch (error) {
-      console.error(
-        '[games] edit failed:',
-        error
-      );
-
-      // Send only the final frame as fallback.
-      try {
-        await sendMessageAsync(
-          api,
-          threadID,
-          frames[frames.length - 1]
-        );
-      } catch (fallbackError) {
-        console.error(
-          '[games] final fallback failed:',
-          fallbackError
-        );
-      }
-
-      break;
-    }
-  }
-
-  return messageID;
-}
-
-async function getBalance(
-  threadID,
-  senderID
-) {
-  const user =
-    await db.getUser(
-      threadID,
-      senderID
-    );
-
-  return user.balance;
-}
-
-async function canAfford(
-  threadID,
-  senderID,
-  amount
-) {
-  const balance =
-    await getBalance(
-      threadID,
-      senderID
-    );
-
-  return balance >= amount;
-}
-
-async function insufficientFunds(
-  api,
-  threadID,
-  senderID
-) {
-  const balance =
-    await getBalance(
-      threadID,
-      senderID
-    );
-
-  await send(
-    api,
-    threadID,
-    `╭━━━ 💸 WALLET ━━━╮
-┃
-┃ Insufficient coins.
-┃
-┃ 💰 Balance: ${money(balance)}
-┃
-╰━━━━━━━━━━━━━━━━╯`
-  );
+  return false;
 }
 
 // ============================================================
-// SESSION SYSTEM
+// GAME SESSION HELPERS
 // ============================================================
 
-const sessions = new Map();
-const sessionTimers = new Map();
+function clearSession(threadID, userID) {
+  const key = sessionKey(threadID, userID);
 
-function sessionKey(
-  threadID,
-  senderID
-) {
-  return `${threadID}:${senderID}`;
+  sessions.delete(key);
+
+  const timer = sessionTimers.get(key);
+
+  if (timer) {
+    clearTimeout(timer);
+    sessionTimers.delete(key);
+  }
 }
 
-function setSession(
-  threadID,
-  senderID,
-  data
-) {
-  const key =
-    sessionKey(
-      threadID,
-      senderID
-    );
+function setSession(threadID, userID, session) {
+  const key = sessionKey(threadID, userID);
 
-  const oldTimer =
-    sessionTimers.get(key);
+  const oldTimer = sessionTimers.get(key);
 
   if (oldTimer) {
     clearTimeout(oldTimer);
   }
 
-  sessions.set(
-    key,
-    data
-  );
+  sessions.set(key, session);
 
-  const timer =
-    setTimeout(() => {
-      const current =
-        sessions.get(key);
+  const timer = setTimeout(() => {
+    sessions.delete(key);
+    sessionTimers.delete(key);
+  }, SESSION_TIMEOUT_MS);
 
-      if (current === data) {
-        sessions.delete(key);
-        sessionTimers.delete(key);
-      }
-    }, SESSION_TIMEOUT_MS);
-
-  sessionTimers.set(
-    key,
-    timer
-  );
+  sessionTimers.set(key, timer);
 }
 
-function getSession(
-  threadID,
-  senderID
-) {
-  return sessions.get(
-    sessionKey(
-      threadID,
-      senderID
-    )
-  );
+function getSession(threadID, userID) {
+  return sessions.get(sessionKey(threadID, userID));
 }
 
-function clearSession(
-  threadID,
-  senderID
-) {
-  const key =
-    sessionKey(
-      threadID,
-      senderID
-    );
+function clearThreadSessions(threadID) {
+  for (const [key, session] of sessions.entries()) {
+    if (key.startsWith(`${threadID}:`)) {
+      sessions.delete(key);
 
-  const timer =
-    sessionTimers.get(key);
-
-  if (timer) {
-    clearTimeout(timer);
-  }
-
-  sessionTimers.delete(key);
-  sessions.delete(key);
-}
-
-function clearThreadSessions(
-  threadID
-) {
-  const prefix =
-    `${threadID}:`;
-
-  for (
-    const key of sessions.keys()
-  ) {
-    if (
-      key.startsWith(prefix)
-    ) {
-      const timer =
-        sessionTimers.get(key);
+      const timer = sessionTimers.get(key);
 
       if (timer) {
         clearTimeout(timer);
+        sessionTimers.delete(key);
       }
-
-      sessionTimers.delete(key);
-      sessions.delete(key);
     }
   }
+}
+
+// ============================================================
+// BALANCE HELPERS
+// ============================================================
+
+async function getBalance(threadID, userID) {
+  const user = await db.getUser(String(threadID), String(userID));
+  return Number(user.balance || 0);
+}
+
+async function canAfford(threadID, userID, amount) {
+  const balance = await getBalance(threadID, userID);
+  return balance >= amount;
 }
 
 // ============================================================
 // GAME ENABLE / DISABLE
 // ============================================================
 
-async function handleGameToggle(
-  api,
-  event,
-  cleanText
-) {
-  const {
-    threadID
-  } = event;
+async function gamesAreEnabled(threadID) {
+  try {
+    return await db.isGameEnabled(String(threadID));
+  } catch (error) {
+    console.error("[games] failed checking game setting:", error);
 
-  if (
-    cleanText === '!game on' ||
-    cleanText === '!games on'
-  ) {
-    await db.setGameEnabled(
-      String(threadID),
-      true
-    );
-
-    await send(
-      api,
-      threadID,
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃      🎮 GAME CENTER
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  🟢 STATUS: ONLINE
-┃
-┃  Games have been ENABLED.
-┃
-┃  Type !games for the menu.
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
-    );
-
-    return true;
+    // Fail closed.
+    return false;
   }
-
-  if (
-    cleanText === '!game off' ||
-    cleanText === '!games off'
-  ) {
-    await db.setGameEnabled(
-      String(threadID),
-      false
-    );
-
-    clearThreadSessions(
-      threadID
-    );
-
-    await send(
-      api,
-      threadID,
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃      🎮 GAME CENTER
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  🔴 STATUS: OFFLINE
-┃
-┃  Games have been DISABLED.
-┃  Active games cancelled.
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
-    );
-
-    return true;
-  }
-
-  return false;
 }
 
-async function gamesAreEnabled(
-  threadID
-) {
-  return await db.isGameEnabled(
-    String(threadID)
-  );
+async function handleGameToggle(api, event, text) {
+  const threadID = String(event.threadID);
+  const lower = text.toLowerCase().trim();
+
+  let enabled = null;
+
+  if (lower === "!game on" || lower === "!games on") {
+    enabled = true;
+  }
+
+  if (lower === "!game off" || lower === "!games off") {
+    enabled = false;
+  }
+
+  if (enabled === null) {
+    return false;
+  }
+
+  try {
+    await db.setGameEnabled(threadID, enabled);
+
+    if (!enabled) {
+      clearThreadSessions(threadID);
+    }
+
+    const message = enabled
+      ? [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "        🎮 GAMES",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "✦ Status: 🟢 ON",
+          "",
+          "Games are now enabled.",
+          "Good luck. Have fun. 🎲",
+          "",
+          "╰─➤ !games"
+        ].join("\n")
+      : [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "        🎮 GAMES",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "✦ Status: 🔴 OFF",
+          "",
+          "Games have been disabled",
+          "for this group.",
+          "",
+          "╰─➤ !game on"
+        ].join("\n");
+
+    await safeReply(api, event, message);
+
+    return true;
+  } catch (error) {
+    console.error("[games] toggle failed:", error);
+
+    await safeReply(
+      api,
+      event,
+      "❌ Couldn't change the game setting."
+    );
+
+    return true;
+  }
+}
+
+// ============================================================
+// GAME MENU
+// ============================================================
+
+async function handleGamesMenu(api, event) {
+  const threadID = String(event.threadID);
+
+  let enabled = false;
+
+  try {
+    enabled = await gamesAreEnabled(threadID);
+  } catch {}
+
+  const status = enabled ? "🟢 ON" : "🔴 OFF";
+
+  const menu = [
+    "╭━━━━━━━━━━━━━━━━━━━━╮",
+    "        🎮 GAME ROOM",
+    "╰━━━━━━━━━━━━━━━━━━━━╯",
+    "",
+    `✦ Status: ${status}`,
+    "",
+    "╭─ 🎯 QUICK GAMES",
+    "│",
+    "├ 🎲 !roll <bet>",
+    "│   Roll the dice.",
+    "│",
+    "",
+    "├ 🎯 !guess <1-10> [bet]",
+    "│   Guess the hidden number.",
+    "│",
+    "",
+    "├ 🪙 !coinflip <bet> <heads/tails>",
+    "│   Pick the winning side.",
+    "│",
+    "",
+    "├ ✊ !rps <choice> [bet]",
+    "│   Rock • Paper • Scissors.",
+    "│",
+    "╰────────────────────",
+    "",
+    "╭─ 🎰 FEATURE GAMES",
+    "│",
+    "├ 🎰 !slots <bet>",
+    "│   Match the reels.",
+    "│",
+    "",
+    "├ 🃏 !blackjack <bet>",
+    "│   Beat the dealer.",
+    "│   Use !hit / !stand",
+    "│",
+    "",
+    "├ 🎱 !8ball <question>",
+    "│   Ask the mysterious 8-ball.",
+    "│",
+    "",
+    "├ 🧠 !trivia",
+    "│   Answer A / B / C / D.",
+    "│",
+    "╰────────────────────",
+    "",
+    "🎁 WIN • PLAY • EARN",
+    "",
+    "⚙️ Admin:",
+    "!game on  •  !game off"
+  ].join("\n");
+
+  await safeReply(api, event, menu);
 }
 
 // ============================================================
 // TRIVIA
 // ============================================================
 
-async function handleTrivia(
-  api,
-  event
-) {
-  const {
-    threadID,
-    senderID
-  } = event;
+function normalizeTriviaQuestion(raw) {
+  if (!raw) return null;
 
-  if (
-    !Array.isArray(
-      TRIVIA_QUESTIONS
-    ) ||
-    TRIVIA_QUESTIONS.length === 0
-  ) {
-    await send(
-      api,
-      threadID,
-      '❌ Trivia question bank is empty.'
-    );
-
-    return;
-  }
-
-  const qdata =
-    TRIVIA_QUESTIONS[
-      randInt(
-        0,
-        TRIVIA_QUESTIONS.length - 1
-      )
-    ];
-
-  if (
-    !qdata ||
-    typeof qdata.q !== 'string' ||
-    !Array.isArray(qdata.options) ||
-    qdata.options.length !== 4 ||
-    !Number.isInteger(qdata.answer) ||
-    qdata.answer < 0 ||
-    qdata.answer > 3 ||
-    !Number.isFinite(qdata.reward)
-  ) {
-    await send(
-      api,
-      threadID,
-      '❌ This trivia question is formatted incorrectly.'
-    );
-
-    return;
-  }
-
-  const labels = [
-    'A',
-    'B',
-    'C',
-    'D'
-  ];
+  const question =
+    raw.question ||
+    raw.q ||
+    raw.text ||
+    raw.prompt;
 
   const options =
-    qdata.options
-      .map(
-        (option, i) =>
-          `┃  ${labels[i]}  ${option}`
-      )
-      .join('\n');
+    raw.options ||
+    raw.choices ||
+    raw.answers;
 
-  const message =
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🧠 TRIVIA
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  ${qdata.q}
-┃
-${options}
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃  💰 Reward: ${money(qdata.reward)}
-┃  ⏱️ 30 seconds
-┃
-┃  ✦ Reply A / B / C / D
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`;
+  const answer =
+    raw.answer ??
+    raw.correct ??
+    raw.correctAnswer ??
+    raw.correctIndex;
 
-  let messageInfo;
+  const reward =
+    Number(raw.reward || raw.prize || 100);
 
-  try {
-    messageInfo =
-      await sendMessageAsync(
-        api,
-        threadID,
-        message
-      );
-  } catch (error) {
-    console.error(
-      '[games] trivia send failed:',
-      error
-    );
-
-    return;
+  if (!question || !Array.isArray(options) || options.length < 4) {
+    return null;
   }
 
-  setSession(
-    threadID,
-    senderID,
-    {
-      type: 'trivia',
-      qdata,
-      messageID:
-        getMessageID(messageInfo)
-    }
+  return {
+    question,
+    options: options.slice(0, 4),
+    answer,
+    reward: Number.isFinite(reward) ? reward : 100
+  };
+}
+
+function getTriviaQuestions() {
+  if (Array.isArray(triviaQuestions)) {
+    return triviaQuestions;
+  }
+
+  if (Array.isArray(triviaQuestions.questions)) {
+    return triviaQuestions.questions;
+  }
+
+  if (Array.isArray(triviaQuestions.default)) {
+    return triviaQuestions.default;
+  }
+
+  return [];
+}
+
+function triviaAnswerMatches(answer, userAnswer) {
+  if (answer === undefined || answer === null) {
+    return false;
+  }
+
+  const normalizedUser = String(userAnswer)
+    .trim()
+    .toUpperCase();
+
+  if (typeof answer === "number") {
+    return (
+      answer === userAnswer ||
+      answer === userAnswer - 1
+    );
+  }
+
+  const normalizedAnswer = String(answer)
+    .trim()
+    .toUpperCase();
+
+  return (
+    normalizedAnswer === normalizedUser ||
+    normalizedAnswer === String(userAnswer + 1) ||
+    normalizedAnswer === String(userAnswer)
   );
 }
 
-async function resolveTrivia(
-  api,
-  event,
-  session,
-  answer
-) {
-  const {
-    threadID,
-    senderID
-  } = event;
+async function handleTrivia(api, event) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-  const labels = [
-    'A',
-    'B',
-    'C',
-    'D'
-  ];
+  const list = getTriviaQuestions();
 
-  const chosen =
-    labels.indexOf(
-      String(answer)
-        .toUpperCase()
+  if (!list.length) {
+    await safeReply(
+      api,
+      event,
+      "❌ No trivia questions are configured."
     );
-
-  clearSession(
-    threadID,
-    senderID
-  );
-
-  if (chosen === -1) {
     return;
   }
 
-  const {
-    qdata,
-    messageID
-  } = session;
+  clearSession(threadID, userID);
 
-  let result;
+  const raw = list[randInt(0, list.length - 1)];
+  const qdata = normalizeTriviaQuestion(raw);
 
-  if (
-    chosen === qdata.answer
-  ) {
-    const newBal =
-      await db.addBalance(
-        threadID,
-        senderID,
-        qdata.reward
-      );
-
-    result =
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃       🧠 TRIVIA
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  ✨ CORRECT ANSWER
-┃
-┃  Your answer:
-┃  ${labels[chosen]} — ${qdata.options[chosen]}
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃  💰 +${money(qdata.reward)} coins
-┃  💵 Balance: ${money(newBal)}
-┃
-┃  🏆 Excellent!
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`;
-  } else {
-    result =
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃       🧠 TRIVIA
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  ❌ WRONG ANSWER
-┃
-┃  Your answer:
-┃  ${labels[chosen]} — ${qdata.options[chosen]}
-┃
-┃  Correct:
-┃  ${labels[qdata.answer]} — ${qdata.options[qdata.answer]}
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃  Better luck next time.
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`;
+  if (!qdata) {
+    await safeReply(
+      api,
+      event,
+      "❌ This trivia question is malformed."
+    );
+    return;
   }
 
-  if (
-    messageID &&
-    typeof api.editMessage === 'function'
-  ) {
-    try {
-      await editMessageAsync(
-        api,
-        result,
-        messageID
-      );
+  const letters = ["A", "B", "C", "D"];
 
-      return;
-    } catch (error) {
-      console.error(
-        '[games] trivia edit failed:',
-        error
-      );
-    }
-  }
+  const questionText = [
+    "╭━━━━━━━━━━━━━━━━━━━━╮",
+    "          🧠 TRIVIA",
+    "╰━━━━━━━━━━━━━━━━━━━━╯",
+    "",
+    `❓ ${qdata.question}`,
+    "",
+    `A. ${qdata.options[0]}`,
+    `B. ${qdata.options[1]}`,
+    `C. ${qdata.options[2]}`,
+    `D. ${qdata.options[3]}`,
+    "",
+    "┌────────────────────",
+    `│ 💰 Reward: ${money(qdata.reward)} coins`,
+    "│ ⏳ Time: 30 seconds",
+    "└────────────────────",
+    "",
+    "✦ Reply with A, B, C or D."
+  ].join("\n");
 
-  await send(
+  const animator = await createAnimator(
     api,
     threadID,
-    result
+    questionText
   );
+
+  setSession(threadID, userID, {
+    type: "trivia",
+    qdata,
+    messageID: animator.messageID
+  });
 }
 
-// ============================================================
-// RPS
-// ============================================================
+async function resolveTrivia(api, event, answer) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-async function handleRps(
-  api,
-  event,
-  args
-) {
-  const {
-    threadID,
-    senderID
-  } = event;
+  const session = getSession(threadID, userID);
 
-  const choice =
-    String(
-      args[0] || ''
-    ).toLowerCase();
+  if (!session || session.type !== "trivia") {
+    return false;
+  }
 
-  const bet =
-    args[1] === undefined
-      ? 0
-      : parseInt(
-          args[1],
-          10
+  clearSession(threadID, userID);
+
+  const qdata = session.qdata;
+
+  const letters = ["A", "B", "C", "D"];
+  const index = letters.indexOf(answer.toUpperCase());
+
+  const correct = triviaAnswerMatches(
+    qdata.answer,
+    index
+  ) || triviaAnswerMatches(
+    qdata.answer,
+    answer.toUpperCase()
+  );
+
+  const correctIndex =
+    typeof qdata.answer === "number"
+      ? qdata.answer >= 1 && qdata.answer <= 4
+        ? qdata.answer - 1
+        : qdata.answer
+      : letters.indexOf(
+          String(qdata.answer).toUpperCase()
         );
 
-  const choices = [
-    'rock',
-    'paper',
-    'scissors'
-  ];
+  const correctLetter =
+    letters[correctIndex] ||
+    String(qdata.answer).toUpperCase();
 
-  const emojis = {
-    rock: '🪨',
-    paper: '📄',
-    scissors: '✂️'
-  };
-
-  if (
-    !choices.includes(choice)
-  ) {
-    await send(
-      api,
-      threadID,
-      `╭━━━━━━━━━━━━━━╮
-┃      ⚔️ RPS
-┣━━━━━━━━━━━━━━┫
-┃
-┃ !rps rock [bet]
-┃ !rps paper [bet]
-┃ !rps scissors [bet]
-┃
-╰━━━━━━━━━━━━━━╯`
-    );
-
-    return;
-  }
-
-  if (
-    !Number.isInteger(bet) ||
-    bet < 0
-  ) {
-    await send(
-      api,
-      threadID,
-      '❌ Invalid bet.'
-    );
-
-    return;
-  }
-
-  if (bet > 0) {
-    if (
-      !(await canAfford(
-        threadID,
-        senderID,
-        bet
-      ))
-    ) {
-      await insufficientFunds(
-        api,
-        threadID,
-        senderID
-      );
-
-      return;
-    }
-
+  if (correct) {
     await db.addBalance(
       threadID,
-      senderID,
-      -bet
+      userID,
+      qdata.reward
+    );
+
+    await db.incrementGameStats(
+      threadID,
+      userID,
+      true
+    );
+
+    const result = [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🧠 TRIVIA",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "✅ CORRECT!",
+      "",
+      `🎯 Answer: ${correctLetter}`,
+      `💰 +${money(qdata.reward)} coins`,
+      "",
+      "✦ Knowledge pays. 🏆"
+    ].join("\n");
+
+    await editOrSend(
+      api,
+      threadID,
+      session.messageID,
+      result
+    );
+  } else {
+    await db.incrementGameStats(
+      threadID,
+      userID,
+      false
+    );
+
+    const result = [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🧠 TRIVIA",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "❌ WRONG ANSWER",
+      "",
+      `Your answer: ${answer.toUpperCase()}`,
+      `Correct answer: ${correctLetter}`,
+      "",
+      "Better luck next time. 🥲"
+    ].join("\n");
+
+    await editOrSend(
+      api,
+      threadID,
+      session.messageID,
+      result
     );
   }
 
-  const botPreview =
-    choices[
-      randInt(0, 2)
-    ];
+  return true;
+}
 
-  const frames = [
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        ⚔️ RPS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  YOU
-┃       ${emojis[choice]}
-┃       ${choice.toUpperCase()}
-┃
-┃  VS
-┃
-┃  🤖 BOT
-┃       ❔
-┃
-┃  ⏳ Choosing...
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
+// ============================================================
+// ROCK PAPER SCISSORS
+// ============================================================
 
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        ⚔️ RPS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  YOU      🤖 BOT
-┃
-┃   ${emojis[choice]}       🪨
-┃
-┃       ⚔️
-┃
-┃  Calculating...
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
+async function handleRPS(api, event, args) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        ⚔️ RPS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  YOU      🤖 BOT
-┃
-┃   ${emojis[choice]}       ${emojis[botPreview]}
-┃
-┃       ⚔️
-┃
-┃  REVEALING...
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
-  ];
+  const choice = String(args[0] || "").toLowerCase();
 
-  await animate(
-    api,
-    threadID,
-    frames,
-    [
-      ANIMATION.normal,
-      ANIMATION.fast
-    ]
-  );
+  const valid = ["rock", "paper", "scissors"];
+
+  if (!valid.includes(choice)) {
+    await safeReply(
+      api,
+      event,
+      "✊ RPS usage:\n!rps rock [bet]\n!rps paper [bet]\n!rps scissors [bet]"
+    );
+    return;
+  }
+
+  let bet = Number(args[1] || 0);
+
+  if (!Number.isFinite(bet) || bet < 0 || !Number.isInteger(bet)) {
+    await safeReply(api, event, "❌ Invalid bet.");
+    return;
+  }
+
+  if (!(await canAfford(threadID, userID, bet))) {
+    await safeReply(api, event, "❌ You don't have enough coins.");
+    return;
+  }
+
+  clearSession(threadID, userID);
+
+  if (bet > 0) {
+    await db.addBalance(threadID, userID, -bet);
+  }
+
+  const choices = ["rock", "paper", "scissors"];
+
+  const emoji = {
+    rock: "🪨",
+    paper: "📄",
+    scissors: "✂️"
+  };
 
   const botChoice =
-    choices[
-      randInt(0, 2)
-    ];
+    choices[randInt(0, choices.length - 1)];
 
   let result;
 
-  if (
-    choice === botChoice
-  ) {
-    result = 'tie';
+  if (choice === botChoice) {
+    result = "tie";
   } else if (
-    (choice === 'rock' &&
-      botChoice === 'scissors') ||
-    (choice === 'paper' &&
-      botChoice === 'rock') ||
-    (choice === 'scissors' &&
-      botChoice === 'paper')
+    (choice === "rock" && botChoice === "scissors") ||
+    (choice === "paper" && botChoice === "rock") ||
+    (choice === "scissors" && botChoice === "paper")
   ) {
-    result = 'win';
+    result = "win";
   } else {
-    result = 'loss';
+    result = "lose";
   }
 
-  let resultText;
-
-  if (bet > 0) {
-    if (result === 'win') {
-      const newBal =
-        await db.addBalance(
-          threadID,
-          senderID,
-          bet * 2
-        );
-
-      resultText =
-        `🎉 YOU WIN
-💰 +${money(bet)} coins
-💵 Balance: ${money(newBal)}`;
-    } else if (
-      result === 'tie'
-    ) {
-      const newBal =
-        await db.addBalance(
-          threadID,
-          senderID,
-          bet
-        );
-
-      resultText =
-        `👔 TIE
-💰 Bet returned
-💵 Balance: ${money(newBal)}`;
-    } else {
-      const balance =
-        await getBalance(
-          threadID,
-          senderID
-        );
-
-      resultText =
-        `💀 YOU LOSE
-💸 -${money(bet)} coins
-💵 Balance: ${money(balance)}`;
-    }
-  } else {
-    resultText =
-      result === 'win'
-        ? '🎉 YOU WIN!'
-        : result === 'tie'
-          ? '👔 TIE!'
-          : '💀 YOU LOSE!';
-  }
-
-  if (
-    result !== 'tie'
-  ) {
-    await db.incrementGameStats(
-      threadID,
-      senderID,
-      result === 'win'
-    );
-  }
-
-  await send(
+  const animator = await createAnimator(
     api,
     threadID,
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        ⚔️ RPS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  YOU   ${emojis[choice]} ${choice.toUpperCase()}
-┃  BOT   ${emojis[botChoice]} ${botChoice.toUpperCase()}
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  ${resultText.replace(
-      /\n/g,
-      '\n┃  '
-    )}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        ✊ RPS",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🤖 Bot is choosing...",
+      "",
+      "     ✊   ✋   ✌️",
+      "",
+      "⏳ Wait for it..."
+    ].join("\n")
   );
+
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        ✊ RPS",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `👤 You: ${emoji[choice]}`,
+      "",
+      "🤖 Bot:",
+      "     🌀 choosing...",
+      "",
+      "⚔️ The match is locked."
+    ].join("\n")
+  );
+
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        ✊ RPS",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `👤 You: ${emoji[choice]}`,
+      `🤖 Bot: ${emoji[botChoice]}`,
+      "",
+      "⚡ FINAL RESULT"
+    ].join("\n")
+  );
+
+  if (result === "win") {
+    const payout = bet * 2;
+
+    if (payout > 0) {
+      await db.addBalance(threadID, userID, payout);
+    }
+
+    await db.incrementGameStats(
+      threadID,
+      userID,
+      true
+    );
+
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "        ✊ RPS",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "🏆 YOU WIN!",
+        "",
+        `👤 You: ${emoji[choice]} ${choice}`,
+        `🤖 Bot: ${emoji[botChoice]} ${botChoice}`,
+        "",
+        `💰 Payout: ${money(payout)}`,
+        bet > 0
+          ? `📈 Net profit: +${money(bet)}`
+          : "🎉 Free play win!",
+        "",
+        "✦ Clean victory."
+      ].join("\n")
+    );
+  } else if (result === "tie") {
+    if (bet > 0) {
+      await db.addBalance(threadID, userID, bet);
+    }
+
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "        ✊ RPS",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "🤝 DRAW!",
+        "",
+        `👤 You: ${emoji[choice]} ${choice}`,
+        `🤖 Bot: ${emoji[botChoice]} ${botChoice}`,
+        "",
+        `💰 Bet refunded: ${money(bet)}`,
+        "",
+        "Nobody wins this round."
+      ].join("\n")
+    );
+  } else {
+    await db.incrementGameStats(
+      threadID,
+      userID,
+      false
+    );
+
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "        ✊ RPS",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "💀 YOU LOSE",
+        "",
+        `👤 You: ${emoji[choice]} ${choice}`,
+        `🤖 Bot: ${emoji[botChoice]} ${botChoice}`,
+        "",
+        `💸 Lost: ${money(bet)}`,
+        "",
+        "The bot takes the round."
+      ].join("\n")
+    );
+  }
 }
 
 // ============================================================
-// DICE / ROLL
+// ROLL
 // ============================================================
 
-function diceArt(value) {
-  const faces = {
-    1: '⚀',
-    2: '⚁',
-    3: '⚂',
-    4: '⚃',
-    5: '⚄',
-    6: '⚅'
-  };
-
-  return faces[value] || '🎲';
-}
-
-async function handleRoll(
-  api,
-  event,
-  args
-) {
-  const {
-    threadID,
-    senderID
-  } = event;
+async function handleRoll(api, event, args) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
   let sides = 100;
   let bet;
 
-  if (args.length >= 2) {
-    sides =
-      parseInt(
-        args[0],
-        10
-      );
-
-    bet =
-      parseInt(
-        args[1],
-        10
-      );
+  if (args.length === 1) {
+    bet = Number(args[0]);
   } else {
-    bet =
-      parseInt(
-        args[0],
-        10
-      );
+    sides = Number(args[0]);
+    bet = Number(args[1]);
   }
 
-  if (
-    !Number.isInteger(sides) ||
-    sides < 2
-  ) {
-    await send(
+  if (!Number.isInteger(sides) || sides < 2 || sides > 1000) {
+    await safeReply(
       api,
-      threadID,
-      '❌ Sides must be at least 2.'
+      event,
+      "❌ Sides must be between 2 and 1000."
     );
-
     return;
   }
 
-  if (
-    !Number.isInteger(bet) ||
-    bet <= 0
-  ) {
-    await send(
+  if (!Number.isInteger(bet) || bet < 1) {
+    await safeReply(
       api,
-      threadID,
-      `╭━━━━━━━━━━━━━━╮
-┃       🎲 DICE
-┣━━━━━━━━━━━━━━┫
-┃
-┃ !roll <bet>
-┃ !roll <sides> <bet>
-┃
-╰━━━━━━━━━━━━━━╯`
+      event,
+      "❌ Usage: !roll <bet> or !roll <sides> <bet>"
     );
-
     return;
   }
 
-  if (
-    !(await canAfford(
-      threadID,
-      senderID,
-      bet
-    ))
-  ) {
-    await insufficientFunds(
-      api,
-      threadID,
-      senderID
-    );
-
+  if (!(await canAfford(threadID, userID, bet))) {
+    await safeReply(api, event, "❌ Not enough coins.");
     return;
   }
 
-  await db.addBalance(
-    threadID,
-    senderID,
-    -bet
-  );
+  clearSession(threadID, userID);
 
-  const rollingFrames = [
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🎲 DICE
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃
-┃          🎲
-┃
-┃       [  ?  ]
-┃
-┃       ROLLING
-┃
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃  💰 Bet: ${money(bet)}
-┃  🎯 Target: 55%+
-╰━━━━━━━━━━━━━━━━━━━━╯`,
+  await db.addBalance(threadID, userID, -bet);
 
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🎲 DICE
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃
-┃          ⚄
-┃
-┃       [  ?  ]
-┃
-┃       ROLLING.
-┃
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃  💰 Bet: ${money(bet)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
+  const roll = randInt(1, sides);
+  const threshold = Math.floor(sides * 0.55);
+  const won = roll >= threshold;
 
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🎲 DICE
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃
-┃          ⚂
-┃
-┃       [  ?  ]
-┃
-┃       ROLLING..
-┃
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃  💰 Bet: ${money(bet)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
-
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🎲 DICE
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃
-┃          ⚅
-┃
-┃       [  ?  ]
-┃
-┃       ROLLING...
-┃
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃  💰 Bet: ${money(bet)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
-  ];
-
-  await animate(
+  const animator = await createAnimator(
     api,
     threadID,
-    rollingFrames,
     [
-      ANIMATION.veryFast,
-      ANIMATION.veryFast,
-      ANIMATION.veryFast
-    ]
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🎲 DICE",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `🎯 D${sides}`,
+      "",
+      "🎲 Rolling...",
+      "",
+      "     ⚀  ⚁  ⚂",
+      "     ⚃  ⚄  ⚅",
+      "",
+      "⏳ The dice are moving..."
+    ].join("\n")
   );
 
-  const rollVal =
-    randInt(
-      1,
-      sides
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🎲 DICE",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `🎯 D${sides}`,
+      "",
+      "🎲 Rolling...",
+      "",
+      `     [ ${randInt(1, sides)} ]`,
+      "",
+      "━━━━━━━━━━━━━━━━━━━━",
+      "        🌀",
+      "━━━━━━━━━━━━━━━━━━━━"
+    ].join("\n")
+  );
+
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🎲 DICE",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `🎯 D${sides}`,
+      "",
+      "🎲 Final roll...",
+      "",
+      `     [ ${randInt(1, sides)} ]`,
+      "",
+      "⚡ LOCKING IN..."
+    ].join("\n")
+  );
+
+  if (won) {
+    const payout = bet * 2;
+
+    await db.addBalance(
+      threadID,
+      userID,
+      payout
     );
 
-  const win =
-    rollVal >=
-    Math.floor(
-      sides * 0.55
+    await db.incrementGameStats(
+      threadID,
+      userID,
+      true
     );
 
-  let finalText;
-
-  if (win) {
-    const newBal =
-      await db.addBalance(
-        threadID,
-        senderID,
-        bet * 2
-      );
-
-    finalText =
-      `🎉 HIGH ROLL
-💰 +${money(bet)} coins
-💵 Balance: ${money(newBal)}`;
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "        🎲 DICE",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "🏆 YOU WIN!",
+        "",
+        `🎲 Roll: ${roll} / ${sides}`,
+        `🎯 Target: ${threshold}+`,
+        "",
+        `💰 Payout: ${money(payout)}`,
+        `📈 Profit: +${money(bet)}`,
+        "",
+        "✦ The dice favored you."
+      ].join("\n")
+    );
   } else {
-    const balance =
-      await getBalance(
-        threadID,
-        senderID
-      );
+    await db.incrementGameStats(
+      threadID,
+      userID,
+      false
+    );
 
-    finalText =
-      `💀 LOW ROLL
-💸 -${money(bet)} coins
-💵 Balance: ${money(balance)}`;
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "        🎲 DICE",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "💀 YOU LOSE",
+        "",
+        `🎲 Roll: ${roll} / ${sides}`,
+        `🎯 Target: ${threshold}+`,
+        "",
+        `💸 Lost: ${money(bet)}`,
+        "",
+        "✦ The dice betrayed you."
+      ].join("\n")
+    );
   }
-
-  await db.incrementGameStats(
-    threadID,
-    senderID,
-    win
-  );
-
-  await send(
-    api,
-    threadID,
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🎲 DICE
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃          ${sides <= 6
-      ? diceArt(rollVal)
-      : '🎲'}
-┃
-┃       [ ${rollVal} ]
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  ${finalText.replace(
-      /\n/g,
-      '\n┃  '
-    )}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
-  );
 }
 
 // ============================================================
 // GUESS
 // ============================================================
 
-async function handleGuess(
-  api,
-  event,
-  args
-) {
-  const {
-    threadID,
-    senderID
-  } = event;
+async function handleGuess(api, event, args) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-  const number =
-    parseInt(
-      args[0],
-      10
-    );
+  const guess = Number(args[0]);
+  const bet = Number(args[1] || 100);
 
-  const bet =
-    args[1] === undefined
-      ? 100
-      : parseInt(
-          args[1],
-          10
-        );
-
-  if (
-    !Number.isInteger(number) ||
-    number < 1 ||
-    number > 10
-  ) {
-    await send(
+  if (!Number.isInteger(guess) || guess < 1 || guess > 10) {
+    await safeReply(
       api,
-      threadID,
-      `╭━━━━━━━━━━━━━━╮
-┃      🎯 GUESS
-┣━━━━━━━━━━━━━━┫
-┃
-┃ !guess <1-10> [bet]
-┃
-╰━━━━━━━━━━━━━━╯`
+      event,
+      "🎯 Usage: !guess <1-10> [bet]"
     );
-
     return;
   }
 
-  if (
-    !Number.isInteger(bet) ||
-    bet <= 0
-  ) {
-    await send(
-      api,
-      threadID,
-      '❌ Bet must be positive.'
-    );
-
+  if (!Number.isInteger(bet) || bet < 0) {
+    await safeReply(api, event, "❌ Invalid bet.");
     return;
   }
 
-  if (
-    !(await canAfford(
-      threadID,
-      senderID,
-      bet
-    ))
-  ) {
-    await insufficientFunds(
-      api,
-      threadID,
-      senderID
-    );
-
+  if (!(await canAfford(threadID, userID, bet))) {
+    await safeReply(api, event, "❌ Not enough coins.");
     return;
   }
 
-  await db.addBalance(
-    threadID,
-    senderID,
-    -bet
-  );
+  clearSession(threadID, userID);
 
-  const secret =
-    randInt(
-      1,
-      10
-    );
+  if (bet > 0) {
+    await db.addBalance(threadID, userID, -bet);
+  }
 
-  const frames = [
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🎯 GUESS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  Your number:
-┃
-┃          [ ${number} ]
-┃
-┃  🔐 SECRET NUMBER
-┃          [ ? ]
-┃
-┃
-┃  Scanning...
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
+  const secret = randInt(1, 10);
+  const won = guess === secret;
 
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🎯 GUESS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  Your number:
-┃
-┃          [ ${number} ]
-┃
-┃  🔐 SECRET NUMBER
-┃          [ ?? ]
-┃
-┃
-┃  Searching...
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
-
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🎯 GUESS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  Your number:
-┃
-┃          [ ${number} ]
-┃
-┃  🔐 SECRET NUMBER
-┃          [ ??? ]
-┃
-┃
-┃  REVEALING...
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
-  ];
-
-  await animate(
+  const animator = await createAnimator(
     api,
     threadID,
-    frames,
     [
-      ANIMATION.normal,
-      ANIMATION.normal
-    ]
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🎯 GUESS",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `👤 Your guess: ${guess}`,
+      "",
+      "🔎 Searching...",
+      "",
+      "1 • 2 • 3 • 4 • 5",
+      "6 • 7 • 8 • 9 • 10",
+      "",
+      "⏳ Finding the number..."
+    ].join("\n")
   );
 
-  const win =
-    number === secret;
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🎯 GUESS",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `👤 Your guess: ${guess}`,
+      "",
+      "🔎 Scanning numbers...",
+      "",
+      `   ${randInt(1, 10)}  →  ${randInt(1, 10)}  →  ?`,
+      "",
+      "🌀 Locking target..."
+    ].join("\n")
+  );
 
-  if (win) {
-    const winnings =
-      bet * 5;
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🎯 GUESS",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `👤 Your guess: ${guess}`,
+      "",
+      "🎯 TARGET LOCKED",
+      "",
+      "████████████████",
+      "",
+      "⚡ REVEALING..."
+    ].join("\n")
+  );
 
-    const newBal =
+  if (won) {
+    const payout = bet * 5;
+
+    if (payout > 0) {
       await db.addBalance(
         threadID,
-        senderID,
-        winnings
+        userID,
+        payout
       );
+    }
 
     await db.incrementGameStats(
       threadID,
-      senderID,
+      userID,
       true
     );
 
-    await send(
-      api,
-      threadID,
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🎯 GUESS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  🔐 SECRET:
-┃          [ ${secret} ]
-┃
-┃  🎯 YOUR GUESS:
-┃          [ ${number} ]
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  💥 EXACT MATCH!
-┃
-┃  💰 +${money(winnings)} coins
-┃  💵 Balance: ${money(newBal)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "        🎯 GUESS",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "🎯 PERFECT GUESS!",
+        "",
+        `👤 You picked: ${guess}`,
+        `🎲 Number was: ${secret}`,
+        "",
+        `💰 Payout: ${money(payout)}`,
+        `🔥 Profit: +${money(bet * 4)}`,
+        "",
+        "✦ You actually got it."
+      ].join("\n")
     );
   } else {
-    const balance =
-      await getBalance(
-        threadID,
-        senderID
-      );
-
     await db.incrementGameStats(
       threadID,
-      senderID,
+      userID,
       false
     );
 
-    await send(
-      api,
-      threadID,
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃        🎯 GUESS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  🔐 SECRET:
-┃          [ ${secret} ]
-┃
-┃  🎯 YOUR GUESS:
-┃          [ ${number} ]
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  ❌ WRONG GUESS
-┃
-┃  💸 -${money(bet)} coins
-┃  💵 Balance: ${money(balance)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "        🎯 GUESS",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "❌ WRONG GUESS",
+        "",
+        `👤 You picked: ${guess}`,
+        `🎲 Number was: ${secret}`,
+        "",
+        `💸 Lost: ${money(bet)}`,
+        "",
+        "✦ So close. Or not. 😭"
+      ].join("\n")
     );
   }
 }
@@ -1476,255 +1152,176 @@ async function handleGuess(
 // COINFLIP
 // ============================================================
 
-async function handleCoinflip(
-  api,
-  event,
-  args
-) {
-  const {
-    threadID,
-    senderID
-  } = event;
+async function handleCoinflip(api, event, args) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-  let bet;
-  let choice;
-
-  if (
-    /^\d+$/.test(
-      args[0] || ''
-    )
-  ) {
-    bet =
-      parseInt(
-        args[0],
-        10
-      );
-
-    choice =
-      String(
-        args[1] || ''
-      ).toLowerCase();
-  } else if (
-    /^\d+$/.test(
-      args[1] || ''
-    )
-  ) {
-    bet =
-      parseInt(
-        args[1],
-        10
-      );
-
-    choice =
-      String(
-        args[0] || ''
-      ).toLowerCase();
-  } else {
-    await send(
+  if (args.length < 2) {
+    await safeReply(
       api,
-      threadID,
-      `╭━━━━━━━━━━━━━━╮
-┃     🪙 COINFLIP
-┣━━━━━━━━━━━━━━┫
-┃
-┃ !coinflip 100 heads
-┃ !coinflip heads 100
-┃
-╰━━━━━━━━━━━━━━╯`
+      event,
+      "🪙 Usage: !coinflip <bet> <heads/tails>"
     );
-
     return;
   }
 
-  if (
-    ![
-      'heads',
-      'tails',
-      'h',
-      't'
-    ].includes(choice)
-  ) {
-    await send(
-      api,
-      threadID,
-      '❌ Choose heads or tails.'
-    );
-
-    return;
-  }
-
-  choice =
-    choice.startsWith('h')
-      ? 'heads'
-      : 'tails';
+  let bet = Number(args[0]);
+  let choice = String(args[1]).toLowerCase();
 
   if (
-    !Number.isInteger(bet) ||
-    bet <= 0
+    choice !== "heads" &&
+    choice !== "tails"
   ) {
-    await send(
-      api,
-      threadID,
-      '❌ Bet must be positive.'
-    );
-
-    return;
+    // Allow reversed order:
+    // !coinflip heads 100
+    choice = String(args[0]).toLowerCase();
+    bet = Number(args[1]);
   }
 
   if (
-    !(await canAfford(
-      threadID,
-      senderID,
-      bet
-    ))
+    choice !== "heads" &&
+    choice !== "tails"
   ) {
-    await insufficientFunds(
+    await safeReply(
       api,
-      threadID,
-      senderID
+      event,
+      "❌ Pick heads or tails."
     );
-
     return;
   }
+
+  if (!Number.isInteger(bet) || bet < 1) {
+    await safeReply(api, event, "❌ Invalid bet.");
+    return;
+  }
+
+  if (!(await canAfford(threadID, userID, bet))) {
+    await safeReply(api, event, "❌ Not enough coins.");
+    return;
+  }
+
+  clearSession(threadID, userID);
 
   await db.addBalance(
     threadID,
-    senderID,
+    userID,
     -bet
   );
 
-  const frames = [
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃      🪙 COINFLIP
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  YOUR CALL
-┃
-┃     ${choice.toUpperCase()}
-┃
-┃
-┃        🪙
-┃
-┃      FLIP
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
+  const result =
+    Math.random() < 0.5
+      ? "heads"
+      : "tails";
 
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃      🪙 COINFLIP
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  YOUR CALL
-┃
-┃     ${choice.toUpperCase()}
-┃
-┃
-┃        🔄
-┃
-┃       🪙
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
+  const won = choice === result;
 
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃      🪙 COINFLIP
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  YOUR CALL
-┃
-┃     ${choice.toUpperCase()}
-┃
-┃
-┃        🪙
-┃
-┃       🔄
-┃
-┃      REVEAL...
-╰━━━━━━━━━━━━━━━━━━━━╯`
-  ];
-
-  await animate(
+  const animator = await createAnimator(
     api,
     threadID,
-    frames,
     [
-      ANIMATION.fast,
-      ANIMATION.fast
-    ]
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🪙 COINFLIP",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `👤 You picked: ${choice}`,
+      "",
+      "🪙 FLIPPING...",
+      "",
+      "        🪙",
+      "       ↗️",
+      "      ↘️",
+      "",
+      "⏳ The coin is in the air..."
+    ].join("\n")
   );
 
-  const outcome =
-    Math.random() < 0.5
-      ? 'heads'
-      : 'tails';
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🪙 COINFLIP",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `👤 You picked: ${choice}`,
+      "",
+      "🪙",
+      "  ↗️",
+      "    ↘️",
+      "      🪙",
+      "",
+      "⚡ Still flipping..."
+    ].join("\n")
+  );
 
-  const win =
-    outcome === choice;
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🪙 COINFLIP",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `👤 You picked: ${choice}`,
+      "",
+      "🪙",
+      "",
+      "████████████████",
+      "",
+      "⚡ FINAL..."
+    ].join("\n")
+  );
 
-  if (win) {
-    const newBal =
-      await db.addBalance(
-        threadID,
-        senderID,
-        bet * 2
-      );
+  if (won) {
+    const payout = bet * 2;
+
+    await db.addBalance(
+      threadID,
+      userID,
+      payout
+    );
 
     await db.incrementGameStats(
       threadID,
-      senderID,
+      userID,
       true
     );
 
-    await send(
-      api,
-      threadID,
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃      🪙 COINFLIP
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃          🪙
-┃
-┃     ${outcome.toUpperCase()}
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  🎉 YOU WIN!
-┃
-┃  💰 +${money(bet)} coins
-┃  💵 Balance: ${money(newBal)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "       🪙 COINFLIP",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "🏆 YOU WIN!",
+        "",
+        `👤 Pick: ${choice}`,
+        `🪙 Result: ${result}`,
+        "",
+        `💰 Payout: ${money(payout)}`,
+        `📈 Profit: +${money(bet)}`,
+        "",
+        "✦ Perfect call."
+      ].join("\n")
     );
   } else {
-    const balance =
-      await getBalance(
-        threadID,
-        senderID
-      );
-
     await db.incrementGameStats(
       threadID,
-      senderID,
+      userID,
       false
     );
 
-    await send(
-      api,
-      threadID,
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃      🪙 COINFLIP
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃          🪙
-┃
-┃     ${outcome.toUpperCase()}
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  💀 YOU LOSE
-┃
-┃  💸 -${money(bet)} coins
-┃  💵 Balance: ${money(balance)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "       🪙 COINFLIP",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "💀 YOU LOSE",
+        "",
+        `👤 Pick: ${choice}`,
+        `🪙 Result: ${result}`,
+        "",
+        `💸 Lost: ${money(bet)}`,
+        "",
+        "✦ The coin chose violence."
+      ].join("\n")
     );
   }
 }
@@ -1733,497 +1330,354 @@ async function handleCoinflip(
 // SLOTS
 // ============================================================
 
-const SLOT_SYMBOLS = [
-  '🍋',
-  '🍒',
-  '🍇',
-  '🔔',
-  '💎',
-  '7️⃣'
-];
+async function handleSlots(api, event, args) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-function randomSlot() {
-  return SLOT_SYMBOLS[
-    randInt(
-      0,
-      SLOT_SYMBOLS.length - 1
-    )
-  ];
-}
+  const bet = Number(args[0]);
 
-function slotLine(
-  a,
-  b,
-  c
-) {
-  return `┃       │ ${a} │ ${b} │ ${c} │`;
-}
-
-async function handleSlots(
-  api,
-  event,
-  args
-) {
-  const {
-    threadID,
-    senderID
-  } = event;
-
-  const bet =
-    parseInt(
-      args[0],
-      10
-    );
-
-  if (
-    !Number.isInteger(bet) ||
-    bet <= 0
-  ) {
-    await send(
+  if (!Number.isInteger(bet) || bet < 1) {
+    await safeReply(
       api,
-      threadID,
-      `╭━━━━━━━━━━━━━━╮
-┃       🎰 SLOTS
-┣━━━━━━━━━━━━━━┫
-┃
-┃ !slots <bet>
-┃
-╰━━━━━━━━━━━━━━╯`
+      event,
+      "🎰 Usage: !slots <bet>"
     );
-
     return;
   }
 
-  if (
-    !(await canAfford(
-      threadID,
-      senderID,
-      bet
-    ))
-  ) {
-    await insufficientFunds(
-      api,
-      threadID,
-      senderID
-    );
-
+  if (!(await canAfford(threadID, userID, bet))) {
+    await safeReply(api, event, "❌ Not enough coins.");
     return;
   }
+
+  clearSession(threadID, userID);
 
   await db.addBalance(
     threadID,
-    senderID,
+    userID,
     -bet
   );
 
-  const frames = [];
+  const symbols = [
+    "🍋",
+    "🍒",
+    "🍇",
+    "🔔",
+    "💎",
+    "7️⃣"
+  ];
 
-  frames.push(
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃       🎰 SLOTS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃      ┌───────────┐
-┃      │ ❔ │ ❔ │ ❔ │
-┃      └───────────┘
-┃
-┃        SPINNING
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃  💰 Bet: ${money(bet)}
-╰━━━━━━━━━━━━━━━━━━━━╯`
-  );
+  const randomReels = () => [
+    symbols[randInt(0, symbols.length - 1)],
+    symbols[randInt(0, symbols.length - 1)],
+    symbols[randInt(0, symbols.length - 1)]
+  ];
 
-  for (
-    let i = 0;
-    i < 4;
-    i++
-  ) {
-    frames.push(
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃       🎰 SLOTS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃      ┌───────────┐
-${slotLine(
-  randomSlot(),
-  randomSlot(),
-  randomSlot()
-)}
-┃      └───────────┘
-┃
-┃        ${i % 2 === 0
-        ? '🔄 SPINNING'
-        : '🎰 SPINNING'}
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃  💰 Bet: ${money(bet)}
-╰━━━━━━━━━━━━━━━━━━━━╯`
-    );
+  const reel1 = randomReels();
+  const reel2 = randomReels();
+  const reel3 = randomReels();
+
+  // Final reels are deliberately generated only once.
+  const finalReels = [
+    symbols[randInt(0, symbols.length - 1)],
+    symbols[randInt(0, symbols.length - 1)],
+    symbols[randInt(0, symbols.length - 1)]
+  ];
+
+  const sameCount =
+    finalReels[0] === finalReels[1]
+      ? finalReels[1] === finalReels[2]
+        ? 3
+        : 2
+      : finalReels[0] === finalReels[2]
+        ? 2
+        : finalReels[1] === finalReels[2]
+          ? 2
+          : 1;
+
+  let multiplier = 0;
+
+  if (sameCount === 3) {
+    if (
+      finalReels[0] === "💎" ||
+      finalReels[0] === "7️⃣"
+    ) {
+      multiplier = 5;
+    } else {
+      multiplier = 3;
+    }
+  } else if (sameCount === 2) {
+    multiplier = 1.5;
   }
 
-  await animate(
+  const payout = Math.floor(bet * multiplier);
+
+  const reelText = reels =>
+    `│       ${reels.join("  |  ")}       │`;
+
+  const animator = await createAnimator(
     api,
     threadID,
-    frames,
     [
-      ANIMATION.fast,
-      ANIMATION.fast,
-      ANIMATION.fast,
-      ANIMATION.fast
-    ]
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "         🎰 SLOTS",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "┌────────────────────┐",
+      reelText(["❔", "❔", "❔"]),
+      "└────────────────────┘",
+      "",
+      `💰 Bet: ${money(bet)}`,
+      "",
+      "🎰 Starting reels..."
+    ].join("\n")
   );
 
-  const r1 =
-    randomSlot();
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "         🎰 SLOTS",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "┌────────────────────┐",
+      reelText(reel1),
+      "└────────────────────┘",
+      "",
+      "🎰 REEL 1 • SPINNING",
+      "🎰 REEL 2 • SPINNING",
+      "🎰 REEL 3 • SPINNING"
+    ].join("\n")
+  );
 
-  const r2 =
-    randomSlot();
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "         🎰 SLOTS",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "┌────────────────────┐",
+      reelText(reel2),
+      "└────────────────────┘",
+      "",
+      "🎰 REEL 1 • LOCKED",
+      "🎰 REEL 2 • SPINNING",
+      "🎰 REEL 3 • SPINNING"
+    ].join("\n")
+  );
 
-  const r3 =
-    randomSlot();
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "         🎰 SLOTS",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "┌────────────────────┐",
+      reelText(reel3),
+      "└────────────────────┘",
+      "",
+      "🎰 REEL 1 • LOCKED",
+      "🎰 REEL 2 • LOCKED",
+      "🎰 REEL 3 • FINAL SPIN..."
+    ].join("\n")
+  );
 
-  let resultText;
-
-  if (
-    r1 === r2 &&
-    r2 === r3
-  ) {
-    const multiplier =
-      r1 === '💎' ||
-      r1 === '7️⃣'
-        ? 5
-        : 3;
-
-    const winnings =
-      bet * multiplier;
-
-    const newBal =
-      await db.addBalance(
-        threadID,
-        senderID,
-        winnings
-      );
+  if (multiplier > 0) {
+    await db.addBalance(
+      threadID,
+      userID,
+      payout
+    );
 
     await db.incrementGameStats(
       threadID,
-      senderID,
+      userID,
       true
     );
 
-    resultText =
-      `💎 JACKPOT!
-🔥 ${multiplier}× PAYOUT
-💰 +${money(winnings)} coins
-💵 Balance: ${money(newBal)}`;
-  } else if (
-    r1 === r2 ||
-    r2 === r3 ||
-    r1 === r3
-  ) {
-    const winnings =
-      Math.floor(
-        bet * 1.5
-      );
+    const jackpot =
+      sameCount === 3 &&
+      (finalReels[0] === "💎" ||
+        finalReels[0] === "7️⃣");
 
-    const newBal =
-      await db.addBalance(
-        threadID,
-        senderID,
-        winnings
-      );
-
-    await db.incrementGameStats(
-      threadID,
-      senderID,
-      true
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "         🎰 SLOTS",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        jackpot
+          ? "💎💎💎 JACKPOT! 💎💎💎"
+          : "🎉 WINNER!",
+        "",
+        "┌────────────────────┐",
+        reelText(finalReels),
+        "└────────────────────┘",
+        "",
+        `✦ Multiplier: ${multiplier}x`,
+        `💰 Payout: ${money(payout)}`,
+        `📈 Profit: +${money(payout - bet)}`,
+        "",
+        jackpot
+          ? "🔥 ABSOLUTE JACKPOT."
+          : "✦ Nice spin."
+      ].join("\n")
     );
-
-    resultText =
-      `✨ TWO MATCHED!
-💰 1.5× PAYOUT
-💵 Balance: ${money(newBal)}`;
   } else {
-    const balance =
-      await getBalance(
-        threadID,
-        senderID
-      );
-
     await db.incrementGameStats(
       threadID,
-      senderID,
+      userID,
       false
     );
 
-    resultText =
-      `❌ NO MATCH
-💸 -${money(bet)} coins
-💵 Balance: ${money(balance)}`;
+    await animator.final(
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "         🎰 SLOTS",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "💀 NO MATCH",
+        "",
+        "┌────────────────────┐",
+        reelText(finalReels),
+        "└────────────────────┘",
+        "",
+        `💸 Lost: ${money(bet)}`,
+        "",
+        "✦ Spin again when you're ready."
+      ].join("\n")
+    );
   }
-
-  await send(
-    api,
-    threadID,
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃       🎰 SLOTS
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃      ┌───────────┐
-${slotLine(
-  r1,
-  r2,
-  r3
-)}
-┃      └───────────┘
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  ${resultText.replace(
-      /\n/g,
-      '\n┃  '
-    )}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
-  );
 }
 
 // ============================================================
 // BLACKJACK
 // ============================================================
 
-const SUITS = [
-  '♠️',
-  '♥️',
-  '♦️',
-  '♣️'
-];
+function createDeck() {
+  const suits = ["♠", "♥", "♦", "♣"];
+  const ranks = [
+    "A",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10",
+    "J",
+    "Q",
+    "K"
+  ];
 
-const RANKS = [
-  '2',
-  '3',
-  '4',
-  '5',
-  '6',
-  '7',
-  '8',
-  '9',
-  '10',
-  'J',
-  'Q',
-  'K',
-  'A'
-];
-
-function freshDeck() {
   const deck = [];
 
-  for (
-    const suit of SUITS
-  ) {
-    for (
-      const rank of RANKS
-    ) {
-      deck.push([
-        rank,
-        suit
-      ]);
+  for (const suit of suits) {
+    for (const rank of ranks) {
+      deck.push({ rank, suit });
     }
   }
 
-  for (
-    let i = deck.length - 1;
-    i > 0;
-    i--
-  ) {
-    const j =
-      Math.floor(
-        Math.random() *
-        (i + 1)
-      );
-
-    [
-      deck[i],
-      deck[j]
-    ] = [
-      deck[j],
-      deck[i]
-    ];
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = randInt(0, i);
+    [deck[i], deck[j]] = [deck[j], deck[i]];
   }
 
   return deck;
 }
 
-function calcScore(hand) {
-  let score = 0;
+function cardValue(card) {
+  if (["J", "Q", "K"].includes(card.rank)) {
+    return 10;
+  }
+
+  if (card.rank === "A") {
+    return 11;
+  }
+
+  return Number(card.rank);
+}
+
+function handValue(hand) {
+  let total = 0;
   let aces = 0;
 
-  for (
-    const [rank] of hand
-  ) {
-    if (
-      [
-        'J',
-        'Q',
-        'K'
-      ].includes(rank)
-    ) {
-      score += 10;
-    } else if (
-      rank === 'A'
-    ) {
+  for (const card of hand) {
+    total += cardValue(card);
+
+    if (card.rank === "A") {
       aces++;
-      score += 11;
-    } else {
-      score += parseInt(
-        rank,
-        10
-      );
     }
   }
 
-  while (
-    score > 21 &&
-    aces > 0
-  ) {
-    score -= 10;
+  while (total > 21 && aces > 0) {
+    total -= 10;
     aces--;
   }
 
-  return score;
+  return total;
 }
 
-function renderHand(
-  hand,
-  hideDealer = false
-) {
-  if (
-    !hand ||
-    hand.length === 0
-  ) {
-    return '—';
-  }
-
-  if (hideDealer) {
-    return `${hand[0][0]}${hand[0][1]}  🂠`;
-  }
-
+function handString(hand) {
   return hand
-    .map(
-      ([rank, suit]) =>
-        `${rank}${suit}`
-    )
-    .join('  ');
+    .map(card => `${card.rank}${card.suit}`)
+    .join("  ");
 }
 
-function blackjackUI(
-  dealerHand,
+function blackjackStateText(
   playerHand,
-  hideDealer,
-  bet,
-  extra = ''
+  dealerHand,
+  revealDealer = false
 ) {
-  const dealerScore =
-    hideDealer
-      ? '?'
-      : calcScore(
-          dealerHand
-        );
+  const player = handValue(playerHand);
 
-  const playerScore =
-    calcScore(
-      playerHand
-    );
+  const dealerShown = revealDealer
+    ? handString(dealerHand)
+    : `${dealerHand[0].rank}${dealerHand[0].suit}  🂠`;
 
-  return `╭━━━━━━━━━━━━━━━━━━━━╮
-┃     🃏 BLACKJACK
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  DEALER
-┃  ${renderHand(
-    dealerHand,
-    hideDealer
-  )}
-┃  Score: ${dealerScore}
-┃
-┃  YOU
-┃  ${renderHand(
-    playerHand
-  )}
-┃  Score: ${playerScore}
-┃
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃  💰 Bet: ${money(bet)}
-┃
-${extra
-    ? `┃  ${extra}\n`
-    : ''}╰━━━━━━━━━━━━━━━━━━━━╯`;
+  const dealerValue = revealDealer
+    ? handValue(dealerHand)
+    : "?";
+
+  return [
+    `👤 YOU   [${player}]`,
+    `│ ${handString(playerHand)}`,
+    "",
+    `🤖 DEALER [${dealerValue}]`,
+    `│ ${dealerShown}`
+  ].join("\n");
 }
 
-async function handleBlackjack(
-  api,
-  event,
-  args
-) {
-  const {
-    threadID,
-    senderID
-  } = event;
+async function handleBlackjack(api, event, args) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-  const bet =
-    parseInt(
-      args[0],
-      10
-    );
+  const bet = Number(args[0]);
 
-  if (
-    !Number.isInteger(bet) ||
-    bet <= 0
-  ) {
-    await send(
+  if (!Number.isInteger(bet) || bet < 1) {
+    await safeReply(
       api,
-      threadID,
-      `╭━━━━━━━━━━━━━━━━╮
-┃   🃏 BLACKJACK
-┣━━━━━━━━━━━━━━━━┫
-┃
-┃ !blackjack <bet>
-┃
-╰━━━━━━━━━━━━━━━━╯`
+      event,
+      "🃏 Usage: !blackjack <bet>"
     );
-
     return;
   }
 
-  if (
-    !(await canAfford(
-      threadID,
-      senderID,
-      bet
-    ))
-  ) {
-    await insufficientFunds(
-      api,
-      threadID,
-      senderID
-    );
-
+  if (!(await canAfford(threadID, userID, bet))) {
+    await safeReply(api, event, "❌ Not enough coins.");
     return;
   }
 
-  clearSession(
-    threadID,
-    senderID
-  );
+  clearSession(threadID, userID);
 
   await db.addBalance(
     threadID,
-    senderID,
+    userID,
     -bet
   );
 
-  const deck =
-    freshDeck();
+  const deck = createDeck();
 
   const playerHand = [
     deck.pop(),
@@ -2235,648 +1689,577 @@ async function handleBlackjack(
     deck.pop()
   ];
 
-  const playerScore =
-    calcScore(
-      playerHand
-    );
+  const playerBlackjack =
+    handValue(playerHand) === 21;
 
-  // Natural blackjack
-  if (
-    playerScore === 21
-  ) {
-    const winnings =
-      Math.floor(
-        bet * 2.5
-      );
+  const dealerBlackjack =
+    handValue(dealerHand) === 21;
 
-    const newBal =
+  const animator = await createAnimator(
+    api,
+    threadID,
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🃏 BLACKJACK",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🃏 Dealing cards...",
+      "",
+      "👤 YOU",
+      "│ 🂠  🂠",
+      "",
+      "🤖 DEALER",
+      "│ 🂠  🂠",
+      "",
+      "⏳ Cards are being dealt..."
+    ].join("\n")
+  );
+
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🃏 BLACKJACK",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      blackjackStateText(
+        playerHand,
+        dealerHand,
+        false
+      ),
+      "",
+      "⚡ Reading the table..."
+    ].join("\n")
+  );
+
+  if (playerBlackjack || dealerBlackjack) {
+    if (playerBlackjack && dealerBlackjack) {
       await db.addBalance(
         threadID,
-        senderID,
-        winnings
+        userID,
+        bet
       );
+
+      await animator.final(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "       🃏 BLACKJACK",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "🤝 PUSH",
+          "",
+          blackjackStateText(
+            playerHand,
+            dealerHand,
+            true
+          ),
+          "",
+          `💰 Bet refunded: ${money(bet)}`,
+          "",
+          "Both have blackjack."
+        ].join("\n")
+      );
+
+      return;
+    }
+
+    if (playerBlackjack) {
+      const payout = Math.floor(bet * 2.5);
+
+      await db.addBalance(
+        threadID,
+        userID,
+        payout
+      );
+
+      await db.incrementGameStats(
+        threadID,
+        userID,
+        true
+      );
+
+      await animator.final(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "       🃏 BLACKJACK",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "♠️ NATURAL BLACKJACK!",
+          "",
+          blackjackStateText(
+            playerHand,
+            dealerHand,
+            true
+          ),
+          "",
+          `💰 Payout: ${money(payout)}`,
+          `🔥 Profit: +${money(payout - bet)}`,
+          "",
+          "✦ Beautiful hand."
+        ].join("\n")
+      );
+
+      return;
+    }
 
     await db.incrementGameStats(
       threadID,
-      senderID,
-      true
+      userID,
+      false
     );
 
-    await animate(
-      api,
-      threadID,
+    await animator.final(
       [
-        blackjackUI(
-          dealerHand,
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "       🃏 BLACKJACK",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "💀 DEALER BLACKJACK",
+        "",
+        blackjackStateText(
           playerHand,
-          true,
-          bet,
-          '🂠 DEALER CARD HIDDEN'
+          dealerHand,
+          true
         ),
-
-        blackjackUI(
-          dealerHand,
-          playerHand,
-          false,
-          bet,
-          '💥 NATURAL BLACKJACK!'
-        )
-      ],
-      [
-        ANIMATION.normal
-      ]
-    );
-
-    await send(
-      api,
-      threadID,
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃     🃏 BLACKJACK
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  💥 NATURAL BLACKJACK!
-┃
-┃  💰 +${money(winnings)} coins
-┃  💵 Balance: ${money(newBal)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
+        "",
+        `💸 Lost: ${money(bet)}`,
+        "",
+        "The dealer had it from the start."
+      ].join("\n")
     );
 
     return;
   }
 
-  const session = {
-    type: 'blackjack',
+  setSession(threadID, userID, {
+    type: "blackjack",
     bet,
     deck,
     playerHand,
     dealerHand,
-    messageID: null
-  };
+    messageID: animator.messageID
+  });
 
-  const messageInfo =
-    await sendMessageAsync(
-      api,
-      threadID,
-      blackjackUI(
-        dealerHand,
+  await animator.final(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🃏 BLACKJACK",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      blackjackStateText(
         playerHand,
-        true,
-        bet,
-        '➤ !hit   •   !stand'
-      )
-    );
-
-  session.messageID =
-    getMessageID(
-      messageInfo
-    );
-
-  setSession(
-    threadID,
-    senderID,
-    session
+        dealerHand,
+        false
+      ),
+      "",
+      `💰 Bet: ${money(bet)}`,
+      "",
+      "⚔️ Your move:",
+      "!hit  •  !stand"
+    ].join("\n")
   );
 }
 
-async function updateBlackjackMessage(
-  api,
-  session,
-  text
-) {
-  if (
-    session.messageID &&
-    typeof api.editMessage === 'function'
-  ) {
-    try {
-      await editMessageAsync(
-        api,
-        text,
-        session.messageID
-      );
+async function handleBlackjackHit(api, event) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-      return true;
-    } catch (error) {
-      console.error(
-        '[games] blackjack edit failed:',
-        error
-      );
-    }
+  const session = getSession(threadID, userID);
+
+  if (!session || session.type !== "blackjack") {
+    return false;
   }
 
-  return false;
-}
+  const card = session.deck.pop();
 
-async function resolveBlackjackHit(
-  api,
-  event,
-  session
-) {
-  const {
-    threadID,
-    senderID
-  } = event;
+  session.playerHand.push(card);
 
-  const {
-    deck,
-    playerHand,
-    dealerHand,
-    bet
-  } = session;
+  const value = handValue(session.playerHand);
 
-  const nextCard =
-    deck.pop();
-
-  if (!nextCard) {
-    clearSession(
-      threadID,
-      senderID
-    );
-
-    await send(
-      api,
-      threadID,
-      '❌ Blackjack deck ran out.'
-    );
-
-    return;
-  }
-
-  playerHand.push(
-    nextCard
-  );
-
-  const pScore =
-    calcScore(
-      playerHand
-    );
-
-  if (
-    pScore > 21
-  ) {
-    clearSession(
-      threadID,
-      senderID
-    );
-
-    const balance =
-      await getBalance(
-        threadID,
-        senderID
-      );
+  if (value > 21) {
+    clearSession(threadID, userID);
 
     await db.incrementGameStats(
       threadID,
-      senderID,
+      userID,
       false
     );
 
-    const result =
-      blackjackUI(
-        dealerHand,
-        playerHand,
-        false,
-        bet,
-        '💥 BUST!'
-      );
-
-    if (
-      !(await updateBlackjackMessage(
-        api,
-        session,
-        result
-      ))
-    ) {
-      await send(
-        api,
-        threadID,
-        result
-      );
-    }
-
-    await send(
+    await editOrSend(
       api,
       threadID,
-      `💸 Lost ${money(bet)} coins
-💵 Balance: ${money(balance)}`
+      session.messageID,
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "       🃏 BLACKJACK",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "💥 BUST!",
+        "",
+        blackjackStateText(
+          session.playerHand,
+          session.dealerHand,
+          false
+        ),
+        "",
+        `💀 Total: ${value}`,
+        `💸 Lost: ${money(session.bet)}`,
+        "",
+        "✦ You went over 21."
+      ].join("\n")
     );
 
-    return;
+    return true;
   }
 
   setSession(
     threadID,
-    senderID,
+    userID,
     session
   );
 
-  const result =
-    blackjackUI(
-      dealerHand,
-      playerHand,
-      true,
-      bet,
-      `🎴 Drew ${nextCard[0]}${nextCard[1]}`
-    );
+  await sleep(editDelay());
 
-  await updateBlackjackMessage(
+  await editOrSend(
     api,
-    session,
-    result
+    threadID,
+    session.messageID,
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🃏 BLACKJACK",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🎴 CARD DRAWN",
+      "",
+      blackjackStateText(
+        session.playerHand,
+        session.dealerHand,
+        false
+      ),
+      "",
+      `💰 Bet: ${money(session.bet)}`,
+      "",
+      "⚔️ Your move:",
+      "!hit  •  !stand"
+    ].join("\n")
   );
+
+  return true;
 }
 
-async function resolveBlackjackStand(
-  api,
-  event,
-  session
-) {
-  const {
-    threadID,
-    senderID
-  } = event;
+async function handleBlackjackStand(api, event) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-  const {
-    deck,
-    playerHand,
-    dealerHand,
-    bet
-  } = session;
+  const session = getSession(threadID, userID);
 
-  clearSession(
-    threadID,
-    senderID
-  );
+  if (!session || session.type !== "blackjack") {
+    return false;
+  }
 
-  const pScore =
-    calcScore(
-      playerHand
-    );
+  clearSession(threadID, userID);
 
-  // Dealer reveal
-  await updateBlackjackMessage(
-    api,
-    session,
-    blackjackUI(
-      dealerHand,
-      playerHand,
-      false,
-      bet,
-      '👁️ DEALER REVEALS'
-    )
-  );
-
-  await sleep(
-    ANIMATION.normal
-  );
-
-  let dScore =
-    calcScore(
-      dealerHand
-    );
-
-  // Dealer animation
   while (
-    dScore < 17 &&
-    deck.length > 0
+    handValue(session.dealerHand) < 17
   ) {
-    dealerHand.push(
-      deck.pop()
-    );
-
-    dScore =
-      calcScore(
-        dealerHand
-      );
-
-    await updateBlackjackMessage(
-      api,
-      session,
-      blackjackUI(
-        dealerHand,
-        playerHand,
-        false,
-        bet,
-        '🎴 DEALER DRAWS...'
-      )
-    );
-
-    await sleep(
-      ANIMATION.fast
+    session.dealerHand.push(
+      session.deck.pop()
     );
   }
 
+  const player = handValue(
+    session.playerHand
+  );
+
+  const dealer = handValue(
+    session.dealerHand
+  );
+
   let result;
-  let balance;
 
-  if (
-    dScore > 21 ||
-    pScore > dScore
-  ) {
-    const winnings =
-      bet * 2;
+  if (dealer > 21) {
+    result = "win";
+  } else if (player > dealer) {
+    result = "win";
+  } else if (player === dealer) {
+    result = "push";
+  } else {
+    result = "lose";
+  }
 
-    const newBal =
-      await db.addBalance(
-        threadID,
-        senderID,
-        winnings
-      );
+  await sleep(editDelay());
+
+  await editOrSend(
+    api,
+    threadID,
+    session.messageID,
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🃏 BLACKJACK",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🤖 DEALER REVEALS",
+      "",
+      blackjackStateText(
+        session.playerHand,
+        session.dealerHand,
+        true
+      ),
+      "",
+      "🃏 Dealer is checking..."
+    ].join("\n")
+  );
+
+  await sleep(editDelay());
+
+  await editOrSend(
+    api,
+    threadID,
+    session.messageID,
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🃏 BLACKJACK",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "⚔️ FINAL TABLE",
+      "",
+      blackjackStateText(
+        session.playerHand,
+        session.dealerHand,
+        true
+      ),
+      "",
+      "⚡ Calculating winner..."
+    ].join("\n")
+  );
+
+  if (result === "win") {
+    const payout = session.bet * 2;
+
+    await db.addBalance(
+      threadID,
+      userID,
+      payout
+    );
 
     await db.incrementGameStats(
       threadID,
-      senderID,
+      userID,
       true
     );
 
-    result =
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃     🃏 BLACKJACK
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  Dealer: ${dScore}
-┃  You:    ${pScore}
-┃
-┃  🎉 YOU WIN!
-┃
-┃  💰 +${money(bet)} coins
-┃  💵 Balance: ${money(newBal)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`;
-  } else if (
-    pScore === dScore
-  ) {
-    const newBal =
-      await db.addBalance(
-        threadID,
-        senderID,
-        bet
-      );
+    await editOrSend(
+      api,
+      threadID,
+      session.messageID,
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "       🃏 BLACKJACK",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "🏆 YOU WIN!",
+        "",
+        blackjackStateText(
+          session.playerHand,
+          session.dealerHand,
+          true
+        ),
+        "",
+        `💰 Payout: ${money(payout)}`,
+        `📈 Profit: +${money(session.bet)}`,
+        "",
+        "✦ Dealer has been defeated."
+      ].join("\n")
+    );
+  } else if (result === "push") {
+    await db.addBalance(
+      threadID,
+      userID,
+      session.bet
+    );
 
-    result =
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃     🃏 BLACKJACK
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  Dealer: ${dScore}
-┃  You:    ${pScore}
-┃
-┃  👔 PUSH — TIE
-┃
-┃  💰 Bet returned
-┃  💵 Balance: ${money(newBal)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`;
+    await editOrSend(
+      api,
+      threadID,
+      session.messageID,
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "       🃏 BLACKJACK",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "🤝 PUSH",
+        "",
+        blackjackStateText(
+          session.playerHand,
+          session.dealerHand,
+          true
+        ),
+        "",
+        `💰 Refunded: ${money(session.bet)}`,
+        "",
+        "Same score. Nobody wins."
+      ].join("\n")
+    );
   } else {
-    balance =
-      await getBalance(
-        threadID,
-        senderID
-      );
-
     await db.incrementGameStats(
       threadID,
-      senderID,
+      userID,
       false
     );
 
-    result =
-      `╭━━━━━━━━━━━━━━━━━━━━╮
-┃     🃏 BLACKJACK
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  Dealer: ${dScore}
-┃  You:    ${pScore}
-┃
-┃  💀 DEALER WINS
-┃
-┃  💸 Lost ${money(bet)} coins
-┃  💵 Balance: ${money(balance)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`;
-  }
-
-  if (
-    !(await updateBlackjackMessage(
-      api,
-      session,
-      result
-    ))
-  ) {
-    await send(
+    await editOrSend(
       api,
       threadID,
-      result
+      session.messageID,
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "       🃏 BLACKJACK",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "💀 DEALER WINS",
+        "",
+        blackjackStateText(
+          session.playerHand,
+          session.dealerHand,
+          true
+        ),
+        "",
+        `💸 Lost: ${money(session.bet)}`,
+        "",
+        "✦ Better luck next hand."
+      ].join("\n")
     );
   }
+
+  return true;
 }
 
 // ============================================================
 // 8-BALL
 // ============================================================
 
-const EIGHTBALL_RESPONSES = [
-  '🟢 It is certain.',
-  '🟢 Without a doubt.',
-  '🟢 Yes, definitely.',
-  '🟢 You may rely on it.',
-  '🟢 As I see it, yes.',
-  '🟡 Reply hazy, try again.',
-  '🟡 Ask again later.',
-  '🟡 Better not tell you now.',
-  '🟡 Cannot predict now.',
-  '🔴 Don\'t count on it.',
-  '🔴 My reply is no.',
-  '🔴 My sources say no.',
-  '🔴 Very doubtful.'
-];
-
-async function handleEightball(
-  api,
-  event,
-  question
-) {
-  const {
-    threadID
-  } = event;
+async function handle8Ball(api, event, text) {
+  const threadID = String(event.threadID);
+  const question = text
+    .replace(/^!8ball\s*/i, "")
+    .trim();
 
   if (!question) {
-    await send(
+    await safeReply(
       api,
-      threadID,
-      `╭━━━━━━━━━━━━━━━━╮
-┃   🎱 MAGIC 8-BALL
-┣━━━━━━━━━━━━━━━━┫
-┃
-┃ !8ball <question>
-┃
-╰━━━━━━━━━━━━━━━━╯`
+      event,
+      "🎱 Ask something.\nExample: !8ball will I win?"
     );
-
     return;
   }
 
-  let seed = 0;
+  clearSession(
+    threadID,
+    String(event.senderID)
+  );
 
-  for (
-    const character
-    of question.toLowerCase()
-  ) {
-    seed +=
-      character.charCodeAt(0);
+  const answers = [
+    "Yes. Absolutely.",
+    "It is certain.",
+    "Without a doubt.",
+    "Most likely.",
+    "The signs point to yes.",
+    "Ask again later.",
+    "Cannot predict now.",
+    "Better not tell you.",
+    "Don't count on it.",
+    "My sources say no.",
+    "Very doubtful.",
+    "Absolutely not."
+  ];
+
+  let hash = 0;
+
+  for (let i = 0; i < question.length; i++) {
+    hash =
+      (hash * 31 + question.charCodeAt(i)) |
+      0;
   }
 
   const answer =
-    EIGHTBALL_RESPONSES[
-      seed %
-      EIGHTBALL_RESPONSES.length
-    ];
+    answers[Math.abs(hash) % answers.length];
 
-  const frames = [
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃    🎱 MAGIC 8-BALL
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  "${question}"
-┃
-┃
-┃          🎱
-┃
-┃       ◌ ◌ ◌
-┃
-┃     THINKING...
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
-
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃    🎱 MAGIC 8-BALL
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  "${question}"
-┃
-┃
-┃          🔮
-┃
-┃       ◌ ◌ ◌
-┃
-┃     CONSULTING...
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
-
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃    🎱 MAGIC 8-BALL
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  "${question}"
-┃
-┃
-┃          🎱
-┃
-┃       ✦ ✦ ✦
-┃
-┃      REVEAL...
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`,
-
-    `╭━━━━━━━━━━━━━━━━━━━━╮
-┃    🎱 MAGIC 8-BALL
-┣━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃          🎱
-┃
-┃
-┃      ✦ ANSWER ✦
-┃
-┃  ${answer}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
-  ];
-
-  await animate(
+  const animator = await createAnimator(
     api,
     threadID,
-    frames,
     [
-      ANIMATION.fast,
-      ANIMATION.fast,
-      ANIMATION.normal
-    ]
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🎱 8-BALL",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🔮 THE QUESTION",
+      "",
+      `"${question}"`,
+      "",
+      "🎱",
+      "",
+      "The magic 8-ball is thinking...",
+      "⏳ Please wait."
+    ].join("\n")
+  );
+
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🎱 8-BALL",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🔮 THE QUESTION",
+      "",
+      `"${question}"`,
+      "",
+      "🎱",
+      "     ↻",
+      "    ↻",
+      "   ↻",
+      "",
+      "The answer is forming..."
+    ].join("\n")
+  );
+
+  await animator.waitAndEdit(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🎱 8-BALL",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🔮 THE QUESTION",
+      "",
+      `"${question}"`,
+      "",
+      "🎱",
+      "",
+      "████████████████",
+      "",
+      "⚡ REVEALING..."
+    ].join("\n")
+  );
+
+  await animator.final(
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🎱 8-BALL",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🔮 THE QUESTION",
+      "",
+      `"${question}"`,
+      "",
+      "🎱 ANSWER",
+      "",
+      `「 ${answer} 」`,
+      "",
+      "✦ Fate has spoken."
+    ].join("\n")
   );
 }
 
 // ============================================================
-// GAMES MENU
-// ============================================================
-
-async function handleGamesList(
-  api,
-  event
-) {
-  const enabled =
-    await gamesAreEnabled(
-      event.threadID
-    );
-
-  const status =
-    enabled
-      ? '🟢 ONLINE'
-      : '🔴 OFFLINE';
-
-  await send(
-    api,
-    event.threadID,
-    `╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮
-┃       🎮 GAME CENTER
-┣━━━━━━━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  STATUS: ${status}
-┃
-┣━━━━━━━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  🧠 TRIVIA
-┃  !trivia
-┃  Answer A/B/C/D → coins
-┃
-┃  ⚔️ RPS
-┃  !rps rock 100
-┃  Win → 2×
-┃
-┃  🎲 DICE
-┃  !roll 100
-┃  High roll → 2×
-┃
-┃  🎯 GUESS
-┃  !guess 7 100
-┃  Exact → 5×
-┃
-┃  🪙 COINFLIP
-┃  !coinflip 100 heads
-┃  Win → 2×
-┃
-┃  🎰 SLOTS
-┃  !slots 100
-┃  Pair → 1.5×
-┃  Jackpot → 3–5×
-┃
-┃  🃏 BLACKJACK
-┃  !blackjack 100
-┃  !hit / !stand
-┃  Natural → 2.5×
-┃
-┃  🎱 8-BALL
-┃  !8ball <question>
-┃
-┣━━━━━━━━━━━━━━━━━━━━━━━━━━┫
-┃
-┃  ⚙️ !game on
-┃  ⚙️ !game off
-┃
-╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯`
-  );
-}
-
-// ============================================================
-// ROUTER
+// MAIN ROUTER
 // ============================================================
 
 async function handleGamesCommand(
@@ -2885,155 +2268,115 @@ async function handleGamesCommand(
   text,
   originalText
 ) {
-  const {
-    threadID,
-    senderID
-  } = event;
+  if (!event || !event.threadID || !event.senderID) {
+    return false;
+  }
 
-  const cleanText =
-    String(
-      text || ''
-    )
-      .trim()
-      .toLowerCase();
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-  const original =
-    String(
-      originalText ||
-      text ||
-      ''
-    ).trim();
+  const cleanText = String(
+    text || originalText || ""
+  ).trim();
+
+  const lower = cleanText.toLowerCase();
 
   // ----------------------------------------------------------
-  // GAME TOGGLE
+  // GAME TOGGLE ALWAYS WORKS
   // ----------------------------------------------------------
 
   if (
-    await handleGameToggle(
+    lower === "!game on" ||
+    lower === "!game off" ||
+    lower === "!games on" ||
+    lower === "!games off"
+  ) {
+    return await handleGameToggle(
       api,
       event,
       cleanText
-    )
-  ) {
+    );
+  }
+
+  // ----------------------------------------------------------
+  // GAME MENU ALWAYS WORKS
+  // ----------------------------------------------------------
+
+  if (lower === "!games") {
+    await handleGamesMenu(api, event);
     return true;
   }
 
   // ----------------------------------------------------------
-  // GAME MENU
+  // DETERMINE WHETHER GAMES ARE ENABLED
   // ----------------------------------------------------------
 
-  if (
-    cleanText === '!games'
-  ) {
-    await handleGamesList(
-      api,
-      event
-    );
-
-    return true;
-  }
-
-  // ----------------------------------------------------------
-  // CHECK ENABLED
-  // ----------------------------------------------------------
-
-  const enabled =
-    await gamesAreEnabled(
-      threadID
-    );
+  const enabled = await gamesAreEnabled(threadID);
 
   if (!enabled) {
     return false;
   }
 
   // ----------------------------------------------------------
-  // PARSE ARGS
+  // CURRENT SESSION
   // ----------------------------------------------------------
 
-  const args =
-    original
-      .split(/\s+/)
-      .slice(1);
+  const session = getSession(
+    threadID,
+    userID
+  );
 
-  // ----------------------------------------------------------
-  // ACTIVE SESSION
-  // ----------------------------------------------------------
-
-  const session =
-    getSession(
-      threadID,
-      senderID
+  // Trivia answer
+  if (
+    session &&
+    session.type === "trivia" &&
+    /^[ABCD]$/i.test(cleanText)
+  ) {
+    return await resolveTrivia(
+      api,
+      event,
+      cleanText
     );
-
-  if (session) {
-
-    // --------------------------------------------------------
-    // TRIVIA ANSWER
-    // --------------------------------------------------------
-
-    if (
-      session.type === 'trivia' &&
-      /^[abcd]$/i.test(
-        cleanText
-      )
-    ) {
-      await resolveTrivia(
-        api,
-        event,
-        session,
-        cleanText
-      );
-
-      return true;
-    }
-
-    // --------------------------------------------------------
-    // BLACKJACK HIT
-    // --------------------------------------------------------
-
-    if (
-      session.type === 'blackjack' &&
-      cleanText === '!hit'
-    ) {
-      await resolveBlackjackHit(
-        api,
-        event,
-        session
-      );
-
-      return true;
-    }
-
-    // --------------------------------------------------------
-    // BLACKJACK STAND
-    // --------------------------------------------------------
-
-    if (
-      session.type === 'blackjack' &&
-      cleanText === '!stand'
-    ) {
-      await resolveBlackjackStand(
-        api,
-        event,
-        session
-      );
-
-      return true;
-    }
   }
+
+  // Blackjack hit
+  if (
+    session &&
+    session.type === "blackjack" &&
+    lower === "!hit"
+  ) {
+    return await handleBlackjackHit(
+      api,
+      event
+    );
+  }
+
+  // Blackjack stand
+  if (
+    session &&
+    session.type === "blackjack" &&
+    lower === "!stand"
+  ) {
+    return await handleBlackjackStand(
+      api,
+      event
+    );
+  }
+
+  // ----------------------------------------------------------
+  // COMMAND PARSING
+  // ----------------------------------------------------------
+
+  const parts = cleanText.split(/\s+/);
+  const command = parts[0].toLowerCase();
+  const args = parts.slice(1);
 
   // ----------------------------------------------------------
   // TRIVIA
   // ----------------------------------------------------------
 
-  if (
-    cleanText === '!trivia'
-  ) {
-    await handleTrivia(
-      api,
-      event
-    );
-
+  if (command === "!trivia") {
+    await handleTrivia(api, event);
     return true;
   }
 
@@ -3042,34 +2385,22 @@ async function handleGamesCommand(
   // ----------------------------------------------------------
 
   if (
-    cleanText === '!rps' ||
-    cleanText.startsWith('!rps ')
+    command === "!rps" ||
+    command === "!rockpaperscissors"
   ) {
-    await handleRps(
-      api,
-      event,
-      args
-    );
-
+    await handleRPS(api, event, args);
     return true;
   }
 
   // ----------------------------------------------------------
-  // DICE
+  // ROLL
   // ----------------------------------------------------------
 
   if (
-    cleanText === '!roll' ||
-    cleanText.startsWith('!roll ') ||
-    cleanText === '!dice' ||
-    cleanText.startsWith('!dice ')
+    command === "!roll" ||
+    command === "!dice"
   ) {
-    await handleRoll(
-      api,
-      event,
-      args
-    );
-
+    await handleRoll(api, event, args);
     return true;
   }
 
@@ -3077,16 +2408,8 @@ async function handleGamesCommand(
   // GUESS
   // ----------------------------------------------------------
 
-  if (
-    cleanText === '!guess' ||
-    cleanText.startsWith('!guess ')
-  ) {
-    await handleGuess(
-      api,
-      event,
-      args
-    );
-
+  if (command === "!guess") {
+    await handleGuess(api, event, args);
     return true;
   }
 
@@ -3095,17 +2418,14 @@ async function handleGamesCommand(
   // ----------------------------------------------------------
 
   if (
-    cleanText === '!coinflip' ||
-    cleanText.startsWith('!coinflip ') ||
-    cleanText === '!cf' ||
-    cleanText.startsWith('!cf ')
+    command === "!coinflip" ||
+    command === "!cf"
   ) {
     await handleCoinflip(
       api,
       event,
       args
     );
-
     return true;
   }
 
@@ -3114,15 +2434,10 @@ async function handleGamesCommand(
   // ----------------------------------------------------------
 
   if (
-    cleanText === '!slots' ||
-    cleanText.startsWith('!slots ')
+    command === "!slots" ||
+    command === "!slot"
   ) {
-    await handleSlots(
-      api,
-      event,
-      args
-    );
-
+    await handleSlots(api, event, args);
     return true;
   }
 
@@ -3131,17 +2446,14 @@ async function handleGamesCommand(
   // ----------------------------------------------------------
 
   if (
-    cleanText === '!blackjack' ||
-    cleanText.startsWith('!blackjack ') ||
-    cleanText === '!bj' ||
-    cleanText.startsWith('!bj ')
+    command === "!blackjack" ||
+    command === "!bj"
   ) {
     await handleBlackjack(
       api,
       event,
       args
     );
-
     return true;
   }
 
@@ -3150,22 +2462,14 @@ async function handleGamesCommand(
   // ----------------------------------------------------------
 
   if (
-    cleanText === '!8ball' ||
-    cleanText.startsWith('!8ball ')
+    command === "!8ball" ||
+    command === "!8-ball"
   ) {
-    const question =
-      original
-        .slice(
-          '!8ball'.length
-        )
-        .trim();
-
-    await handleEightball(
+    await handle8Ball(
       api,
       event,
-      question
+      cleanText
     );
-
     return true;
   }
 
