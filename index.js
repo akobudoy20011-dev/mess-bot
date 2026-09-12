@@ -6,6 +6,9 @@ const crypto = require("crypto");
 const express = require("express");
 const { login } = require("ws3-fca");
 
+const db = require("./db");
+const { handleEconomyCommand } = require("./economy");
+const { handleGamesCommand } = require("./games");
 
 const {
   searchYouTube,
@@ -327,6 +330,14 @@ login(
 
     console.log("Logged in successfully.");
 
+    // Connect to Postgres (Neon) for the economy/games balances.
+    // Non-fatal on purpose: if DATABASE_URL isn't set yet, the rest
+    // of the bot (!ping, triggers, music) keeps working — only
+    // !balance/!daily/!work/etc. and the games will error individually.
+    db.connect().catch((err) => {
+      console.error("Database connection failed:", err.message);
+    });
+
     api.setOptions({
       listenEvents: true,
       selfListen: false,
@@ -406,6 +417,18 @@ function handleMessage(api, event) {
   const text = originalText.toLowerCase();
   const senderId = String(senderID || "").trim();
 
+  // Economy + games — checked first so bets/session replies (like
+  // blackjack's !hit/!stand or a trivia letter) get first crack,
+  // before falling through to !ping/!help/triggers/etc. below.
+  void (async () => {
+    try {
+      if (await handleGamesCommand(api, event, text, originalText)) return;
+      if (await handleEconomyCommand(api, event, text, originalText)) return;
+    } catch (err) {
+      console.error("Economy/games command failed:", err);
+    }
+  })();
+
   if (text === "!ping") {
     sendReplyWithTyping(api, "pong 🏓", threadID);
     return;
@@ -425,6 +448,13 @@ function handleMessage(api, event) {
         "!simp <name> - random simp meter",
         "!clown <name> - random clown meter",
         "!broadcast <text> - admin only",
+        "",
+        "Economy:",
+        "!balance / !daily / !work / !pay / !leaderboard",
+        "!shop / !buy <item> / !inventory",
+        "",
+        "Games:",
+        "!games / !trivia / !rps / !roll / !guess / !coinflip / !slots / !blackjack / !8ball",
       ].join("\n"),
       threadID
     );
