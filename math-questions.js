@@ -1,54 +1,244 @@
-module.exports = [
-  // ADDITION
-  { type: "addition", min: 1, max: 20 },
-  { type: "addition", min: 10, max: 50 },
-  { type: "addition", min: 20, max: 100 },
-  { type: "addition", min: 50, max: 200 },
-  { type: "addition", min: 100, max: 500 },
+/**
+ * math-questions.js
+ * =================
+ * 200 Math Questions
+ *
+ * 50 Easy
+ * 50 Medium
+ * 50 Hard
+ * 50 Extreme
+ *
+ * All answers are pre-calculated.
+ */
 
-  // SUBTRACTION
-  { type: "subtraction", min: 1, max: 20 },
-  { type: "subtraction", min: 10, max: 50 },
-  { type: "subtraction", min: 20, max: 100 },
-  { type: "subtraction", min: 50, max: 200 },
-  { type: "subtraction", min: 100, max: 500 },
+const mathQuestions = {
+  easy: [
+    { question: "24 + 37", answer: 61 },
+    { question: "85 - 29", answer: 56 },
+    { question: "12 × 8", answer: 96 },
+    { question: "144 ÷ 12", answer: 12 },
+    { question: "47 + 68", answer: 115 },
+    { question: "93 - 47", answer: 46 },
+    { question: "15 × 7", answer: 105 },
+    { question: "180 ÷ 15", answer: 12 },
+    { question: "36 + 49", answer: 85 },
+    { question: "72 - 38", answer: 34 },
 
-  // MULTIPLICATION
-  { type: "multiplication", min: 2, max: 5 },
-  { type: "multiplication", min: 2, max: 10 },
-  { type: "multiplication", min: 2, max: 12 },
-  { type: "multiplication", min: 5, max: 20 },
-  { type: "multiplication", min: 10, max: 25 },
+    { question: "14 × 9", answer: 126 },
+    { question: "225 ÷ 15", answer: 15 },
+    { question: "58 + 27", answer: 85 },
+    { question: "100 - 63", answer: 37 },
+    { question: "18 × 6", answer: 108 },
+    { question: "96 ÷ 8", answer: 12 },
+    { question: "73 + 19", answer: 92 },
+    { question: "91 - 36", answer: 55 },
+    { question: "13 × 8", answer: 104 },
+    { question: "168 ÷ 14", answer: 12 },
 
-  // DIVISION
-  { type: "division", min: 2, max: 5 },
-  { type: "division", min: 2, max: 10 },
-  { type: "division", min: 2, max: 12 },
-  { type: "division", min: 5, max: 20 },
-  { type: "division", min: 10, max: 25 },
+    { question: "42 + 56", answer: 98 },
+    { question: "87 - 48", answer: 39 },
+    { question: "17 × 5", answer: 85 },
+    { question: "132 ÷ 11", answer: 12 },
+    { question: "29 + 64", answer: 93 },
+    { question: "150 - 72", answer: 78 },
+    { question: "16 × 7", answer: 112 },
+    { question: "196 ÷ 14", answer: 14 },
+    { question: "38 + 45", answer: 83 },
+    { question: "81 - 27", answer: 54 },
 
-  // MIXED EASY
-  { type: "mixed", min: 1, max: 20 },
-  { type: "mixed", min: 1, max: 30 },
-  { type: "mixed", min: 1, max: 50 },
+    { question: "19 × 6", answer: 114 },
+    { question: "240 ÷ 16", answer: 15 },
+    { question: "67 + 28", answer: 95 },
+    { question: "94 - 57", answer: 37 },
+    { question: "21 × 4", answer: 84 },
+    { question: "156 ÷ 12", answer: 13 },
+    { question: "55 + 39", answer: 94 },
+    { question: "120 - 46", answer: 74 },
+    { question: "11 × 9", answer: 99 },
+    { question: "210 ÷ 14", answer: 15 },
 
-  // MIXED MEDIUM
-  { type: "mixed", min: 10, max: 50 },
-  { type: "mixed", min: 20, max: 100 },
-  { type: "mixed", min: 50, max: 150 },
+    { question: "46 + 38", answer: 84 },
+    { question: "88 - 35", answer: 53 },
+    { question: "23 × 4", answer: 92 },
+    { question: "216 ÷ 18", answer: 12 },
+    { question: "74 + 17", answer: 91 },
+    { question: "105 - 68", answer: 37 },
+    { question: "14 × 8", answer: 112 },
+    { question: "192 ÷ 16", answer: 12 },
+    { question: "63 + 29", answer: 92 },
+    { question: "98 - 41", answer: 57 }
+  ],
 
-  // SQUARES
-  { type: "square", min: 2, max: 10 },
-  { type: "square", min: 5, max: 15 },
-  { type: "square", min: 10, max: 20 },
+  medium: [
+    { question: "24 × 7 + 18", answer: 186 },
+    { question: "150 - 36 ÷ 6", answer: 144 },
+    { question: "18 × 5 - 27", answer: 63 },
+    { question: "84 ÷ 7 + 35", answer: 47 },
+    { question: "45 + 12 × 6", answer: 117 },
+    { question: "200 - 15 × 8", answer: 80 },
+    { question: "72 ÷ 8 × 9", answer: 81 },
+    { question: "35 × 4 + 125", answer: 265 },
+    { question: "360 ÷ 12 + 47", answer: 77 },
+    { question: "90 - 24 + 18 × 3", answer: 120 },
 
-  // PERCENTAGES
-  { type: "percentage", min: 10, max: 50 },
-  { type: "percentage", min: 50, max: 200 },
-  { type: "percentage", min: 100, max: 500 },
+    { question: "16 × 9 - 48 ÷ 6", answer: 136 },
+    { question: "250 ÷ 5 + 37 × 2", answer: 124 },
+    { question: "64 + 18 × 7", answer: 190 },
+    { question: "500 - 42 × 9", answer: 122 },
+    { question: "27 × 6 + 84 ÷ 7", answer: 174 },
+    { question: "320 ÷ 8 + 19 × 4", answer: 116 },
+    { question: "45 × 6 - 72", answer: 198 },
+    { question: "280 ÷ 7 + 56", answer: 96 },
+    { question: "125 + 18 × 5", answer: 215 },
+    { question: "420 - 36 × 7", answer: 168 },
 
-  // ORDER OF OPERATIONS
-  { type: "order", min: 1, max: 10 },
-  { type: "order", min: 5, max: 20 },
-  { type: "order", min: 10, max: 30 }
-];
+    { question: "54 ÷ 6 + 28 × 4", answer: 121 },
+    { question: "17 × 8 + 43", answer: 179 },
+    { question: "360 - 45 × 6", answer: 90 },
+    { question: "144 ÷ 12 + 19 × 5", answer: 107 },
+    { question: "72 × 4 - 85", answer: 203 },
+    { question: "600 ÷ 12 + 37", answer: 87 },
+    { question: "48 + 25 × 9", answer: 273 },
+    { question: "300 - 84 ÷ 7", answer: 288 },
+    { question: "16 × 12 + 75", answer: 267 },
+    { question: "480 ÷ 16 + 68", answer: 98 },
+
+    { question: "39 × 5 - 44", answer: 151 },
+    { question: "216 ÷ 9 + 57", answer: 81 },
+    { question: "85 + 14 × 8", answer: 197 },
+    { question: "400 - 27 × 9", answer: 157 },
+    { question: "32 × 7 + 64", answer: 288 },
+    { question: "525 ÷ 15 + 46", answer: 81 },
+    { question: "96 ÷ 8 + 31 × 3", answer: 105 },
+    { question: "75 × 4 - 116", answer: 184 },
+    { question: "250 + 36 ÷ 4", answer: 259 },
+    { question: "540 ÷ 9 - 27", answer: 33 },
+
+    { question: "28 × 9 + 17", answer: 269 },
+    { question: "700 - 48 × 11", answer: 172 },
+    { question: "63 ÷ 7 + 24 × 5", answer: 129 },
+    { question: "42 × 6 - 73", answer: 179 },
+    { question: "360 ÷ 15 + 82", answer: 106 },
+    { question: "19 × 11 + 56", answer: 265 },
+    { question: "450 - 32 × 8", answer: 194 },
+    { question: "81 ÷ 9 + 47 × 2", answer: 103 },
+    { question: "34 × 7 - 96", answer: 142 },
+    { question: "600 ÷ 15 + 73", answer: 113 }
+  ],
+
+  hard: [
+    { question: "48 × 17 − 236", answer: 580 },
+    { question: "735 ÷ 15 + 48 × 3", answer: 193 },
+    { question: "(84 − 27) × 13", answer: 741 },
+    { question: "960 ÷ (12 + 8) × 7", answer: 336 },
+    { question: "125 × 16 − 875 ÷ 5", answer: 1825 },
+    { question: "(72 × 15) − (144 ÷ 12)", answer: 1068 },
+    { question: "45² − 18²", answer: 1701 },
+    { question: "(36 + 24) × (18 − 7)", answer: 660 },
+    { question: "1440 ÷ 24 + 37 × 6", answer: 282 },
+    { question: "(125 − 47) × 9 + 64", answer: 766 },
+
+    { question: "((48 × 15) − 120) ÷ 6", answer: 100 },
+    { question: "(72 + 38) × 12 − 450", answer: 870 },
+    { question: "2400 ÷ (16 × 5) + 73", answer: 103 },
+    { question: "(96 ÷ 8 + 17) × 14", answer: 406 },
+    { question: "35 × 24 − (180 ÷ 9) + 67", answer: 887 },
+    { question: "(125 + 75) ÷ 8 × 12", answer: 300 },
+    { question: "64² − 48²", answer: 1792 },
+    { question: "(27 × 18) + (360 ÷ 12) − 94", answer: 422 },
+    { question: "1500 − (48 × 17) + 326", answer: 1010 },
+    { question: "(84 + 36) ÷ 6 × (25 − 9)", answer: 320 },
+
+    { question: "(56 − 18) × 14 + 92", answer: 624 },
+    { question: "72² − 36²", answer: 3888 },
+    { question: "(144 + 96) ÷ 12 × 17", answer: 340 },
+    { question: "850 − (36 × 14) + 72", answer: 418 },
+    { question: "(48 + 32) × (21 − 9)", answer: 960 },
+    { question: "1260 ÷ 18 + 44 × 5", answer: 290 },
+    { question: "(95 − 27) × 11 − 84", answer: 664 },
+    { question: "81² − 45²", answer: 4536 },
+    { question: "(360 ÷ 12 + 25) × 8", answer: 440 },
+    { question: "1750 − 65 × 19", answer: 515 },
+
+    { question: "(128 − 56) × 15 + 48", answer: 1128 },
+    { question: "54² − 27²", answer: 2187 },
+    { question: "1440 ÷ (18 + 6) × 11", answer: 660 },
+    { question: "(75 + 45) × 14 − 280", answer: 1400 },
+    { question: "960 − (42 × 13) + 175", answer: 589 },
+    { question: "(63 ÷ 9 + 17) × 15", answer: 360 },
+    { question: "105² − 75²", answer: 5400 },
+    { question: "(144 − 48) × 17 ÷ 8", answer: 204 },
+    { question: "2400 ÷ 16 + 38 × 7", answer: 416 },
+    { question: "(92 + 28) × 9 − 315", answer: 765 },
+
+    { question: "68 × 17 − 245", answer: 911 },
+    { question: "(180 − 72) × 13 ÷ 6", answer: 234 },
+    { question: "90² − 54²", answer: 5184 },
+    { question: "(42 + 78) ÷ 6 × 19", answer: 380 },
+    { question: "1350 − (48 × 21) + 96", answer: 438 },
+    { question: "(84 × 15) − (420 ÷ 7)", answer: 1200 },
+    { question: "56² − 32²", answer: 2112 },
+    { question: "(225 + 75) ÷ 15 × 22", answer: 440 },
+    { question: "1800 ÷ 24 + 67 × 5", answer: 410 },
+    { question: "(118 − 46) × 12 + 83", answer: 947 }
+  ],
+
+  extreme: [
+    { question: "(125 × 24 − 360) ÷ 12", answer: 220 },
+    { question: "48² − (36 × 27) + 144", answer: 972 },
+    { question: "(75 + 45) × (32 − 17) ÷ 10", answer: 180 },
+    { question: "2400 ÷ (15 + 9) × 18 − 275", answer: 1525 },
+    { question: "(64² − 28²) ÷ 12", answer: 276 },
+    { question: "125 × (48 − 19) − 360 ÷ 8", answer: 3585 },
+    { question: "(144 ÷ 12 + 18) × (25 − 7)", answer: 540 },
+    { question: "96 × 17 − (450 ÷ 9) + 275", answer: 1857 },
+    { question: "(85² − 35²) ÷ 10", answer: 600 },
+    { question: "3600 ÷ (24 − 9) + 17 × 13", answer: 461 },
+
+    { question: "(72 × 18 − 144) ÷ 12 + 97", answer: 193 },
+    { question: "2500 − (48 × 27) + 625 ÷ 5", answer: 1329 },
+    { question: "(45 + 75)² ÷ 12 − 100", answer: 1100 },
+    { question: "64 × (35 − 17) + 144 ÷ 12", answer: 1164 },
+    { question: "(1500 ÷ 25 + 36) × 14 − 250", answer: 1124 },
+    { question: "99² − 81² + 225", answer: 3465 },
+    { question: "(840 − 216) ÷ 12 × 17", answer: 884 },
+    { question: "175 × 16 − (960 ÷ 12) + 325", answer: 3045 },
+    { question: "(128 + 72) × 15 ÷ 10 − 175", answer: 125 },
+    { question: "75² − 45² + (360 ÷ 12)", answer: 3630 },
+
+    { question: "(96 + 54) × 18 − 725", answer: 1975 },
+    { question: "120² − 80²", answer: 8000 },
+    { question: "(1440 ÷ 18 + 32) × 15", answer: 1680 },
+    { question: "3500 − (72 × 31) + 480", answer: 1748 },
+    { question: "(84 − 24)² ÷ 9", answer: 400 },
+    { question: "225 × 14 − (840 ÷ 12) + 175", answer: 3255 },
+    { question: "(135 + 45) × (28 − 13) ÷ 9", answer: 300 },
+    { question: "88² − 44² + 176", answer: 5984 },
+    { question: "4800 ÷ (32 − 12) + 65 × 7", answer: 695 },
+    { question: "(175 − 55) × 24 ÷ 8 + 190", answer: 550 },
+
+    { question: "135² − 105²", answer: 7200 },
+    { question: "(2400 − 600) ÷ 15 × 17", answer: 2040 },
+    { question: "128 × 19 − (720 ÷ 9) + 425", answer: 2777 },
+    { question: "(72 + 48)² ÷ 16", answer: 900 },
+    { question: "4200 ÷ 28 + 85 × 9", answer: 1005 },
+    { question: "(96 − 36) × 25 − 375", answer: 1125 },
+    { question: "115² − 65² + 250", answer: 9250 },
+    { question: "(360 + 240) ÷ 12 × 23", answer: 1150 },
+    { question: "2800 − (64 × 29) + 512", answer: 1456 },
+    { question: "(150 − 42)² ÷ 18", answer: 648 },
+
+    { question: "144² − 96²", answer: 11520 },
+    { question: "(2250 ÷ 25 + 48) × 13", answer: 1794 },
+    { question: "196 × 15 − (1080 ÷ 12) + 275", answer: 3125 },
+    { question: "(84 + 36)² ÷ 20", answer: 720 },
+    { question: "5000 − (125 × 28) + 375", answer: 1875 },
+    { question: "(180 − 60) × (45 − 17) ÷ 12", answer: 280 },
+    { question: "128² − 96²", answer: 7168 },
+    { question: "(3600 ÷ 24 + 75) × 11", answer: 2475 },
+    { question: "3150 − (72 × 24) + 625", answer: 2047 },
+    { question: "(200 − 80)² ÷ 16 + 275", answer: 1175 }
+  ]
+};
+
+module.exports = mathQuestions;
