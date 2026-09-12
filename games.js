@@ -34,7 +34,10 @@
 
 const db = require("./db");
 const { reply } = require("./util");
+
 const triviaQuestions = require("./trivia-questions");
+const riddleQuestions = require("./riddle-questions");
+const mathQuestions = require("./math-questions");
 
 // ============================================================
 // CONFIG
