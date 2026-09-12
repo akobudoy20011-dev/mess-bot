@@ -7,11 +7,12 @@
     "start": "node index.js"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=18.18.0"
   },
   "dependencies": {
     "express": "^4.19.2",
     "ffmpeg-static": "^5.2.0",
+    "pg": "^8.11.5",
     "yt-search": "latest",
     "youtube-dl-exec": "3.0.10",
     "ws3-fca": "^2.0.0"
