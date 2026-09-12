@@ -1,63 +1,112 @@
 /**
  * games.js
- * ========
- * Mini-games for Messenger.
+ * =========
+ * Messenger Mini-Games
  *
- * Trivia questions are stored separately in:
+ * Requires:
+ *   ./db.js
+ *   ./util.js
  *   ./trivia-questions.js
  *
- * trivia-questions.js must export:
- *   module.exports = TRIVIA_QUESTIONS;
+ * Called from index.js:
  *
- * Call handleGamesCommand(api, event, text, originalText)
- * from index.js's handleMessage().
+ *   await handleGamesCommand(api, event, text, originalText)
  *
- * Returns true if the message was handled.
+ * Returns true when the message was handled.
  */
 
 const db = require('./db');
 const { reply } = require('./util');
 const TRIVIA_QUESTIONS = require('./trivia-questions');
 
-// ------------------------------------------------------------
-// RANDOM
-// ------------------------------------------------------------
-
-function randInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-// ------------------------------------------------------------
-// SESSION STATE
-// ------------------------------------------------------------
-
-// Used for:
-// - Trivia answer window
-// - Blackjack hit/stand
-//
-// Sessions are NOT persisted.
-// Balances ARE persisted through db.js / Neon.
-
-const sessions = new Map();
+// ============================================================
+// CONFIG
+// ============================================================
 
 const SESSION_TIMEOUT_MS = 30_000;
+
+const ANIMATION = {
+  fast: 450,
+  normal: 650,
+  slow: 850
+};
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+function randInt(min, max) {
+  return Math.floor(
+    Math.random() * (max - min + 1)
+  ) + min;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function money(amount) {
+  return Number(amount || 0).toLocaleString();
+}
+
+async function send(api, threadID, text) {
+  await reply(api, threadID, text);
+}
+
+async function getBalance(threadID, senderID) {
+  const user = await db.getUser(
+    threadID,
+    senderID
+  );
+
+  return user.balance;
+}
+
+async function canAfford(threadID, senderID, amount) {
+  const balance = await getBalance(
+    threadID,
+    senderID
+  );
+
+  return balance >= amount;
+}
+
+// ============================================================
+// SESSION SYSTEM
+// ============================================================
+
+const sessions = new Map();
+const sessionTimers = new Map();
 
 function sessionKey(threadID, senderID) {
   return `${threadID}:${senderID}`;
 }
 
 function setSession(threadID, senderID, data) {
-  const key = sessionKey(threadID, senderID);
+  const key = sessionKey(
+    threadID,
+    senderID
+  );
+
+  // Clear previous timeout.
+  const oldTimer = sessionTimers.get(key);
+
+  if (oldTimer) {
+    clearTimeout(oldTimer);
+  }
 
   sessions.set(key, data);
 
-  setTimeout(() => {
+  const timer = setTimeout(() => {
     const current = sessions.get(key);
 
     if (current === data) {
       sessions.delete(key);
+      sessionTimers.delete(key);
     }
   }, SESSION_TIMEOUT_MS);
+
+  sessionTimers.set(key, timer);
 }
 
 function getSession(threadID, senderID) {
@@ -67,33 +116,129 @@ function getSession(threadID, senderID) {
 }
 
 function clearSession(threadID, senderID) {
-  sessions.delete(
-    sessionKey(threadID, senderID)
+  const key = sessionKey(
+    threadID,
+    senderID
+  );
+
+  const timer = sessionTimers.get(key);
+
+  if (timer) {
+    clearTimeout(timer);
+  }
+
+  sessionTimers.delete(key);
+  sessions.delete(key);
+}
+
+function clearThreadSessions(threadID) {
+  const prefix = `${threadID}:`;
+
+  for (const key of sessions.keys()) {
+    if (key.startsWith(prefix)) {
+      const timer = sessionTimers.get(key);
+
+      if (timer) {
+        clearTimeout(timer);
+      }
+
+      sessionTimers.delete(key);
+      sessions.delete(key);
+    }
+  }
+}
+
+// ============================================================
+// GAME ENABLE / DISABLE
+// ============================================================
+
+async function handleGameToggle(api, event, cleanText) {
+  const { threadID, senderID } = event;
+
+  if (
+    cleanText === '!game on' ||
+    cleanText === '!games on'
+  ) {
+    await db.setGameEnabled(
+      String(threadID),
+      true
+    );
+
+    await send(
+      api,
+      threadID,
+      '╭━━━ 🎮 GAMES ━━━╮\n' +
+      '┃\n' +
+      '┃ 🟢 GAME CENTER\n' +
+      '┃\n' +
+      '┃ Games are now ENABLED.\n' +
+      '┃ Type !games to see the menu.\n' +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━╯'
+    );
+
+    return true;
+  }
+
+  if (
+    cleanText === '!game off' ||
+    cleanText === '!games off'
+  ) {
+    await db.setGameEnabled(
+      String(threadID),
+      false
+    );
+
+    clearThreadSessions(threadID);
+
+    await send(
+      api,
+      threadID,
+      '╭━━━ 🎮 GAMES ━━━╮\n' +
+      '┃\n' +
+      '┃ 🔴 GAME CENTER\n' +
+      '┃\n' +
+      '┃ Games are now DISABLED.\n' +
+      '┃ Active games have been cancelled.\n' +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━╯'
+    );
+
+    return true;
+  }
+
+  return false;
+}
+
+async function gamesAreEnabled(threadID) {
+  return await db.isGameEnabled(
+    String(threadID)
   );
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // TRIVIA
-// ------------------------------------------------------------
+// ============================================================
 
 async function handleTrivia(api, event) {
-  const { threadID, senderID } = event;
+  const {
+    threadID,
+    senderID
+  } = event;
 
-  // Make sure the question bank loaded correctly.
   if (
     !Array.isArray(TRIVIA_QUESTIONS) ||
     TRIVIA_QUESTIONS.length === 0
   ) {
-    await reply(
+    await send(
       api,
       threadID,
-      '❌ Trivia question bank is empty or could not be loaded.'
+      '❌ Trivia question bank is empty.'
     );
 
     return;
   }
 
-  // Random question from the entire bank.
   const qdata =
     TRIVIA_QUESTIONS[
       randInt(
@@ -102,8 +247,6 @@ async function handleTrivia(api, event) {
       )
     ];
 
-  // Basic validation so one malformed question
-  // does not crash the bot.
   if (
     !qdata ||
     typeof qdata.q !== 'string' ||
@@ -114,7 +257,7 @@ async function handleTrivia(api, event) {
     qdata.answer > 3 ||
     !Number.isFinite(qdata.reward)
   ) {
-    await reply(
+    await send(
       api,
       threadID,
       '❌ This trivia question is formatted incorrectly.'
@@ -123,7 +266,12 @@ async function handleTrivia(api, event) {
     return;
   }
 
-  const labels = ['A', 'B', 'C', 'D'];
+  const labels = [
+    'A',
+    'B',
+    'C',
+    'D'
+  ];
 
   setSession(
     threadID,
@@ -134,19 +282,27 @@ async function handleTrivia(api, event) {
     }
   );
 
-  const optionLines = qdata.options
+  const options = qdata.options
     .map(
-      (option, index) =>
-        `${labels[index]}: ${option}`
+      (option, i) =>
+        `┃ ${labels[i]}  ${option}`
     )
     .join('\n');
 
-  await reply(
+  await send(
     api,
     threadID,
-    `🧠 Trivia — ${qdata.q}\n` +
-      `${optionLines}\n\n` +
-      `Reply with A/B/C/D within 30 seconds!`
+    '╭━━━ 🧠 TRIVIA ━━━╮\n' +
+    '┃\n' +
+    `┃ ${qdata.q}\n` +
+    '┃\n' +
+    `${options}\n` +
+    '┃\n' +
+    `┃ 💰 Reward: ${money(qdata.reward)} coins\n` +
+    '┃ ⏱️ Answer within 30 seconds\n' +
+    '┃ Reply: A / B / C / D\n' +
+    '┃\n' +
+    '╰━━━━━━━━━━━━━━╯'
   );
 }
 
@@ -154,110 +310,94 @@ async function resolveTrivia(
   api,
   event,
   session,
-  answerLetter
+  answer
 ) {
-  const { threadID, senderID } = event;
+  const {
+    threadID,
+    senderID
+  } = event;
 
-  const labels = ['A', 'B', 'C', 'D'];
-
-  const chosenIdx = labels.indexOf(
-    String(answerLetter).toUpperCase()
+  clearSession(
+    threadID,
+    senderID
   );
 
-  clearSession(threadID, senderID);
+  const labels = [
+    'A',
+    'B',
+    'C',
+    'D'
+  ];
 
-  if (chosenIdx === -1) {
+  const chosen =
+    labels.indexOf(
+      String(answer).toUpperCase()
+    );
+
+  if (chosen === -1) {
     return;
   }
 
   const { qdata } = session;
 
-  if (chosenIdx === qdata.answer) {
-    const newBal = await db.addBalance(
-      threadID,
-      senderID,
-      qdata.reward
-    );
+  if (chosen === qdata.answer) {
+    const newBal =
+      await db.addBalance(
+        threadID,
+        senderID,
+        qdata.reward
+      );
 
-    await reply(
+    await send(
       api,
       threadID,
-      `🎉 Correct! You picked ${qdata.options[chosenIdx]}\n` +
-        `💰 +${qdata.reward.toLocaleString()} coins — ` +
-        `Balance: ${newBal.toLocaleString()}`
+      '╭━━━ 🧠 TRIVIA ━━━╮\n' +
+      '┃\n' +
+      '┃ ✅ CORRECT ANSWER!\n' +
+      '┃\n' +
+      `┃ You chose: ${labels[chosen]}\n` +
+      `┃ ${qdata.options[chosen]}\n` +
+      '┃\n' +
+      `┃ 💰 +${money(qdata.reward)} coins\n` +
+      `┃ 💵 Balance: ${money(newBal)}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━╯'
     );
   } else {
-    await reply(
+    await send(
       api,
       threadID,
-      `❌ Wrong. You picked ${qdata.options[chosenIdx]}\n` +
-        `✅ Correct answer: ${qdata.options[qdata.answer]}`
+      '╭━━━ 🧠 TRIVIA ━━━╮\n' +
+      '┃\n' +
+      '┃ ❌ WRONG ANSWER\n' +
+      '┃\n' +
+      `┃ Your answer: ${labels[chosen]}\n` +
+      `┃ Correct: ${labels[qdata.answer]}\n` +
+      `┃ ${qdata.options[qdata.answer]}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━╯'
     );
   }
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // RPS
-// ------------------------------------------------------------
+// ============================================================
 
 async function handleRps(api, event, args) {
-  const { threadID, senderID } = event;
+  const {
+    threadID,
+    senderID
+  } = event;
 
   const choice =
-    (args[0] || '').toLowerCase();
+    String(args[0] || '')
+      .toLowerCase();
 
   const bet =
-    parseInt(args[1], 10) || 0;
-
-  if (
-    ![
-      'rock',
-      'paper',
-      'scissors'
-    ].includes(choice)
-  ) {
-    await reply(
-      api,
-      threadID,
-      '❌ Usage: !rps <rock/paper/scissors> [bet]'
-    );
-
-    return;
-  }
-
-  if (bet < 0) {
-    await reply(
-      api,
-      threadID,
-      '❌ Bet cannot be negative.'
-    );
-
-    return;
-  }
-
-  if (bet > 0) {
-    const user =
-      await db.getUser(
-        threadID,
-        senderID
-      );
-
-    if (user.balance < bet) {
-      await reply(
-        api,
-        threadID,
-        `💸 You only have ${user.balance.toLocaleString()} coins.`
-      );
-
-      return;
-    }
-
-    await db.addBalance(
-      threadID,
-      senderID,
-      -bet
-    );
-  }
+    args[1] === undefined
+      ? 0
+      : parseInt(args[1], 10);
 
   const choices = [
     'rock',
@@ -271,8 +411,81 @@ async function handleRps(api, event, args) {
     scissors: '✂️'
   };
 
+  if (!choices.includes(choice)) {
+    await send(
+      api,
+      threadID,
+      '⚔️ RPS\n\n' +
+      'Usage:\n' +
+      '!rps rock [bet]\n' +
+      '!rps paper [bet]\n' +
+      '!rps scissors [bet]'
+    );
+
+    return;
+  }
+
+  if (!Number.isInteger(bet) || bet < 0) {
+    await send(
+      api,
+      threadID,
+      '❌ Invalid bet.'
+    );
+
+    return;
+  }
+
+  if (bet > 0) {
+    if (
+      !(await canAfford(
+        threadID,
+        senderID,
+        bet
+      ))
+    ) {
+      const balance =
+        await getBalance(
+          threadID,
+          senderID
+        );
+
+      await send(
+        api,
+        threadID,
+        `💸 You only have ${money(balance)} coins.`
+      );
+
+      return;
+    }
+
+    await db.addBalance(
+      threadID,
+      senderID,
+      -bet
+    );
+  }
+
+  await send(
+    api,
+    threadID,
+    '╭━━━ ⚔️ RPS ━━━╮\n' +
+    '┃\n' +
+    '┃ You chose ' +
+    `${emojis[choice]}\n` +
+    '┃\n' +
+    '┃ 🤖 Bot is choosing...\n' +
+    '┃\n' +
+    '╰━━━━━━━━━━━━╯'
+  );
+
+  await sleep(
+    ANIMATION.normal
+  );
+
   const botChoice =
-    choices[randInt(0, 2)];
+    choices[
+      randInt(0, 2)
+    ];
 
   let result;
 
@@ -291,7 +504,7 @@ async function handleRps(api, event, args) {
     result = 'loss';
   }
 
-  let desc;
+  let resultText;
 
   if (bet > 0) {
     if (result === 'win') {
@@ -302,9 +515,10 @@ async function handleRps(api, event, args) {
           bet * 2
         );
 
-      desc =
-        `🎉 You won ${bet.toLocaleString()} coins! ` +
-        `Balance: ${newBal.toLocaleString()}`;
+      resultText =
+        `🎉 WIN!\n` +
+        `💰 +${money(bet)} coins\n` +
+        `💵 Balance: ${money(newBal)}`;
     } else if (result === 'tie') {
       const newBal =
         await db.addBalance(
@@ -313,27 +527,29 @@ async function handleRps(api, event, args) {
           bet
         );
 
-      desc =
-        `👔 Tie! Bet returned. ` +
-        `Balance: ${newBal.toLocaleString()}`;
+      resultText =
+        `👔 TIE!\n` +
+        `💰 Bet returned\n` +
+        `💵 Balance: ${money(newBal)}`;
     } else {
-      const user =
-        await db.getUser(
+      const balance =
+        await getBalance(
           threadID,
           senderID
         );
 
-      desc =
-        `❌ You lost ${bet.toLocaleString()} coins. ` +
-        `Balance: ${user.balance.toLocaleString()}`;
+      resultText =
+        `❌ LOSS!\n` +
+        `💸 -${money(bet)} coins\n` +
+        `💵 Balance: ${money(balance)}`;
     }
   } else {
-    desc =
+    resultText =
       result === 'win'
-        ? '🎉 You won!'
+        ? '🎉 YOU WIN!'
         : result === 'tie'
-          ? '👔 Tie!'
-          : '❌ You lost!';
+          ? '👔 TIE!'
+          : '❌ YOU LOSE!';
   }
 
   if (result !== 'tie') {
@@ -344,40 +560,52 @@ async function handleRps(api, event, args) {
     );
   }
 
-  await reply(
+  await send(
     api,
     threadID,
-    `🎮 RPS — You: ${emojis[choice]} ${choice} | ` +
-      `Bot: ${emojis[botChoice]} ${botChoice}\n` +
-      `${desc}`
+    '╭━━━ ⚔️ RPS ━━━╮\n' +
+    '┃\n' +
+    `┃ YOU   ${emojis[choice]} ${choice}\n` +
+    `┃ BOT   ${emojis[botChoice]} ${botChoice}\n` +
+    '┃\n' +
+    `┃ ${resultText.replace(/\n/g, '\n┃ ')}\n` +
+    '┃\n' +
+    '╰━━━━━━━━━━━━╯'
   );
 }
 
-// ------------------------------------------------------------
-// ROLL
-// ------------------------------------------------------------
+// ============================================================
+// DICE / ROLL
+// ============================================================
 
 async function handleRoll(api, event, args) {
-  const { threadID, senderID } = event;
+  const {
+    threadID,
+    senderID
+  } = event;
 
   let sides = 100;
   let bet;
 
   if (args.length >= 2) {
-    sides = parseInt(args[0], 10);
-    bet = parseInt(args[1], 10);
+    sides =
+      parseInt(args[0], 10);
+
+    bet =
+      parseInt(args[1], 10);
   } else {
-    bet = parseInt(args[0], 10);
+    bet =
+      parseInt(args[0], 10);
   }
 
   if (
     !Number.isInteger(sides) ||
     sides < 2
   ) {
-    await reply(
+    await send(
       api,
       threadID,
-      '❌ Sides must be a whole number of at least 2.'
+      '❌ Sides must be at least 2.'
     );
 
     return;
@@ -387,26 +615,34 @@ async function handleRoll(api, event, args) {
     !Number.isInteger(bet) ||
     bet <= 0
   ) {
-    await reply(
+    await send(
       api,
       threadID,
-      '❌ Usage: !roll <bet> OR !roll <sides> <bet>'
+      '❌ Usage:\n' +
+      '!roll <bet>\n' +
+      '!roll <sides> <bet>'
     );
 
     return;
   }
 
-  const user =
-    await db.getUser(
+  if (
+    !(await canAfford(
       threadID,
-      senderID
-    );
+      senderID,
+      bet
+    ))
+  ) {
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
-  if (user.balance < bet) {
-    await reply(
+    await send(
       api,
       threadID,
-      `💸 You only have ${user.balance.toLocaleString()} coins.`
+      `💸 You only have ${money(balance)} coins.`
     );
 
     return;
@@ -418,6 +654,22 @@ async function handleRoll(api, event, args) {
     -bet
   );
 
+  await send(
+    api,
+    threadID,
+    '╭━━━ 🎲 DICE ━━━╮\n' +
+    '┃\n' +
+    '┃ 🎲 Rolling...\n' +
+    '┃\n' +
+    '┃      [?]\n' +
+    '┃\n' +
+    '╰━━━━━━━━━━━━╯'
+  );
+
+  await sleep(
+    ANIMATION.fast
+  );
+
   const rollVal =
     randInt(1, sides);
 
@@ -425,7 +677,21 @@ async function handleRoll(api, event, args) {
     rollVal >=
     Math.floor(sides * 0.55);
 
-  let text;
+  await send(
+    api,
+    threadID,
+    '╭━━━ 🎲 DICE ━━━╮\n' +
+    '┃\n' +
+    `┃      [ ${rollVal} ]\n` +
+    '┃\n' +
+    (win
+      ? '┃ 🎉 HIGH ROLL!\n'
+      : '┃ 💀 LOW ROLL!\n') +
+    '┃\n' +
+    '╰━━━━━━━━━━━━╯'
+  );
+
+  let finalText;
 
   if (win) {
     const newBal =
@@ -435,23 +701,21 @@ async function handleRoll(api, event, args) {
         bet * 2
       );
 
-    text =
-      `🎲 Rolled ${rollVal}/${sides}! 🎉 ` +
-      `You won ${bet.toLocaleString()} coins! ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    finalText =
+      `🎉 YOU WIN!\n` +
+      `💰 +${money(bet)} coins\n` +
+      `💵 Balance: ${money(newBal)}`;
   } else {
-    const newBal =
-      (
-        await db.getUser(
-          threadID,
-          senderID
-        )
-      ).balance;
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
-    text =
-      `🎲 Rolled ${rollVal}/${sides}. ❌ ` +
-      `You lost ${bet.toLocaleString()} coins. ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    finalText =
+      `❌ YOU LOSE!\n` +
+      `💸 -${money(bet)} coins\n` +
+      `💵 Balance: ${money(balance)}`;
   }
 
   await db.incrementGameStats(
@@ -460,42 +724,52 @@ async function handleRoll(api, event, args) {
     win
   );
 
-  await reply(
+  await send(
     api,
     threadID,
-    text
+    `🎲 ${rollVal}/${sides}\n\n${finalText}`
   );
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // GUESS
-// ------------------------------------------------------------
+// ============================================================
 
 async function handleGuess(api, event, args) {
-  const { threadID, senderID } = event;
+  const {
+    threadID,
+    senderID
+  } = event;
 
   const number =
     parseInt(args[0], 10);
 
   const bet =
-    parseInt(args[1], 10) || 100;
+    args[1] === undefined
+      ? 100
+      : parseInt(args[1], 10);
 
   if (
     !Number.isInteger(number) ||
     number < 1 ||
     number > 10
   ) {
-    await reply(
+    await send(
       api,
       threadID,
-      '❌ Usage: !guess <1-10> [bet]'
+      '🎯 GUESS\n\n' +
+      'Usage:\n' +
+      '!guess <1-10> [bet]'
     );
 
     return;
   }
 
-  if (bet <= 0) {
-    await reply(
+  if (
+    !Number.isInteger(bet) ||
+    bet <= 0
+  ) {
+    await send(
       api,
       threadID,
       '❌ Bet must be positive.'
@@ -504,17 +778,23 @@ async function handleGuess(api, event, args) {
     return;
   }
 
-  const user =
-    await db.getUser(
+  if (
+    !(await canAfford(
       threadID,
-      senderID
-    );
+      senderID,
+      bet
+    ))
+  ) {
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
-  if (user.balance < bet) {
-    await reply(
+    await send(
       api,
       threadID,
-      `💸 You only have ${user.balance.toLocaleString()} coins.`
+      `💸 You only have ${money(balance)} coins.`
     );
 
     return;
@@ -529,10 +809,24 @@ async function handleGuess(api, event, args) {
   const secret =
     randInt(1, 10);
 
+  await send(
+    api,
+    threadID,
+    '╭━━━ 🎯 GUESS ━━━╮\n' +
+    '┃\n' +
+    `┃ Your guess: [ ${number} ]\n` +
+    '┃\n' +
+    '┃ 🔐 Checking the number...\n' +
+    '┃\n' +
+    '╰━━━━━━━━━━━━━━╯'
+  );
+
+  await sleep(
+    ANIMATION.slow
+  );
+
   const win =
     number === secret;
-
-  let text;
 
   if (win) {
     const winnings =
@@ -545,45 +839,66 @@ async function handleGuess(api, event, args) {
         winnings
       );
 
-    text =
-      `🎯 EXACT MATCH! It was ${secret}! 🎉 ` +
-      `Won ${winnings.toLocaleString()} coins (5x)! ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    await db.incrementGameStats(
+      threadID,
+      senderID,
+      true
+    );
+
+    await send(
+      api,
+      threadID,
+      '╭━━━ 🎯 GUESS ━━━╮\n' +
+      '┃\n' +
+      `┃ 🔐 Number: [ ${secret} ]\n` +
+      '┃\n' +
+      '┃ 🎯 EXACT MATCH!\n' +
+      '┃\n' +
+      `┃ 💰 +${money(winnings)} coins\n` +
+      `┃ 💵 Balance: ${money(newBal)}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━╯'
+    );
   } else {
-    const newBal =
-      (
-        await db.getUser(
-          threadID,
-          senderID
-        )
-      ).balance;
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
-    text =
-      `❌ Wrong! It was ${secret} ` +
-      `(you guessed ${number}). ` +
-      `Lost ${bet.toLocaleString()} coins. ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    await db.incrementGameStats(
+      threadID,
+      senderID,
+      false
+    );
+
+    await send(
+      api,
+      threadID,
+      '╭━━━ 🎯 GUESS ━━━╮\n' +
+      '┃\n' +
+      `┃ 🔐 Number: [ ${secret} ]\n` +
+      '┃\n' +
+      '┃ ❌ WRONG GUESS\n' +
+      '┃\n' +
+      `┃ You chose: ${number}\n` +
+      `┃ 💸 -${money(bet)} coins\n` +
+      `┃ 💵 Balance: ${money(balance)}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━╯'
+    );
   }
-
-  await db.incrementGameStats(
-    threadID,
-    senderID,
-    win
-  );
-
-  await reply(
-    api,
-    threadID,
-    text
-  );
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // COINFLIP
-// ------------------------------------------------------------
+// ============================================================
 
 async function handleCoinflip(api, event, args) {
-  const { threadID, senderID } = event;
+  const {
+    threadID,
+    senderID
+  } = event;
 
   let bet;
   let choice;
@@ -597,7 +912,7 @@ async function handleCoinflip(api, event, args) {
       parseInt(args[0], 10);
 
     choice =
-      (args[1] || '')
+      String(args[1] || '')
         .toLowerCase();
   } else if (
     /^\d+$/.test(
@@ -608,13 +923,15 @@ async function handleCoinflip(api, event, args) {
       parseInt(args[1], 10);
 
     choice =
-      (args[0] || '')
+      String(args[0] || '')
         .toLowerCase();
   } else {
-    await reply(
+    await send(
       api,
       threadID,
-      '❌ Usage: !coinflip <bet> <heads/tails>'
+      '🪙 COINFLIP\n\n' +
+      'Usage:\n' +
+      '!coinflip <bet> <heads/tails>'
     );
 
     return;
@@ -628,7 +945,7 @@ async function handleCoinflip(api, event, args) {
       't'
     ].includes(choice)
   ) {
-    await reply(
+    await send(
       api,
       threadID,
       '❌ Choose heads or tails.'
@@ -642,8 +959,11 @@ async function handleCoinflip(api, event, args) {
       ? 'heads'
       : 'tails';
 
-  if (bet <= 0) {
-    await reply(
+  if (
+    !Number.isInteger(bet) ||
+    bet <= 0
+  ) {
+    await send(
       api,
       threadID,
       '❌ Bet must be positive.'
@@ -652,17 +972,23 @@ async function handleCoinflip(api, event, args) {
     return;
   }
 
-  const user =
-    await db.getUser(
+  if (
+    !(await canAfford(
       threadID,
-      senderID
-    );
+      senderID,
+      bet
+    ))
+  ) {
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
-  if (user.balance < bet) {
-    await reply(
+    await send(
       api,
       threadID,
-      `💸 You only have ${user.balance.toLocaleString()} coins.`
+      `💸 You only have ${money(balance)} coins.`
     );
 
     return;
@@ -672,6 +998,23 @@ async function handleCoinflip(api, event, args) {
     threadID,
     senderID,
     -bet
+  );
+
+  await send(
+    api,
+    threadID,
+    '╭━━━ 🪙 COINFLIP ━━━╮\n' +
+    '┃\n' +
+    `┃ Your call: ${choice.toUpperCase()}\n` +
+    '┃\n' +
+    '┃        🪙\n' +
+    '┃     FLIPPING...\n' +
+    '┃\n' +
+    '╰━━━━━━━━━━━━━━━━╯'
+  );
+
+  await sleep(
+    ANIMATION.slow
   );
 
   const outcome =
@@ -682,8 +1025,6 @@ async function handleCoinflip(api, event, args) {
   const win =
     outcome === choice;
 
-  let text;
-
   if (win) {
     const newBal =
       await db.addBalance(
@@ -692,44 +1033,85 @@ async function handleCoinflip(api, event, args) {
         bet * 2
       );
 
-    text =
-      `🪙 Landed on ${outcome}! 🎉 ` +
-      `Won ${bet.toLocaleString()} coins! ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    await db.incrementGameStats(
+      threadID,
+      senderID,
+      true
+    );
+
+    await send(
+      api,
+      threadID,
+      '╭━━━ 🪙 COINFLIP ━━━╮\n' +
+      '┃\n' +
+      `┃       🪙 ${outcome.toUpperCase()}\n` +
+      '┃\n' +
+      '┃ 🎉 YOU WIN!\n' +
+      `┃ 💰 +${money(bet)} coins\n` +
+      `┃ 💵 Balance: ${money(newBal)}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━━━╯'
+    );
   } else {
-    const newBal =
-      (
-        await db.getUser(
-          threadID,
-          senderID
-        )
-      ).balance;
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
-    text =
-      `🪙 Landed on ${outcome}. ❌ ` +
-      `Lost ${bet.toLocaleString()} coins. ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    await db.incrementGameStats(
+      threadID,
+      senderID,
+      false
+    );
+
+    await send(
+      api,
+      threadID,
+      '╭━━━ 🪙 COINFLIP ━━━╮\n' +
+      '┃\n' +
+      `┃       🪙 ${outcome.toUpperCase()}\n` +
+      '┃\n' +
+      '┃ ❌ YOU LOSE!\n' +
+      `┃ 💸 -${money(bet)} coins\n` +
+      `┃ 💵 Balance: ${money(balance)}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━━━╯'
+    );
   }
-
-  await db.incrementGameStats(
-    threadID,
-    senderID,
-    win
-  );
-
-  await reply(
-    api,
-    threadID,
-    text
-  );
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // SLOTS
-// ------------------------------------------------------------
+// ============================================================
+
+const SLOT_SYMBOLS = [
+  '🍋',
+  '🍒',
+  '🍇',
+  '🔔',
+  '💎',
+  '7️⃣'
+];
+
+function randomSlot() {
+  return SLOT_SYMBOLS[
+    randInt(
+      0,
+      SLOT_SYMBOLS.length - 1
+    )
+  ];
+}
+
+function slotLine(a, b, c) {
+  return `🎰 │ ${a} │ ${b} │ ${c} │`;
+}
 
 async function handleSlots(api, event, args) {
-  const { threadID, senderID } = event;
+  const {
+    threadID,
+    senderID
+  } = event;
 
   const bet =
     parseInt(args[0], 10);
@@ -738,26 +1120,34 @@ async function handleSlots(api, event, args) {
     !Number.isInteger(bet) ||
     bet <= 0
   ) {
-    await reply(
+    await send(
       api,
       threadID,
-      '❌ Usage: !slots <bet>'
+      '🎰 SLOTS\n\n' +
+      'Usage:\n' +
+      '!slots <bet>'
     );
 
     return;
   }
 
-  const user =
-    await db.getUser(
+  if (
+    !(await canAfford(
       threadID,
-      senderID
-    );
+      senderID,
+      bet
+    ))
+  ) {
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
-  if (user.balance < bet) {
-    await reply(
+    await send(
       api,
       threadID,
-      `💸 You only have ${user.balance.toLocaleString()} coins.`
+      `💸 You only have ${money(balance)} coins.`
     );
 
     return;
@@ -769,40 +1159,71 @@ async function handleSlots(api, event, args) {
     -bet
   );
 
-  const symbols = [
-    '🍋',
-    '🍒',
-    '🍇',
-    '🔔',
-    '💎',
-    '7️⃣'
-  ];
+  // ----------------------------------------------------------
+  // SPIN 1
+  // ----------------------------------------------------------
 
-  const r1 =
-    symbols[
-      randInt(
-        0,
-        symbols.length - 1
-      )
-    ];
+  await send(
+    api,
+    threadID,
+    '╭━━━━━━━━━━━━━━╮\n' +
+    '┃     🎰 SLOTS     ┃\n' +
+    '┣━━━━━━━━━━━━━━┫\n' +
+    `┃ ${slotLine('❔', '❔', '❔')}\n` +
+    '┣━━━━━━━━━━━━━━┫\n' +
+    `┃ 💰 Bet: ${money(bet)}\n` +
+    '┃ 🎰 SPINNING...\n' +
+    '╰━━━━━━━━━━━━━━╯'
+  );
 
-  const r2 =
-    symbols[
-      randInt(
-        0,
-        symbols.length - 1
-      )
-    ];
+  await sleep(
+    ANIMATION.fast
+  );
 
-  const r3 =
-    symbols[
-      randInt(
-        0,
-        symbols.length - 1
-      )
-    ];
+  // ----------------------------------------------------------
+  // SPIN 2
+  // ----------------------------------------------------------
 
-  let text;
+  await send(
+    api,
+    threadID,
+    '╭━━━━━━━━━━━━━━╮\n' +
+    '┃     🎰 SLOTS     ┃\n' +
+    '┣━━━━━━━━━━━━━━┫\n' +
+    `┃ ${slotLine(randomSlot(), randomSlot(), randomSlot())}\n` +
+    '┣━━━━━━━━━━━━━━┫\n' +
+    '┃ 🔄 REEL 1... REEL 2...\n' +
+    '╰━━━━━━━━━━━━━━╯'
+  );
+
+  await sleep(
+    ANIMATION.fast
+  );
+
+  // ----------------------------------------------------------
+  // FINAL RESULT
+  // ----------------------------------------------------------
+
+  const r1 = randomSlot();
+  const r2 = randomSlot();
+  const r3 = randomSlot();
+
+  await send(
+    api,
+    threadID,
+    '╭━━━━━━━━━━━━━━╮\n' +
+    '┃     🎰 SLOTS     ┃\n' +
+    '┣━━━━━━━━━━━━━━┫\n' +
+    `┃ ${slotLine(r1, r2, r3)}\n` +
+    '┣━━━━━━━━━━━━━━┫\n' +
+    '┃       RESULT\n' +
+    '╰━━━━━━━━━━━━━━╯'
+  );
+
+  await sleep(
+    ANIMATION.fast
+  );
+
   let won = false;
 
   if (
@@ -827,11 +1248,26 @@ async function handleSlots(api, event, args) {
         winnings
       );
 
-    text =
-      `🎰 [ ${r1} | ${r2} | ${r3} ]\n` +
-      `🎉 JACKPOT! Won ${winnings.toLocaleString()} coins ` +
-      `(${multiplier}x)! ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    await db.incrementGameStats(
+      threadID,
+      senderID,
+      true
+    );
+
+    await send(
+      api,
+      threadID,
+      '╭━━━━━━━━━━━━━━╮\n' +
+      '┃   🎰 JACKPOT!   ┃\n' +
+      '┣━━━━━━━━━━━━━━┫\n' +
+      `┃ ${slotLine(r1, r2, r3)}\n` +
+      '┣━━━━━━━━━━━━━━┫\n' +
+      '┃ 💎 THREE OF A KIND!\n' +
+      `┃ 🔥 ${multiplier}× PAYOUT\n` +
+      `┃ 💰 +${money(winnings)} coins\n` +
+      `┃ 💵 Balance: ${money(newBal)}\n` +
+      '╰━━━━━━━━━━━━━━╯'
+    );
   } else if (
     r1 === r2 ||
     r2 === r3 ||
@@ -840,7 +1276,9 @@ async function handleSlots(api, event, args) {
     won = true;
 
     const winnings =
-      Math.floor(bet * 1.5);
+      Math.floor(
+        bet * 1.5
+      );
 
     const newBal =
       await db.addBalance(
@@ -849,42 +1287,57 @@ async function handleSlots(api, event, args) {
         winnings
       );
 
-    text =
-      `🎰 [ ${r1} | ${r2} | ${r3} ]\n` +
-      `✨ Small win! Won ${winnings.toLocaleString()} coins ` +
-      `(1.5x)! ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    await db.incrementGameStats(
+      threadID,
+      senderID,
+      true
+    );
+
+    await send(
+      api,
+      threadID,
+      '╭━━━━━━━━━━━━━━╮\n' +
+      '┃    🎰 SMALL WIN   ┃\n' +
+      '┣━━━━━━━━━━━━━━┫\n' +
+      `┃ ${slotLine(r1, r2, r3)}\n` +
+      '┣━━━━━━━━━━━━━━┫\n' +
+      '┃ ✨ TWO MATCHED!\n' +
+      '┃ 💰 1.5× PAYOUT\n' +
+      `┃ 💵 Balance: ${money(newBal)}\n` +
+      '╰━━━━━━━━━━━━━━╯'
+    );
   } else {
-    const newBal =
-      (
-        await db.getUser(
-          threadID,
-          senderID
-        )
-      ).balance;
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
-    text =
-      `🎰 [ ${r1} | ${r2} | ${r3} ]\n` +
-      `❌ Lost ${bet.toLocaleString()} coins. ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    await db.incrementGameStats(
+      threadID,
+      senderID,
+      false
+    );
+
+    await send(
+      api,
+      threadID,
+      '╭━━━━━━━━━━━━━━╮\n' +
+      '┃      🎰 SLOTS    ┃\n' +
+      '┣━━━━━━━━━━━━━━┫\n' +
+      `┃ ${slotLine(r1, r2, r3)}\n` +
+      '┣━━━━━━━━━━━━━━┫\n' +
+      '┃ ❌ NO MATCH\n' +
+      `┃ 💸 -${money(bet)} coins\n` +
+      `┃ 💵 Balance: ${money(balance)}\n` +
+      '╰━━━━━━━━━━━━━━╯'
+    );
   }
-
-  await db.incrementGameStats(
-    threadID,
-    senderID,
-    won
-  );
-
-  await reply(
-    api,
-    threadID,
-    text
-  );
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // BLACKJACK
-// ------------------------------------------------------------
+// ============================================================
 
 const SUITS = [
   '♠️',
@@ -954,7 +1407,7 @@ function calcScore(hand) {
     ) {
       score += 10;
     } else if (rank === 'A') {
-      aces += 1;
+      aces++;
       score += 11;
     } else {
       score += parseInt(
@@ -969,7 +1422,7 @@ function calcScore(hand) {
     aces > 0
   ) {
     score -= 10;
-    aces -= 1;
+    aces--;
   }
 
   return score;
@@ -979,9 +1432,16 @@ function renderHand(
   hand,
   hideDealer = false
 ) {
+  if (
+    !hand ||
+    hand.length === 0
+  ) {
+    return '—';
+  }
+
   if (hideDealer) {
     return (
-      `${hand[0][0]}${hand[0][1]} 🂠`
+      `${hand[0][0]}${hand[0][1]}  🂠`
     );
   }
 
@@ -990,7 +1450,7 @@ function renderHand(
       ([rank, suit]) =>
         `${rank}${suit}`
     )
-    .join(' ');
+    .join('  ');
 }
 
 async function handleBlackjack(
@@ -1010,30 +1470,44 @@ async function handleBlackjack(
     !Number.isInteger(bet) ||
     bet <= 0
   ) {
-    await reply(
+    await send(
       api,
       threadID,
-      '❌ Usage: !blackjack <bet>'
+      '🃏 BLACKJACK\n\n' +
+      'Usage:\n' +
+      '!blackjack <bet>'
     );
 
     return;
   }
 
-  const user =
-    await db.getUser(
+  if (
+    !(await canAfford(
       threadID,
-      senderID
-    );
+      senderID,
+      bet
+    ))
+  ) {
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
-  if (user.balance < bet) {
-    await reply(
+    await send(
       api,
       threadID,
-      `💸 You only have ${user.balance.toLocaleString()} coins.`
+      `💸 You only have ${money(balance)} coins.`
     );
 
     return;
   }
+
+  // Cancel an old game before starting another.
+  clearSession(
+    threadID,
+    senderID
+  );
 
   await db.addBalance(
     threadID,
@@ -1054,11 +1528,14 @@ async function handleBlackjack(
     deck.pop()
   ];
 
-  const pScore =
+  const playerScore =
     calcScore(playerHand);
 
-  // Natural blackjack
-  if (pScore === 21) {
+  // ----------------------------------------------------------
+  // NATURAL BLACKJACK
+  // ----------------------------------------------------------
+
+  if (playerScore === 21) {
     const winnings =
       Math.floor(
         bet * 2.5
@@ -1077,44 +1554,55 @@ async function handleBlackjack(
       true
     );
 
-    await reply(
+    await send(
       api,
       threadID,
-      `🃏 BLACKJACK! ` +
-        `Dealer: ${renderHand(dealerHand)} | ` +
-        `You: ${renderHand(playerHand)} (21)\n` +
-        `🎉 Natural blackjack! ` +
-        `Won ${winnings.toLocaleString()} coins! ` +
-        `Balance: ${newBal.toLocaleString()}`
+      '╭━━━━ 🃏 BLACKJACK ━━━━╮\n' +
+      '┃\n' +
+      `┃ Dealer: ${renderHand(dealerHand)}\n` +
+      `┃ You:    ${renderHand(playerHand)}\n` +
+      '┃\n' +
+      '┃ 💥 NATURAL BLACKJACK!\n' +
+      `┃ 💰 +${money(winnings)} coins\n` +
+      `┃ 💵 Balance: ${money(newBal)}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━━━━━━━╯'
     );
 
     return;
   }
 
+  const session = {
+    type: 'blackjack',
+    bet,
+    deck,
+    playerHand,
+    dealerHand
+  };
+
   setSession(
     threadID,
     senderID,
-    {
-      type: 'blackjack',
-      bet,
-      deck,
-      playerHand,
-      dealerHand
-    }
+    session
   );
 
-  await reply(
+  await send(
     api,
     threadID,
-    `🃏 Blackjack\n` +
-      `Dealer: ${renderHand(
-        dealerHand,
-        true
-      )}\n` +
-      `You: ${renderHand(
-        playerHand
-      )} (${pScore})\n\n` +
-      `Reply "!hit" or "!stand" within 30 seconds.`
+    '╭━━━━ 🃏 BLACKJACK ━━━━╮\n' +
+    '┃\n' +
+    `┃ Dealer: ${renderHand(dealerHand, true)}\n` +
+    `┃ You:    ${renderHand(playerHand)}\n` +
+    `┃         (${playerScore})\n` +
+    '┃\n' +
+    `┃ 💰 Bet: ${money(bet)}\n` +
+    '┃\n' +
+    '┃ ➤ !hit   draw a card\n' +
+    '┃ ➤ !stand end your turn\n' +
+    '┃\n' +
+    '┃ ⏱️ 30 seconds\n' +
+    '┃\n' +
+    '╰━━━━━━━━━━━━━━━━━━━━╯'
   );
 }
 
@@ -1144,10 +1632,10 @@ async function resolveBlackjackHit(
       senderID
     );
 
-    await reply(
+    await send(
       api,
       threadID,
-      '❌ Blackjack deck ran out of cards.'
+      '❌ Blackjack deck ran out.'
     );
 
     return;
@@ -1166,13 +1654,11 @@ async function resolveBlackjackHit(
       senderID
     );
 
-    const newBal =
-      (
-        await db.getUser(
-          threadID,
-          senderID
-        )
-      ).balance;
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
     await db.incrementGameStats(
       threadID,
@@ -1180,39 +1666,44 @@ async function resolveBlackjackHit(
       false
     );
 
-    await reply(
+    await send(
       api,
       threadID,
-      `🃏 BUST! ` +
-        `Dealer: ${renderHand(dealerHand)} ` +
-        `(${calcScore(dealerHand)}) | ` +
-        `You: ${renderHand(playerHand)} ` +
-        `(${pScore})\n` +
-        `💥 You lost ${bet.toLocaleString()} coins. ` +
-        `Balance: ${newBal.toLocaleString()}`
+      '╭━━━━ 🃏 BLACKJACK ━━━━╮\n' +
+      '┃\n' +
+      `┃ Dealer: ${renderHand(dealerHand)} (${calcScore(dealerHand)})\n` +
+      `┃ You:    ${renderHand(playerHand)} (${pScore})\n` +
+      '┃\n' +
+      '┃ 💥 BUST!\n' +
+      `┃ 💸 Lost ${money(bet)} coins\n` +
+      `┃ 💵 Balance: ${money(balance)}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━━━━━━━╯'
     );
 
     return;
   }
 
-  // Refresh timeout
+  // Refresh session and timer correctly.
   setSession(
     threadID,
     senderID,
     session
   );
 
-  await reply(
+  await send(
     api,
     threadID,
-    `🃏 Dealer: ${renderHand(
-      dealerHand,
-      true
-    )}\n` +
-      `You: ${renderHand(
-        playerHand
-      )} (${pScore})\n\n` +
-      `Reply "!hit" or "!stand".`
+    '╭━━━━ 🃏 BLACKJACK ━━━━╮\n' +
+    '┃\n' +
+    `┃ Dealer: ${renderHand(dealerHand, true)}\n` +
+    `┃ You:    ${renderHand(playerHand)}\n` +
+    `┃         (${pScore})\n` +
+    '┃\n' +
+    '┃ ➤ !hit\n' +
+    '┃ ➤ !stand\n' +
+    '┃\n' +
+    '╰━━━━━━━━━━━━━━━━━━━━╯'
   );
 }
 
@@ -1244,6 +1735,17 @@ async function resolveBlackjackStand(
   let dScore =
     calcScore(dealerHand);
 
+  await send(
+    api,
+    threadID,
+    '🃏 Dealer reveals their hand...\n\n' +
+    `Dealer: ${renderHand(dealerHand)}`
+  );
+
+  await sleep(
+    ANIMATION.normal
+  );
+
   while (
     dScore < 17 &&
     deck.length > 0
@@ -1254,9 +1756,19 @@ async function resolveBlackjackStand(
 
     dScore =
       calcScore(dealerHand);
+
+    await send(
+      api,
+      threadID,
+      `🃏 Dealer draws...\n\n` +
+      `Dealer: ${renderHand(dealerHand)} (${dScore})`
+    );
+
+    await sleep(
+      ANIMATION.fast
+    );
   }
 
-  let text;
   let won = null;
 
   if (
@@ -1275,12 +1787,26 @@ async function resolveBlackjackStand(
         winnings
       );
 
-    text =
-      `🎉 WIN! ` +
-      `Dealer: ${renderHand(dealerHand)} (${dScore}) | ` +
-      `You: ${renderHand(playerHand)} (${pScore})\n` +
-      `Won ${winnings.toLocaleString()} coins! ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    await db.incrementGameStats(
+      threadID,
+      senderID,
+      true
+    );
+
+    await send(
+      api,
+      threadID,
+      '╭━━━━ 🃏 BLACKJACK ━━━━╮\n' +
+      '┃\n' +
+      `┃ Dealer: ${renderHand(dealerHand)} (${dScore})\n` +
+      `┃ You:    ${renderHand(playerHand)} (${pScore})\n` +
+      '┃\n' +
+      '┃ 🎉 YOU WIN!\n' +
+      `┃ 💰 +${money(bet)} coins\n` +
+      `┃ 💵 Balance: ${money(newBal)}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━━━━━━━╯'
+    );
   } else if (
     pScore === dScore
   ) {
@@ -1291,53 +1817,59 @@ async function resolveBlackjackStand(
         bet
       );
 
-    text =
-      `👔 PUSH! ` +
-      `Dealer: ${renderHand(dealerHand)} (${dScore}) | ` +
-      `You: ${renderHand(playerHand)} (${pScore})\n` +
-      `Bet returned. ` +
-      `Balance: ${newBal.toLocaleString()}`;
+    await send(
+      api,
+      threadID,
+      '╭━━━━ 🃏 BLACKJACK ━━━━╮\n' +
+      '┃\n' +
+      `┃ Dealer: ${renderHand(dealerHand)} (${dScore})\n` +
+      `┃ You:    ${renderHand(playerHand)} (${pScore})\n` +
+      '┃\n' +
+      '┃ 👔 PUSH — TIE\n' +
+      '┃ 💰 Bet returned\n' +
+      `┃ 💵 Balance: ${money(newBal)}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━━━━━━━╯'
+    );
   } else {
     won = false;
 
-    const newBal =
-      (
-        await db.getUser(
-          threadID,
-          senderID
-        )
-      ).balance;
+    const balance =
+      await getBalance(
+        threadID,
+        senderID
+      );
 
-    text =
-      `❌ LOSS! ` +
-      `Dealer: ${renderHand(dealerHand)} (${dScore}) | ` +
-      `You: ${renderHand(playerHand)} (${pScore})\n` +
-      `Lost ${bet.toLocaleString()} coins. ` +
-      `Balance: ${newBal.toLocaleString()}`;
-  }
-
-  if (won !== null) {
     await db.incrementGameStats(
       threadID,
       senderID,
-      won
+      false
+    );
+
+    await send(
+      api,
+      threadID,
+      '╭━━━━ 🃏 BLACKJACK ━━━━╮\n' +
+      '┃\n' +
+      `┃ Dealer: ${renderHand(dealerHand)} (${dScore})\n` +
+      `┃ You:    ${renderHand(playerHand)} (${pScore})\n` +
+      '┃\n' +
+      '┃ ❌ DEALER WINS\n' +
+      `┃ 💸 Lost ${money(bet)} coins\n` +
+      `┃ 💵 Balance: ${money(balance)}\n` +
+      '┃\n' +
+      '╰━━━━━━━━━━━━━━━━━━━━╯'
     );
   }
-
-  await reply(
-    api,
-    threadID,
-    text
-  );
 }
 
-// ------------------------------------------------------------
-// 8BALL
-// ------------------------------------------------------------
+// ============================================================
+// 8-BALL
+// ============================================================
 
 const EIGHTBALL_RESPONSES = [
   '🟢 It is certain.',
-  '🟢 Without a doubt, the signs point to yes.',
+  '🟢 Without a doubt.',
   '🟢 Yes, definitely.',
   '🟢 You may rely on it.',
   '🟢 As I see it, yes.',
@@ -1345,7 +1877,7 @@ const EIGHTBALL_RESPONSES = [
   '🟡 Ask again later.',
   '🟡 Better not tell you now.',
   '🟡 Cannot predict now.',
-  "🔴 Don't count on it.",
+  '🔴 Don\'t count on it.',
   '🔴 My reply is no.',
   '🔴 My sources say no.',
   '🔴 Very doubtful.'
@@ -1356,17 +1888,36 @@ async function handleEightball(
   event,
   question
 ) {
-  const { threadID } = event;
+  const {
+    threadID
+  } = event;
 
   if (!question) {
-    await reply(
+    await send(
       api,
       threadID,
-      '❌ Usage: !8ball <question>'
+      '🎱 Usage:\n' +
+      '!8ball <question>'
     );
 
     return;
   }
+
+  await send(
+    api,
+    threadID,
+    '╭━━━ 🎱 MAGIC 8-BALL ━━━╮\n' +
+    '┃\n' +
+    `┃ "${question}"\n` +
+    '┃\n' +
+    '┃ 🔮 Shaking the ball...\n' +
+    '┃\n' +
+    '╰━━━━━━━━━━━━━━━━━━━━╯'
+  );
+
+  await sleep(
+    ANIMATION.slow
+  );
 
   let seed = 0;
 
@@ -1381,42 +1932,94 @@ async function handleEightball(
   const answer =
     EIGHTBALL_RESPONSES[
       seed %
-        EIGHTBALL_RESPONSES.length
+      EIGHTBALL_RESPONSES.length
     ];
 
-  await reply(
+  await send(
     api,
     threadID,
-    `🎱 ${question}\n🔮 ${answer}`
+    '╭━━━ 🎱 MAGIC 8-BALL ━━━╮\n' +
+    '┃\n' +
+    '┃        🎱\n' +
+    '┃\n' +
+    `┃ ${answer}\n` +
+    '┃\n' +
+    '╰━━━━━━━━━━━━━━━━━━━━╯'
   );
 }
 
-// ------------------------------------------------------------
-// GAMES LIST
-// ------------------------------------------------------------
+// ============================================================
+// GAMES MENU
+// ============================================================
 
 async function handleGamesList(
   api,
   event
 ) {
-  await reply(
+  const enabled =
+    await gamesAreEnabled(
+      event.threadID
+    );
+
+  const status =
+    enabled
+      ? '🟢 ONLINE'
+      : '🔴 OFFLINE';
+
+  await send(
     api,
     event.threadID,
-    '🎮 Mini-Games\n' +
-      '!trivia — answer for coins\n' +
-      '!rps <rock/paper/scissors> [bet]\n' +
-      '!roll <bet> OR !roll <sides> <bet> — 55%+ wins 2x\n' +
-      '!guess <1-10> <bet> — 5x payout\n' +
-      '!coinflip <bet> <heads/tails> — 2x\n' +
-      '!slots <bet>\n' +
-      '!blackjack <bet>\n' +
-      '!8ball <question>'
+
+    '╭━━━━━━ 🎮 GAME CENTER ━━━━━━╮\n' +
+    '┃\n' +
+    `┃ STATUS: ${status}\n` +
+    '┃\n' +
+    '┣━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n' +
+    '┃ 🧠 TRIVIA\n' +
+    '┃ !trivia\n' +
+    '┃ Answer A/B/C/D for coins.\n' +
+    '┃\n' +
+    '┃ ⚔️ RPS\n' +
+    '┃ !rps rock 100\n' +
+    '┃ Win = 2× bet\n' +
+    '┃\n' +
+    '┃ 🎲 DICE\n' +
+    '┃ !roll 100\n' +
+    '┃ !roll 100 100\n' +
+    '┃ High roll = 2×\n' +
+    '┃\n' +
+    '┃ 🎯 GUESS\n' +
+    '┃ !guess 7 100\n' +
+    '┃ Exact match = 5×\n' +
+    '┃\n' +
+    '┃ 🪙 COINFLIP\n' +
+    '┃ !coinflip 100 heads\n' +
+    '┃ Win = 2× bet\n' +
+    '┃\n' +
+    '┃ 🎰 SLOTS\n' +
+    '┃ !slots 100\n' +
+    '┃ Pair = 1.5× • Jackpot = 3–5×\n' +
+    '┃\n' +
+    '┃ 🃏 BLACKJACK\n' +
+    '┃ !blackjack 100\n' +
+    '┃ Then !hit / !stand\n' +
+    '┃ Beat dealer = 2×\n' +
+    '┃\n' +
+    '┃ 🎱 8-BALL\n' +
+    '┃ !8ball <question>\n' +
+    '┃ Ask the magic 8-ball.\n' +
+    '┃\n' +
+    '┣━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n' +
+    '┃ ⚙️ !game on\n' +
+    '┃ ⚙️ !game off\n' +
+    '┃\n' +
+    '╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯'
   );
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // ROUTER
-// ------------------------------------------------------------
+// ============================================================
 
 async function handleGamesCommand(
   api,
@@ -1436,8 +2039,54 @@ async function handleGamesCommand(
 
   const original =
     String(
-      originalText || text || ''
+      originalText ||
+      text ||
+      ''
     ).trim();
+
+  // ----------------------------------------------------------
+  // GAME ON/OFF MUST WORK EVEN WHEN GAMES ARE OFF
+  // ----------------------------------------------------------
+
+  if (
+    await handleGameToggle(
+      api,
+      event,
+      cleanText
+    )
+  ) {
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // GAME MENU CAN ALWAYS BE VIEWED
+  // ----------------------------------------------------------
+
+  if (cleanText === '!games') {
+    await handleGamesList(
+      api,
+      event
+    );
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // EVERYTHING ELSE REQUIRES GAMES TO BE ON
+  // ----------------------------------------------------------
+
+  const enabled =
+    await gamesAreEnabled(
+      threadID
+    );
+
+  if (!enabled) {
+    return false;
+  }
+
+  // ----------------------------------------------------------
+  // PARSE COMMAND
+  // ----------------------------------------------------------
 
   const args =
     original
@@ -1456,24 +2105,16 @@ async function handleGamesCommand(
 
   if (session) {
 
-    // Trivia answer
+    // Trivia
     if (
       session.type === 'trivia' &&
-      /^[abcd]$/i.test(
-        cleanText.replace(
-          /^!/,
-          ''
-        )
-      )
+      /^[abcd]$/i.test(cleanText)
     ) {
       await resolveTrivia(
         api,
         event,
         session,
-        cleanText.replace(
-          /^!/,
-          ''
-        )
+        cleanText
       );
 
       return true;
@@ -1509,17 +2150,8 @@ async function handleGamesCommand(
   }
 
   // ----------------------------------------------------------
-  // COMMANDS
+  // TRIVIA
   // ----------------------------------------------------------
-
-  if (cleanText === '!games') {
-    await handleGamesList(
-      api,
-      event
-    );
-
-    return true;
-  }
 
   if (cleanText === '!trivia') {
     await handleTrivia(
@@ -1529,6 +2161,10 @@ async function handleGamesCommand(
 
     return true;
   }
+
+  // ----------------------------------------------------------
+  // RPS
+  // ----------------------------------------------------------
 
   if (
     cleanText === '!rps' ||
@@ -1542,6 +2178,10 @@ async function handleGamesCommand(
 
     return true;
   }
+
+  // ----------------------------------------------------------
+  // ROLL / DICE
+  // ----------------------------------------------------------
 
   if (
     cleanText === '!roll' ||
@@ -1558,6 +2198,10 @@ async function handleGamesCommand(
     return true;
   }
 
+  // ----------------------------------------------------------
+  // GUESS
+  // ----------------------------------------------------------
+
   if (
     cleanText === '!guess' ||
     cleanText.startsWith('!guess ')
@@ -1570,6 +2214,10 @@ async function handleGamesCommand(
 
     return true;
   }
+
+  // ----------------------------------------------------------
+  // COINFLIP
+  // ----------------------------------------------------------
 
   if (
     cleanText === '!coinflip' ||
@@ -1586,6 +2234,10 @@ async function handleGamesCommand(
     return true;
   }
 
+  // ----------------------------------------------------------
+  // SLOTS
+  // ----------------------------------------------------------
+
   if (
     cleanText === '!slots' ||
     cleanText.startsWith('!slots ')
@@ -1598,6 +2250,10 @@ async function handleGamesCommand(
 
     return true;
   }
+
+  // ----------------------------------------------------------
+  // BLACKJACK
+  // ----------------------------------------------------------
 
   if (
     cleanText === '!blackjack' ||
@@ -1614,13 +2270,19 @@ async function handleGamesCommand(
     return true;
   }
 
+  // ----------------------------------------------------------
+  // 8-BALL
+  // ----------------------------------------------------------
+
   if (
     cleanText === '!8ball' ||
     cleanText.startsWith('!8ball ')
   ) {
     const question =
       original
-        .slice('!8ball'.length)
+        .slice(
+          '!8ball'.length
+        )
         .trim();
 
     await handleEightball(
@@ -1635,9 +2297,9 @@ async function handleGamesCommand(
   return false;
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // EXPORT
-// ------------------------------------------------------------
+// ============================================================
 
 module.exports = {
   handleGamesCommand
