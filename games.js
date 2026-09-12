@@ -45,10 +45,13 @@ const mathQuestions = require("./math-questions");
 
 const SESSION_TIMEOUT_MS = 30_000;
 
-const EDIT_MIN_MS = 2000;
+// Animation pacing.
+// Never intentionally waits longer than 3 seconds between edits.
+const EDIT_MIN_MS = 2200;
 const EDIT_MAX_MS = 3000;
 
-const EDIT_TIMEOUT_MS = 8000;
+// Never let a broken FCA callback freeze a game forever.
+const EDIT_TIMEOUT_MS = 3500;
 
 const DAILY_COOLDOWN_MS =
   24 * 60 * 60 * 1000;
@@ -60,7 +63,6 @@ const BANK_INTEREST_RATE = 0.01;
 
 const sessions = new Map();
 const sessionTimers = new Map();
-
 const activeGames = new Set();
 
 
@@ -74,11 +76,13 @@ function randInt(min, max) {
   ) + min;
 }
 
+
 function sleep(ms) {
   return new Promise(resolve =>
     setTimeout(resolve, ms)
   );
 }
+
 
 function editDelay() {
   return randInt(
@@ -87,14 +91,17 @@ function editDelay() {
   );
 }
 
+
 function formatNumber(value) {
   return Number(value || 0)
     .toLocaleString("en-US");
 }
 
+
 function sessionKey(threadID, userID) {
   return `${threadID}:${userID}`;
 }
+
 
 function xpForGame(type) {
   const rewards = {
@@ -112,6 +119,7 @@ function xpForGame(type) {
 
   return rewards[type] || 25;
 }
+
 
 function coinReward(type, won = true) {
   const rewards = {
@@ -140,11 +148,17 @@ function coinReward(type, won = true) {
 // ============================================================
 
 function getPlayerName(event) {
-  if (event && event.senderName) {
+  if (
+    event &&
+    event.senderName
+  ) {
     return String(event.senderName);
   }
 
-  if (event && event.userName) {
+  if (
+    event &&
+    event.userName
+  ) {
     return String(event.userName);
   }
 
@@ -190,7 +204,10 @@ function sendMessageAsync(
         text,
         threadID,
         (error, messageInfo) => {
-          finish(error, messageInfo);
+          finish(
+            error,
+            messageInfo
+          );
         }
       );
     } catch (error) {
@@ -217,12 +234,6 @@ function getMessageID(messageInfo) {
 // ============================================================
 // SAFE EDIT
 // ============================================================
-//
-// Critical freeze protection.
-//
-// FCA callback can occasionally fail to return.
-// The timeout guarantees that an animation cannot wait forever.
-// ============================================================
 
 function editMessageSafe(
   api,
@@ -233,17 +244,21 @@ function editMessageSafe(
   return new Promise(resolve => {
     let finished = false;
 
+    let timer = null;
+
     const finish = success => {
       if (finished) return;
 
       finished = true;
 
-      clearTimeout(timer);
+      if (timer) {
+        clearTimeout(timer);
+      }
 
       resolve(success);
     };
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       console.warn(
         "[games] editMessage timeout"
       );
@@ -292,6 +307,13 @@ function editMessageSafe(
 // ============================================================
 // ANIMATOR
 // ============================================================
+//
+// Important:
+// - One original Messenger message.
+// - Sequential edits.
+// - Never waits forever.
+// - If editing fails, caller can immediately use final fallback.
+// ============================================================
 
 async function createAnimator(
   api,
@@ -299,11 +321,12 @@ async function createAnimator(
   firstText,
   label = "game"
 ) {
-  const sent = await sendMessageAsync(
-    api,
-    threadID,
-    firstText
-  );
+  const sent =
+    await sendMessageAsync(
+      api,
+      threadID,
+      firstText
+    );
 
   const messageID =
     getMessageID(sent);
@@ -313,9 +336,13 @@ async function createAnimator(
     typeof api.editMessage === "function";
 
   let editNumber = 0;
+  let broken = false;
 
   async function edit(text) {
-    if (!canEdit) {
+    if (
+      broken ||
+      !canEdit
+    ) {
       return false;
     }
 
@@ -330,21 +357,38 @@ async function createAnimator(
 
     console.log(
       `[games:${label}] edit #${editNumber}: ${
-        success ? "OK" : "FAILED"
+        success
+          ? "OK"
+          : "FAILED"
       }`
     );
+
+    if (!success) {
+      broken = true;
+    }
 
     return success;
   }
 
+
   async function waitAndEdit(text) {
-    await sleep(editDelay());
+    if (broken) {
+      return false;
+    }
+
+    await sleep(
+      editDelay()
+    );
 
     return edit(text);
   }
 
+
   async function final(text) {
-    if (canEdit) {
+    if (
+      !broken &&
+      canEdit
+    ) {
       const success =
         await editMessageSafe(
           api,
@@ -356,8 +400,10 @@ async function createAnimator(
         return true;
       }
 
+      broken = true;
+
       console.warn(
-        `[games:${label}] final edit failed; sending fallback`
+        `[games:${label}] final edit failed; using fallback message`
       );
     }
 
@@ -379,14 +425,23 @@ async function createAnimator(
     }
   }
 
+
   return {
     messageID,
     edit,
     waitAndEdit,
-    final
+    final,
+
+    get broken() {
+      return broken;
+    }
   };
 }
 
+
+// ============================================================
+// SAFE REPLY
+// ============================================================
 
 async function safeReply(
   api,
@@ -457,10 +512,12 @@ function setSession(
     session
   );
 
-  const timer = setTimeout(() => {
-    sessions.delete(key);
-    sessionTimers.delete(key);
-  }, SESSION_TIMEOUT_MS);
+  const timer =
+    setTimeout(() => {
+      sessions.delete(key);
+      sessionTimers.delete(key);
+      activeGames.delete(key);
+    }, SESSION_TIMEOUT_MS);
 
   sessionTimers.set(
     key,
@@ -486,9 +543,7 @@ function clearThreadSessions(
   threadID
 ) {
   for (
-    const [
-      key
-    ] of sessions.entries()
+    const [key] of sessions.entries()
   ) {
     if (
       key.startsWith(
@@ -534,7 +589,9 @@ function lockGame(
       userID
     );
 
-  if (activeGames.has(key)) {
+  if (
+    activeGames.has(key)
+  ) {
     return false;
   }
 
@@ -802,6 +859,53 @@ async function awardPlayer(
 
 
 // ============================================================
+// FINAL BALANCE
+// ============================================================
+
+async function getCurrentBalance(
+  threadID,
+  userID
+) {
+  try {
+    const user =
+      await db.getUser(
+        threadID,
+        userID
+      );
+
+    return Number(
+      user.balance || 0
+    );
+  } catch (error) {
+    console.error(
+      "[games] balance lookup failed:",
+      error
+    );
+
+    return null;
+  }
+}
+
+
+async function getFinalBalanceText(
+  threadID,
+  userID
+) {
+  const balance =
+    await getCurrentBalance(
+      threadID,
+      userID
+    );
+
+  if (balance === null) {
+    return "💳 Balance: unavailable";
+  }
+
+  return `💳 Balance: ${formatNumber(balance)} coins`;
+}
+
+
+// ============================================================
 // PROFILE
 // ============================================================
 
@@ -1043,7 +1147,9 @@ async function handleDeposit(
       api,
       event,
       [
-        "🏦 DEPOSIT COMPLETE",
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "       💵 DEPOSIT",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
         "",
         `💵 Deposited: ${formatNumber(
           amount
@@ -1053,7 +1159,9 @@ async function handleDeposit(
         )}`,
         `🏦 Bank: ${formatNumber(
           user.bank_balance
-        )}`
+        )}`,
+        "",
+        "✅ Deposit complete."
       ].join("\n")
     );
   } catch (error) {
@@ -1066,6 +1174,7 @@ async function handleDeposit(
         event,
         "❌ You don't have enough wallet coins."
       );
+
       return;
     }
 
@@ -1120,7 +1229,9 @@ async function handleWithdraw(
       api,
       event,
       [
-        "💸 WITHDRAWAL COMPLETE",
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "      💸 WITHDRAW",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
         "",
         `💵 Withdrawn: ${formatNumber(
           amount
@@ -1130,7 +1241,9 @@ async function handleWithdraw(
         )}`,
         `🏦 Bank: ${formatNumber(
           user.bank_balance
-        )}`
+        )}`,
+        "",
+        "✅ Withdrawal complete."
       ].join("\n")
     );
   } catch (error) {
@@ -1143,6 +1256,7 @@ async function handleWithdraw(
         event,
         "❌ Your bank doesn't have enough coins."
       );
+
       return;
     }
 
@@ -1163,18 +1277,15 @@ async function handleWithdraw(
 // ============================================================
 // TRANSFER
 // ============================================================
-//
-// Accepts:
-// !transfer USER_ID 500
-//
-// ============================================================
 
 async function handleTransfer(
   api,
   event,
   args
 ) {
-  if (args.length < 2) {
+  if (
+    args.length < 2
+  ) {
     await safeReply(
       api,
       event,
@@ -1293,16 +1404,21 @@ async function handleDaily(
       userID
     );
 
-  const now = Date.now();
+  const now =
+    Date.now();
 
   if (
     user.last_daily &&
-    now - Number(user.last_daily) <
+    now -
+      Number(user.last_daily) <
       DAILY_COOLDOWN_MS
   ) {
     const remaining =
       DAILY_COOLDOWN_MS -
-      (now - Number(user.last_daily));
+      (
+        now -
+        Number(user.last_daily)
+      );
 
     const hours =
       Math.ceil(
@@ -1320,14 +1436,17 @@ async function handleDaily(
   }
 
   let streak =
-    Number(user.daily_streak) || 0;
+    Number(
+      user.daily_streak
+    ) || 0;
 
   const yesterday =
     DAILY_COOLDOWN_MS;
 
   if (
     user.last_daily &&
-    now - Number(user.last_daily) <=
+    now -
+      Number(user.last_daily) <=
       yesterday * 2
   ) {
     streak++;
@@ -1406,16 +1525,21 @@ async function handleWork(
       userID
     );
 
-  const now = Date.now();
+  const now =
+    Date.now();
 
   if (
     user.last_work &&
-    now - Number(user.last_work) <
+    now -
+      Number(user.last_work) <
       WORK_COOLDOWN_MS
   ) {
     const remaining =
       WORK_COOLDOWN_MS -
-      (now - Number(user.last_work));
+      (
+        now -
+        Number(user.last_work)
+      );
 
     const minutes =
       Math.ceil(
@@ -1590,7 +1714,9 @@ async function handleLeaderboard(
       10
     );
 
-  if (!rows.length) {
+  if (
+    !rows.length
+  ) {
     await safeReply(
       api,
       event,
@@ -1948,7 +2074,9 @@ async function handleTrivia(
     const list =
       getTriviaQuestions();
 
-    if (!list.length) {
+    if (
+      !list.length
+    ) {
       unlockGame(
         threadID,
         userID
@@ -1972,7 +2100,9 @@ async function handleTrivia(
       ];
 
     const q =
-      normalizeTriviaQuestion(raw);
+      normalizeTriviaQuestion(
+        raw
+      );
 
     if (!q) {
       unlockGame(
@@ -1988,9 +2118,6 @@ async function handleTrivia(
 
       return;
     }
-
-    const letters =
-      ["A", "B", "C", "D"];
 
     const text = [
       "╭━━━━━━━━━━━━━━━━━━━━╮",
@@ -2082,18 +2209,21 @@ async function resolveTrivia(
   const letters =
     ["A", "B", "C", "D"];
 
+  const normalizedAnswer =
+    String(answer)
+      .trim()
+      .toUpperCase();
+
   const index =
     letters.indexOf(
-      String(answer)
-        .toUpperCase()
+      normalizedAnswer
     );
 
   const correct =
     triviaAnswerMatches(
       session.qdata.answer,
       index,
-      String(answer)
-        .toUpperCase()
+      normalizedAnswer
     );
 
   const correctIndex =
@@ -2122,36 +2252,51 @@ async function resolveTrivia(
         correct
       );
 
-    await editMessageSafe(
-      api,
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "          🧠 TRIVIA",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        correct
-          ? "🏆 CORRECT!"
-          : "❌ WRONG ANSWER",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        `🎯 Your answer: ${String(
-          answer
-        ).toUpperCase()}`,
-        `✅ Correct: ${correctLetter}`,
-        "",
-        correct
-          ? `💰 +${formatNumber(
-              reward.coins
-            )} coins`
-          : `💰 +${formatNumber(
-              reward.coins
-            )} coins`,
-        `⭐ +${reward.xp} XP`,
-        "",
-        `${reward.rank.emoji} ${reward.rank.name}`
-      ].join("\n"),
-      session.messageID
-    );
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
+      );
+
+    const finalText = [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "          🧠 TRIVIA",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      correct
+        ? "🏆 CORRECT ANSWER!"
+        : "❌ WRONG ANSWER",
+      "",
+      `👤 ${getPlayerName(event)}`,
+      `🎯 Your answer: ${normalizedAnswer}`,
+      `✅ Correct: ${correctLetter}`,
+      "",
+      `💰 Reward: +${formatNumber(
+        reward.coins
+      )} coins`,
+      `⭐ XP: +${reward.xp}`,
+      balanceText,
+      "",
+      `${reward.rank.emoji} ${reward.rank.name}`,
+      reward.rankUp
+        ? "🎉 RANK UP!"
+        : "✦ Keep playing."
+    ].join("\n");
+
+    const edited =
+      await editMessageSafe(
+        api,
+        finalText,
+        session.messageID
+      );
+
+    if (!edited) {
+      await sendMessageAsync(
+        api,
+        threadID,
+        finalText
+      );
+    }
   } catch (error) {
     console.error(
       "[games] trivia reward:",
@@ -2187,12 +2332,11 @@ async function handleRPS(
     String(args[0] || "")
       .toLowerCase();
 
-  const valid =
-    [
-      "rock",
-      "paper",
-      "scissors"
-    ];
+  const valid = [
+    "rock",
+    "paper",
+    "scissors"
+  ];
 
   if (
     !valid.includes(choice)
@@ -2222,9 +2366,6 @@ async function handleRPS(
   }
 
   try {
-    const choices =
-      valid;
-
     const emoji = {
       rock: "🪨",
       paper: "📄",
@@ -2232,10 +2373,10 @@ async function handleRPS(
     };
 
     const botChoice =
-      choices[
+      valid[
         randInt(
           0,
-          choices.length - 1
+          valid.length - 1
         )
       ];
 
@@ -2265,7 +2406,7 @@ async function handleRPS(
     }
 
     const won =
-      result !== "lose";
+      result === "win";
 
     const animator =
       await createAnimator(
@@ -2278,42 +2419,47 @@ async function handleRPS(
           "",
           `👤 ${getPlayerName(event)}`,
           "",
-          "🤖 Bot is choosing...",
+          "🤖 BOT",
+          "     🪨   📄   ✂️",
           "",
-          "     ✊   ✋   ✌️",
+          `✦ Your choice: ${emoji[choice]}`,
           "",
-          "⏳ Please wait..."
+          "⏳ Choosing..."
         ].join("\n"),
         "rps"
       );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "        ✊ RPS",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        `👤 You: ${emoji[choice]}`,
-        "",
-        "🤖 Bot:",
-        "     🌀 choosing...",
-        "",
-        "⚡ Match locked."
-      ].join("\n")
-    );
+    let success =
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "        ✊ RPS",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          `👤 You: ${emoji[choice]}`,
+          "🤖 Bot: 🌀",
+          "",
+          "     🪨  →  📄  →  ✂️",
+          "",
+          "⚡ Match locked."
+        ].join("\n")
+      );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "        ✊ RPS",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        `👤 You: ${emoji[choice]}`,
-        `🤖 Bot: ${emoji[botChoice]}`,
-        "",
-        "⚡ RESULT READY"
-      ].join("\n")
-    );
+    if (success) {
+      success =
+        await animator.waitAndEdit(
+          [
+            "╭━━━━━━━━━━━━━━━━━━━━╮",
+            "        ✊ RPS",
+            "╰━━━━━━━━━━━━━━━━━━━━╯",
+            "",
+            `👤 You: ${emoji[choice]}`,
+            `🤖 Bot: ${emoji[botChoice]}`,
+            "",
+            "⚡ RESULT READY..."
+          ].join("\n")
+        );
+    }
 
     const reward =
       await awardPlayer(
@@ -2321,6 +2467,12 @@ async function handleRPS(
         userID,
         "rps",
         won
+      );
+
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
       );
 
     const title =
@@ -2339,15 +2491,17 @@ async function handleRPS(
         title,
         "",
         `👤 ${getPlayerName(event)}`,
+        "",
         `✦ You: ${emoji[choice]} ${choice}`,
         `✦ Bot: ${emoji[botChoice]} ${botChoice}`,
         "",
-        `💰 Coins: +${formatNumber(
+        `💰 Reward: +${formatNumber(
           reward.coins
-        )}`,
+        )} coins`,
         `⭐ XP: +${reward.xp}`,
-        `${reward.rank.emoji} ${reward.rank.name}`,
+        balanceText,
         "",
+        `${reward.rank.emoji} ${reward.rank.name}`,
         reward.rankUp
           ? "🎉 RANK UP!"
           : "✦ Keep playing."
@@ -2384,7 +2538,9 @@ async function handleRoll(
 
   let sides = 100;
 
-  if (args.length) {
+  if (
+    args.length
+  ) {
     const requested =
       Number(args[0]);
 
@@ -2422,13 +2578,18 @@ async function handleRoll(
 
   try {
     const roll =
-      randInt(1, sides);
+      randInt(
+        1,
+        sides
+      );
 
-    const won =
-      roll >=
+    const target =
       Math.ceil(
         sides * 0.55
       );
+
+    const won =
+      roll >= target;
 
     const animator =
       await createAnimator(
@@ -2444,55 +2605,55 @@ async function handleRoll(
           "",
           "🎲 Rolling...",
           "",
-          "     ⚀  ⚁  ⚂",
-          "     ⚃  ⚄  ⚅",
+          "        ⚀",
           "",
           "⏳ The dice are moving..."
         ].join("\n"),
         "roll"
       );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "        🎲 DICE",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        `🎯 D${sides}`,
-        "",
-        "🎲 Rolling...",
-        "",
-        `     [ ${randInt(
-          1,
-          sides
-        )} ]`,
-        "",
-        "━━━━━━━━━━━━━━━━━━━━",
-        "        🌀",
-        "━━━━━━━━━━━━━━━━━━━━"
-      ].join("\n")
-    );
+    let success =
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "        🎲 DICE",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          `👤 ${getPlayerName(event)}`,
+          `🎯 D${sides}`,
+          "",
+          "🎲 Rolling...",
+          "",
+          `       [ ${randInt(
+            1,
+            sides
+          )} ]`,
+          "",
+          "🌀 Shaking..."
+        ].join("\n")
+      );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "        🎲 DICE",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        `🎯 D${sides}`,
-        "",
-        "🎲 Final roll...",
-        "",
-        `     [ ${randInt(
-          1,
-          sides
-        )} ]`,
-        "",
-        "⚡ LOCKING IN..."
-      ].join("\n")
-    );
+    if (success) {
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "        🎲 DICE",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          `👤 ${getPlayerName(event)}`,
+          `🎯 Target: ${target}+`,
+          "",
+          "🎲 Final roll...",
+          "",
+          `       [ ${randInt(
+            1,
+            sides
+          )} ]`,
+          "",
+          "⚡ LOCKING IN..."
+        ].join("\n")
+      );
+    }
 
     const reward =
       await awardPlayer(
@@ -2500,6 +2661,12 @@ async function handleRoll(
         userID,
         "roll",
         won
+      );
+
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
       );
 
     await animator.final(
@@ -2510,15 +2677,19 @@ async function handleRoll(
         "",
         won
           ? "🏆 HIGH ROLL!"
-          : "🎲 ROLL COMPLETE",
+          : "❌ LOW ROLL",
         "",
         `👤 ${getPlayerName(event)}`,
-        `🎲 Result: ${roll} / ${sides}`,
         "",
-        `💰 +${formatNumber(
+        `🎲 Result: ${roll} / ${sides}`,
+        `🎯 Target: ${target}+`,
+        "",
+        `💰 Reward: +${formatNumber(
           reward.coins
         )} coins`,
-        `⭐ +${reward.xp} XP`,
+        `⭐ XP: +${reward.xp}`,
+        balanceText,
+        "",
         `${reward.rank.emoji} ${reward.rank.name}`
       ].join("\n")
     );
@@ -2585,7 +2756,10 @@ async function handleGuess(
 
   try {
     const secret =
-      randInt(1, 10);
+      randInt(
+        1,
+        10
+      );
 
     const won =
       guess === secret;
@@ -2612,44 +2786,42 @@ async function handleGuess(
         "guess"
       );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "        🎯 GUESS",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        `🎯 Your guess: ${guess}`,
-        "",
-        "🔎 Scanning...",
-        "",
-        `   ${randInt(
-          1,
-          10
-        )} → ${randInt(
-          1,
-          10
-        )} → ?`,
-        "",
-        "🌀 Locking target..."
-      ].join("\n")
-    );
+    let success =
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "        🎯 GUESS",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          `👤 ${getPlayerName(event)}`,
+          `🎯 Your guess: ${guess}`,
+          "",
+          "🔎 SCANNING...",
+          "",
+          `1 → 4 → 7 → 10 → ?`,
+          "",
+          "🌀 Searching..."
+        ].join("\n")
+      );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "        🎯 GUESS",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        "",
-        "🎯 TARGET LOCKED",
-        "",
-        "████████████████",
-        "",
-        "⚡ REVEALING..."
-      ].join("\n")
-    );
+    if (success) {
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "        🎯 GUESS",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          `👤 ${getPlayerName(event)}`,
+          "",
+          "🎯 TARGET LOCKED",
+          "",
+          "1  2  3  4  5",
+          "6  7  8  9  10",
+          "",
+          `🔒 Locking on ${guess}...`
+        ].join("\n")
+      );
+    }
 
     const reward =
       await awardPlayer(
@@ -2657,6 +2829,12 @@ async function handleGuess(
         userID,
         "guess",
         won
+      );
+
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
       );
 
     await animator.final(
@@ -2670,13 +2848,16 @@ async function handleGuess(
           : "❌ WRONG GUESS",
         "",
         `👤 ${getPlayerName(event)}`,
-        `You picked: ${guess}`,
-        `Number was: ${secret}`,
         "",
-        `💰 +${formatNumber(
+        `✦ You picked: ${guess}`,
+        `✦ Number was: ${secret}`,
+        "",
+        `💰 Reward: +${formatNumber(
           reward.coins
         )} coins`,
-        `⭐ +${reward.xp} XP`,
+        `⭐ XP: +${reward.xp}`,
+        balanceText,
+        "",
         `${reward.rank.emoji} ${reward.rank.name}`
       ].join("\n")
     );
@@ -2708,8 +2889,10 @@ async function handleCoinflip(
       .toLowerCase();
 
   if (
-    !["heads", "tails"]
-      .includes(choice)
+    ![
+      "heads",
+      "tails"
+    ].includes(choice)
   ) {
     await safeReply(
       api,
@@ -2760,51 +2943,54 @@ async function handleCoinflip(
           "╰━━━━━━━━━━━━━━━━━━━━╯",
           "",
           `👤 ${getPlayerName(event)}`,
-          `Pick: ${choice}`,
+          `✦ Pick: ${choice}`,
           "",
-          "🪙 FLIPPING...",
+          "🪙 FLIPPING",
           "",
-          "        🪙",
-          "       ↗️",
-          "      ↘️",
+          "       🪙",
+          "      ↗️",
+          "     ↘️",
           "",
           "⏳ The coin is in the air..."
         ].join("\n"),
         "coinflip"
       );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "       🪙 COINFLIP",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        `👤 Pick: ${choice}`,
-        "",
-        "🪙",
-        "  ↗️",
-        "    ↘️",
-        "      🪙",
-        "",
-        "⚡ Still flipping..."
-      ].join("\n")
-    );
+    let success =
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "       🪙 COINFLIP",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          `👤 Pick: ${choice}`,
+          "",
+          "        🪙",
+          "       ↗️",
+          "      ↘️",
+          "     🪙",
+          "",
+          "🌀 Still flipping..."
+        ].join("\n")
+      );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "       🪙 COINFLIP",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        `👤 Pick: ${choice}`,
-        "",
-        "🪙",
-        "",
-        "████████████████",
-        "",
-        "⚡ FINAL..."
-      ].join("\n")
-    );
+    if (success) {
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "       🪙 COINFLIP",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          `👤 Pick: ${choice}`,
+          "",
+          "          🪙",
+          "",
+          "████████████████",
+          "",
+          "⚡ FINAL..."
+        ].join("\n")
+      );
+    }
 
     const reward =
       await awardPlayer(
@@ -2812,6 +2998,12 @@ async function handleCoinflip(
         userID,
         "coinflip",
         won
+      );
+
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
       );
 
     await animator.final(
@@ -2825,13 +3017,16 @@ async function handleCoinflip(
           : "❌ WRONG",
         "",
         `👤 ${getPlayerName(event)}`,
-        `Pick: ${choice}`,
-        `Result: ${result}`,
         "",
-        `💰 +${formatNumber(
+        `✦ Pick: ${choice}`,
+        `✦ Result: ${result}`,
+        "",
+        `💰 Reward: +${formatNumber(
           reward.coins
         )} coins`,
-        `⭐ +${reward.xp} XP`,
+        `⭐ XP: +${reward.xp}`,
+        balanceText,
+        "",
         `${reward.rank.emoji} ${reward.rank.name}`
       ].join("\n")
     );
@@ -2913,14 +3108,15 @@ async function handleSlots(
     const finalReels =
       randomReels();
 
-    const sameCount =
+    const unique =
       new Set(
         finalReels
-      ).size === 1
+      ).size;
+
+    const sameCount =
+      unique === 1
         ? 3
-        : new Set(
-            finalReels
-          ).size === 2
+        : unique === 2
           ? 2
           : 1;
 
@@ -2929,9 +3125,18 @@ async function handleSlots(
 
     const reelText =
       reels =>
-        `│       ${reels.join(
-          "  |  "
-        )}       │`;
+        `│      ${reels.join(
+          "  │  "
+        )}      │`;
+
+    const frame1 =
+      randomReels();
+
+    const frame2 =
+      randomReels();
+
+    const frame3 =
+      randomReels();
 
     const animator =
       await createAnimator(
@@ -2957,59 +3162,59 @@ async function handleSlots(
         "slots"
       );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "         🎰 SLOTS",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "┌────────────────────┐",
-        reelText(
-          randomReels()
-        ),
-        "└────────────────────┘",
-        "",
-        "🎰 REEL 1 • SPINNING",
-        "🎰 REEL 2 • SPINNING",
-        "🎰 REEL 3 • SPINNING"
-      ].join("\n")
-    );
+    let success =
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "         🎰 SLOTS",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "┌────────────────────┐",
+          reelText(frame1),
+          "└────────────────────┘",
+          "",
+          "🎰 REELS SPINNING",
+          "",
+          "🌀 • 🌀 • 🌀"
+        ].join("\n")
+      );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "         🎰 SLOTS",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "┌────────────────────┐",
-        reelText(
-          randomReels()
-        ),
-        "└────────────────────┘",
-        "",
-        "🎰 REEL 1 • LOCKED",
-        "🎰 REEL 2 • SPINNING",
-        "🎰 REEL 3 • SPINNING"
-      ].join("\n")
-    );
+    if (success) {
+      success =
+        await animator.waitAndEdit(
+          [
+            "╭━━━━━━━━━━━━━━━━━━━━╮",
+            "         🎰 SLOTS",
+            "╰━━━━━━━━━━━━━━━━━━━━╯",
+            "",
+            "┌────────────────────┐",
+            reelText(frame2),
+            "└────────────────────┘",
+            "",
+            "🎰 REEL 1 • LOCKED",
+            "🎰 REEL 2 • SPINNING",
+            "🎰 REEL 3 • SPINNING"
+          ].join("\n")
+        );
+    }
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "         🎰 SLOTS",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "┌────────────────────┐",
-        reelText(
-          randomReels()
-        ),
-        "└────────────────────┘",
-        "",
-        "🎰 REEL 1 • LOCKED",
-        "🎰 REEL 2 • LOCKED",
-        "🎰 REEL 3 • FINAL SPIN..."
-      ].join("\n")
-    );
+    if (success) {
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "         🎰 SLOTS",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "┌────────────────────┐",
+          reelText(frame3),
+          "└────────────────────┘",
+          "",
+          "🎰 REEL 1 • LOCKED",
+          "🎰 REEL 2 • LOCKED",
+          "🎰 REEL 3 • FINAL SPIN"
+        ].join("\n")
+      );
+    }
 
     const reward =
       await awardPlayer(
@@ -3017,6 +3222,12 @@ async function handleSlots(
         userID,
         "slots",
         won
+      );
+
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
       );
 
     await animator.final(
@@ -3029,9 +3240,7 @@ async function handleSlots(
           ? sameCount === 3
             ? "💎 TRIPLE MATCH!"
             : "🎉 MATCH!"
-          : "🎰 NO MATCH",
-        "",
-        `👤 ${getPlayerName(event)}`,
+          : "❌ NO MATCH",
         "",
         "┌────────────────────┐",
         reelText(
@@ -3039,11 +3248,16 @@ async function handleSlots(
         ),
         "└────────────────────┘",
         "",
-        `💰 +${formatNumber(
+        `💰 Reward: +${formatNumber(
           reward.coins
         )} coins`,
-        `⭐ +${reward.xp} XP`,
-        `${reward.rank.emoji} ${reward.rank.name}`
+        `⭐ XP: +${reward.xp}`,
+        balanceText,
+        "",
+        `${reward.rank.emoji} ${reward.rank.name}`,
+        reward.rankUp
+          ? "🎉 RANK UP!"
+          : "✦ Spin again anytime."
       ].join("\n")
     );
   } catch (error) {
@@ -3109,7 +3323,10 @@ function createDeck() {
     i--
   ) {
     const j =
-      randInt(0, i);
+      randInt(
+        0,
+        i
+      );
 
     [
       deck[i],
@@ -3126,8 +3343,11 @@ function createDeck() {
 
 function cardValue(card) {
   if (
-    ["J", "Q", "K"]
-      .includes(card.rank)
+    [
+      "J",
+      "Q",
+      "K"
+    ].includes(card.rank)
   ) {
     return 10;
   }
@@ -3198,7 +3418,9 @@ function blackjackStateText(
       ? handString(
           dealerHand
         )
-      : `${dealerHand[0].rank}${dealerHand[0].suit}  🂠`;
+      : dealerHand.length
+        ? `${dealerHand[0].rank}${dealerHand[0].suit}  🂠`
+        : "🂠  🂠";
 
   const dealerValue =
     revealDealer
@@ -3215,6 +3437,69 @@ function blackjackStateText(
     "",
     `🤖 DEALER [${dealerValue}]`,
     `│ ${dealerShown}`
+  ].join("\n");
+}
+
+
+// ============================================================
+// BLACKJACK FINAL TEXT
+// ============================================================
+
+function blackjackFinalText(
+  event,
+  playerHand,
+  dealerHand,
+  result,
+  reward,
+  balanceText
+) {
+  let title;
+
+  if (
+    result === "win"
+  ) {
+    title = "🏆 YOU WIN!";
+  } else if (
+    result === "push"
+  ) {
+    title = "🤝 PUSH";
+  } else if (
+    result === "bust"
+  ) {
+    title = "💥 BUST!";
+  } else if (
+    result === "natural"
+  ) {
+    title = "♠️ NATURAL BLACKJACK!";
+  } else {
+    title = "❌ DEALER WINS";
+  }
+
+  return [
+    "╭━━━━━━━━━━━━━━━━━━━━╮",
+    "       🃏 BLACKJACK",
+    "╰━━━━━━━━━━━━━━━━━━━━╯",
+    "",
+    title,
+    "",
+    `👤 ${getPlayerName(event)}`,
+    "",
+    blackjackStateText(
+      playerHand,
+      dealerHand,
+      true
+    ),
+    "",
+    `💰 Reward: +${formatNumber(
+      reward.coins
+    )} coins`,
+    `⭐ XP: +${reward.xp}`,
+    balanceText,
+    "",
+    `${reward.rank.emoji} ${reward.rank.name}`,
+    reward.rankUp
+      ? "🎉 RANK UP!"
+      : "✦ Game complete."
   ].join("\n");
 }
 
@@ -3273,7 +3558,7 @@ async function handleBlackjack(
           "",
           `👤 ${getPlayerName(event)}`,
           "",
-          "🃏 Dealing cards...",
+          "🃏 DEALING",
           "",
           "👤 YOU",
           "│ 🂠  🂠",
@@ -3281,28 +3566,29 @@ async function handleBlackjack(
           "🤖 DEALER",
           "│ 🂠  🂠",
           "",
-          "⏳ Please wait..."
+          "⏳ Dealing cards..."
         ].join("\n"),
         "blackjack"
       );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "       🃏 BLACKJACK",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        "",
-        blackjackStateText(
-          playerHand,
-          dealerHand,
-          false
-        ),
-        "",
-        "⚡ Reading the table..."
-      ].join("\n")
-    );
+    const firstEdit =
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "       🃏 BLACKJACK",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          `👤 ${getPlayerName(event)}`,
+          "",
+          blackjackStateText(
+            playerHand,
+            dealerHand,
+            false
+          ),
+          "",
+          "🃏 Reading the table..."
+        ].join("\n")
+      );
 
     const playerBlackjack =
       handValue(
@@ -3318,7 +3604,7 @@ async function handleBlackjack(
       playerBlackjack ||
       dealerBlackjack
     ) {
-      let won =
+      const won =
         playerBlackjack &&
         !dealerBlackjack;
 
@@ -3330,32 +3616,26 @@ async function handleBlackjack(
           won
         );
 
+      const balanceText =
+        await getFinalBalanceText(
+          threadID,
+          userID
+        );
+
+      const result =
+        playerBlackjack
+          ? "natural"
+          : "lose";
+
       await animator.final(
-        [
-          "╭━━━━━━━━━━━━━━━━━━━━╮",
-          "       🃏 BLACKJACK",
-          "╰━━━━━━━━━━━━━━━━━━━━╯",
-          "",
-          playerBlackjack &&
-          dealerBlackjack
-            ? "🤝 BOTH BLACKJACK"
-            : playerBlackjack
-              ? "♠️ NATURAL BLACKJACK!"
-              : "🃏 DEALER BLACKJACK",
-          "",
-          `👤 ${getPlayerName(event)}`,
-          blackjackStateText(
-            playerHand,
-            dealerHand,
-            true
-          ),
-          "",
-          `💰 +${formatNumber(
-            reward.coins
-          )} coins`,
-          `⭐ +${reward.xp} XP`,
-          `${reward.rank.emoji} ${reward.rank.name}`
-        ].join("\n")
+        blackjackFinalText(
+          event,
+          playerHand,
+          dealerHand,
+          result,
+          reward,
+          balanceText
+        )
       );
 
       unlockGame(
@@ -3380,6 +3660,10 @@ async function handleBlackjack(
       }
     );
 
+    /*
+     * If the first edit failed, animator.final() below
+     * will send the usable final table as a fallback.
+     */
     await animator.final(
       [
         "╭━━━━━━━━━━━━━━━━━━━━╮",
@@ -3394,14 +3678,16 @@ async function handleBlackjack(
           false
         ),
         "",
-        "⚔️ Your move:",
-        "!hit  •  !stand"
+        "⚔️ YOUR MOVE",
+        "",
+        "➡️ !hit",
+        "➡️ !stand"
       ].join("\n")
     );
 
     /*
-     * Keep activeGames locked.
-     * It is unlocked when hit/stand finishes.
+     * Keep activeGames locked until
+     * !hit, !stand, timeout, or !game off.
      */
   } catch (error) {
     console.error(
@@ -3444,7 +3730,9 @@ async function handleBlackjackHit(
     return false;
   }
 
-  if (session.busy) {
+  if (
+    session.busy
+  ) {
     await safeReply(
       api,
       event,
@@ -3459,6 +3747,18 @@ async function handleBlackjackHit(
   const card =
     session.deck.pop();
 
+  if (!card) {
+    session.busy = false;
+
+    await safeReply(
+      api,
+      event,
+      "❌ The deck ran out of cards."
+    );
+
+    return true;
+  }
+
   session.playerHand.push(
     card
   );
@@ -3469,7 +3769,9 @@ async function handleBlackjackHit(
     );
 
   try {
-    if (value > 21) {
+    if (
+      value > 21
+    ) {
       clearSession(
         threadID,
         userID
@@ -3483,30 +3785,36 @@ async function handleBlackjackHit(
           false
         );
 
-      await editMessageSafe(
-        api,
-        [
-          "╭━━━━━━━━━━━━━━━━━━━━╮",
-          "       🃏 BLACKJACK",
-          "╰━━━━━━━━━━━━━━━━━━━━╯",
-          "",
-          "💥 BUST!",
-          "",
-          `👤 ${getPlayerName(event)}`,
-          blackjackStateText(
-            session.playerHand,
-            session.dealerHand,
-            false
-          ),
-          "",
-          `🎯 Total: ${value}`,
-          `💰 +${formatNumber(
-            reward.coins
-          )} coins`,
-          `⭐ +${reward.xp} XP`
-        ].join("\n"),
-        session.messageID
-      );
+      const balanceText =
+        await getFinalBalanceText(
+          threadID,
+          userID
+        );
+
+      const finalText =
+        blackjackFinalText(
+          event,
+          session.playerHand,
+          session.dealerHand,
+          "bust",
+          reward,
+          balanceText
+        );
+
+      const edited =
+        await editMessageSafe(
+          api,
+          finalText,
+          session.messageID
+        );
+
+      if (!edited) {
+        await sendMessageAsync(
+          api,
+          threadID,
+          finalText
+        );
+      }
 
       unlockGame(
         threadID,
@@ -3516,37 +3824,49 @@ async function handleBlackjackHit(
       return true;
     }
 
-    setSession(
-      threadID,
-      userID,
-      session
-    );
+    const animatorText = [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🃏 BLACKJACK",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🎴 CARD DRAWN",
+      "",
+      `👤 ${getPlayerName(event)}`,
+      "",
+      blackjackStateText(
+        session.playerHand,
+        session.dealerHand,
+        false
+      ),
+      "",
+      "⚔️ YOUR MOVE",
+      "",
+      "➡️ !hit",
+      "➡️ !stand"
+    ].join("\n");
 
     await sleep(
       editDelay()
     );
 
-    await editMessageSafe(
-      api,
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "       🃏 BLACKJACK",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "🎴 CARD DRAWN",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        blackjackStateText(
-          session.playerHand,
-          session.dealerHand,
-          false
-        ),
-        "",
-        "⚔️ Your move:",
-        "!hit  •  !stand"
-      ].join("\n"),
-      session.messageID
-    );
+    const edited =
+      await editMessageSafe(
+        api,
+        animatorText,
+        session.messageID
+      );
+
+    if (!edited) {
+      /*
+       * Don't leave the player in a mysterious state.
+       * Send the current table once.
+       */
+      await sendMessageAsync(
+        api,
+        threadID,
+        animatorText
+      );
+    }
 
     session.busy = false;
 
@@ -3603,7 +3923,9 @@ async function handleBlackjackStand(
     return false;
   }
 
-  if (session.busy) {
+  if (
+    session.busy
+  ) {
     await safeReply(
       api,
       event,
@@ -3621,14 +3943,109 @@ async function handleBlackjackStand(
   );
 
   try {
+    /*
+     * Reveal the dealer's hole card first.
+     */
+    let edited =
+      await editMessageSafe(
+        api,
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "       🃏 BLACKJACK",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "🤖 DEALER REVEALS",
+          "",
+          `👤 ${getPlayerName(event)}`,
+          "",
+          blackjackStateText(
+            session.playerHand,
+            session.dealerHand,
+            true
+          ),
+          "",
+          "🃏 Dealer is checking..."
+        ].join("\n"),
+        session.messageID
+      );
+
+    if (!edited) {
+      /*
+       * The original message cannot be edited.
+       * Continue the game, but don't wait forever.
+       */
+      console.warn(
+        "[games] blackjack stand reveal edit failed"
+      );
+    }
+
+    /*
+     * Dealer draws cards one by one.
+     * We intentionally cap this so a long dealer hand
+     * cannot create a huge animation sequence.
+     */
+    let dealerDraws = 0;
+
     while (
       handValue(
         session.dealerHand
-      ) < 17
+      ) < 17 &&
+      session.deck.length > 0 &&
+      dealerDraws < 3
     ) {
-      session.dealerHand.push(
-        session.deck.pop()
+      await sleep(
+        editDelay()
       );
+
+      const nextCard =
+        session.deck.pop();
+
+      if (!nextCard) {
+        break;
+      }
+
+      session.dealerHand.push(
+        nextCard
+      );
+
+      dealerDraws++;
+
+      edited =
+        await editMessageSafe(
+          api,
+          [
+            "╭━━━━━━━━━━━━━━━━━━━━╮",
+            "       🃏 BLACKJACK",
+            "╰━━━━━━━━━━━━━━━━━━━━╯",
+            "",
+            "🤖 DEALER DRAWS",
+            "",
+            blackjackStateText(
+              session.playerHand,
+              session.dealerHand,
+              true
+            ),
+            "",
+            handValue(
+              session.dealerHand
+            ) >= 17
+              ? "⚡ Dealer is standing..."
+              : "🃏 Another card..."
+          ].join("\n"),
+          session.messageID
+        );
+
+      if (!edited) {
+        console.warn(
+          "[games] blackjack dealer draw edit failed"
+        );
+
+        /*
+         * Don't keep performing animation edits if
+         * Messenger has stopped accepting them.
+         */
+        break;
+      }
     }
 
     const player =
@@ -3659,55 +4076,6 @@ async function handleBlackjackStand(
       result = "lose";
     }
 
-    await sleep(
-      editDelay()
-    );
-
-    await editMessageSafe(
-      api,
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "       🃏 BLACKJACK",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "🤖 DEALER REVEALS",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        blackjackStateText(
-          session.playerHand,
-          session.dealerHand,
-          true
-        ),
-        "",
-        "🃏 Dealer is checking..."
-      ].join("\n"),
-      session.messageID
-    );
-
-    await sleep(
-      editDelay()
-    );
-
-    await editMessageSafe(
-      api,
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "       🃏 BLACKJACK",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "⚔️ FINAL TABLE",
-        "",
-        blackjackStateText(
-          session.playerHand,
-          session.dealerHand,
-          true
-        ),
-        "",
-        "⚡ Calculating..."
-      ].join("\n"),
-      session.messageID
-    );
-
     const won =
       result === "win";
 
@@ -3719,34 +4087,36 @@ async function handleBlackjackStand(
         won
       );
 
-    await editMessageSafe(
-      api,
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "       🃏 BLACKJACK",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        result === "win"
-          ? "🏆 YOU WIN!"
-          : result === "push"
-            ? "🤝 PUSH"
-            : "❌ DEALER WINS",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        blackjackStateText(
-          session.playerHand,
-          session.dealerHand,
-          true
-        ),
-        "",
-        `💰 +${formatNumber(
-          reward.coins
-        )} coins`,
-        `⭐ +${reward.xp} XP`,
-        `${reward.rank.emoji} ${reward.rank.name}`
-      ].join("\n"),
-      session.messageID
-    );
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
+      );
+
+    const finalText =
+      blackjackFinalText(
+        event,
+        session.playerHand,
+        session.dealerHand,
+        result,
+        reward,
+        balanceText
+      );
+
+    edited =
+      await editMessageSafe(
+        api,
+        finalText,
+        session.messageID
+      );
+
+    if (!edited) {
+      await sendMessageAsync(
+        api,
+        threadID,
+        finalText
+      );
+    }
   } catch (error) {
     console.error(
       "[games] blackjack stand:",
@@ -3776,7 +4146,9 @@ function generateMathQuestion() {
   let operator;
   let answer;
 
-  if (difficulty === 1) {
+  if (
+    difficulty === 1
+  ) {
     a = randInt(2, 30);
     b = randInt(2, 30);
 
@@ -3804,14 +4176,19 @@ function generateMathQuestion() {
         : "-";
   }
 
-  if (operator === "+") {
-    answer = a + b;
+  if (
+    operator === "+"
+  ) {
+    answer =
+      a + b;
   } else if (
     operator === "-"
   ) {
-    answer = a - b;
+    answer =
+      a - b;
   } else {
-    answer = a * b;
+    answer =
+      a * b;
   }
 
   return {
@@ -3852,6 +4229,13 @@ async function handleMath(
     const q =
       generateMathQuestion();
 
+    const difficultyName =
+      q.difficulty === 1
+        ? "Easy"
+        : q.difficulty === 2
+          ? "Medium"
+          : "Hard";
+
     const animator =
       await createAnimator(
         api,
@@ -3865,13 +4249,7 @@ async function handleMath(
           "",
           `❓ ${q.question}`,
           "",
-          `📊 Difficulty: ${
-            q.difficulty === 1
-              ? "Easy"
-              : q.difficulty === 2
-                ? "Medium"
-                : "Hard"
-          }`,
+          `📊 Difficulty: ${difficultyName}`,
           "",
           "⏳ Reply with your answer."
         ].join("\n"),
@@ -3883,8 +4261,10 @@ async function handleMath(
       userID,
       {
         type: "math",
-        question: q.question,
-        answer: q.answer,
+        question:
+          q.question,
+        answer:
+          q.answer,
         messageID:
           animator.messageID
       }
@@ -3898,6 +4278,12 @@ async function handleMath(
     console.error(
       "[games] math:",
       error
+    );
+
+    await safeReply(
+      api,
+      event,
+      "❌ Math failed."
     );
   }
 }
@@ -3951,30 +4337,53 @@ async function resolveMath(
         correct
       );
 
-    await editMessageSafe(
-      api,
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "        🧮 MATH",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        correct
-          ? "🏆 CORRECT!"
-          : "❌ WRONG",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        `❓ ${session.question}`,
-        `✏️ Your answer: ${answerText}`,
-        `✅ Correct answer: ${session.answer}`,
-        "",
-        `💰 +${formatNumber(
-          reward.coins
-        )} coins`,
-        `⭐ +${reward.xp} XP`,
-        `${reward.rank.emoji} ${reward.rank.name}`
-      ].join("\n"),
-      session.messageID
-    );
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
+      );
+
+    const finalText = [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🧮 MATH",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      correct
+        ? "🏆 CORRECT!"
+        : "❌ WRONG",
+      "",
+      `👤 ${getPlayerName(event)}`,
+      "",
+      `❓ ${session.question}`,
+      `✏️ Your answer: ${answerText}`,
+      `✅ Correct answer: ${session.answer}`,
+      "",
+      `💰 Reward: +${formatNumber(
+        reward.coins
+      )} coins`,
+      `⭐ XP: +${reward.xp}`,
+      balanceText,
+      "",
+      `${reward.rank.emoji} ${reward.rank.name}`,
+      reward.rankUp
+        ? "🎉 RANK UP!"
+        : "✦ Keep solving."
+    ].join("\n");
+
+    const edited =
+      await editMessageSafe(
+        api,
+        finalText,
+        session.messageID
+      );
+
+    if (!edited) {
+      await sendMessageAsync(
+        api,
+        threadID,
+        finalText
+      );
+    }
   } catch (error) {
     console.error(
       "[games] math reward:",
@@ -4103,7 +4512,7 @@ async function handleRiddle(
           "",
           `❓ ${riddle.question}`,
           "",
-          "⏳ Think carefully...",
+          "🧠 Think carefully...",
           "",
           "✦ Reply with your answer."
         ].join("\n"),
@@ -4132,6 +4541,12 @@ async function handleRiddle(
     console.error(
       "[games] riddle:",
       error
+    );
+
+    await safeReply(
+      api,
+      event,
+      "❌ Riddle failed."
     );
   }
 }
@@ -4188,32 +4603,50 @@ async function resolveRiddle(
         correct
       );
 
-    await editMessageSafe(
-      api,
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "        🧩 RIDDLE",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        correct
-          ? "🏆 CORRECT!"
-          : "❌ NOT QUITE",
-        "",
-        `👤 ${getPlayerName(event)}`,
-        "",
-        `❓ ${session.question}`,
-        "",
-        `✏️ Your answer: ${answerText}`,
-        `✅ Answer: ${session.answers[0]}`,
-        "",
-        `💰 +${formatNumber(
-          reward.coins
-        )} coins`,
-        `⭐ +${reward.xp} XP`,
-        `${reward.rank.emoji} ${reward.rank.name}`
-      ].join("\n"),
-      session.messageID
-    );
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
+      );
+
+    const finalText = [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "        🧩 RIDDLE",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      correct
+        ? "🏆 CORRECT!"
+        : "❌ NOT QUITE",
+      "",
+      `👤 ${getPlayerName(event)}`,
+      "",
+      `❓ ${session.question}`,
+      `✏️ Your answer: ${answerText}`,
+      `✅ Answer: ${session.answers[0]}`,
+      "",
+      `💰 Reward: +${formatNumber(
+        reward.coins
+      )} coins`,
+      `⭐ XP: +${reward.xp}`,
+      balanceText,
+      "",
+      `${reward.rank.emoji} ${reward.rank.name}`
+    ].join("\n");
+
+    const edited =
+      await editMessageSafe(
+        api,
+        finalText,
+        session.messageID
+      );
+
+    if (!edited) {
+      await sendMessageAsync(
+        api,
+        threadID,
+        finalText
+      );
+    }
   } catch (error) {
     console.error(
       "[games] riddle reward:",
@@ -4336,7 +4769,7 @@ async function handle8Ball(
           "",
           `"${question}"`,
           "",
-          "🎱",
+          "        🎱",
           "",
           "The 8-ball is thinking...",
           "⏳ Please wait."
@@ -4344,42 +4777,51 @@ async function handle8Ball(
         "8ball"
       );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "        🎱 8-BALL",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "🔮 THE QUESTION",
-        "",
-        `"${question}"`,
-        "",
-        "🎱",
-        "     ↻",
-        "    ↻",
-        "   ↻",
-        "",
-        "The answer is forming..."
-      ].join("\n")
-    );
+    let success =
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "        🎱 8-BALL",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "🔮 THE QUESTION",
+          "",
+          `"${question}"`,
+          "",
+          "       🎱",
+          "        ↻",
+          "       ↻",
+          "      ↻",
+          "",
+          "🔮 Reading the future..."
+        ].join("\n")
+      );
 
-    await animator.waitAndEdit(
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "        🎱 8-BALL",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "🔮 THE QUESTION",
-        "",
-        `"${question}"`,
-        "",
-        "🎱",
-        "",
-        "████████████████",
-        "",
-        "⚡ REVEALING..."
-      ].join("\n")
-    );
+    if (success) {
+      await animator.waitAndEdit(
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━╮",
+          "        🎱 8-BALL",
+          "╰━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "🔮 THE QUESTION",
+          "",
+          `"${question}"`,
+          "",
+          "        🎱",
+          "",
+          "████████████████",
+          "",
+          "⚡ REVEALING..."
+        ].join("\n")
+      );
+    }
+
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
+      );
 
     await animator.final(
       [
@@ -4397,10 +4839,12 @@ async function handle8Ball(
         "",
         `「 ${answer} 」`,
         "",
-        `💰 +${formatNumber(
+        `💰 Reward: +${formatNumber(
           reward.coins
         )} coins`,
-        `⭐ +${reward.xp} XP`,
+        `⭐ XP: +${reward.xp}`,
+        balanceText,
+        "",
         `${reward.rank.emoji} ${reward.rank.name}`
       ].join("\n")
     );
@@ -4681,6 +5125,10 @@ async function handleGamesCommand(
     );
 
   if (!enabled) {
+    /*
+     * Returning false here is intentional because the
+     * main index.js may have other systems after games.
+     */
     return false;
   }
 
