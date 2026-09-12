@@ -16,6 +16,8 @@
  * - Economy transactions
  * - Inventory
  * - Thread settings
+ * - Display names
+ * - XP leaderboard
  *
  * NOTE:
  * This is a virtual game economy.
@@ -63,7 +65,7 @@ async function connect() {
   });
 
   // ----------------------------------------------------------
-  // ORIGINAL TABLES
+  // USERS
   // ----------------------------------------------------------
 
   await pool.query(`
@@ -81,10 +83,13 @@ async function connect() {
   `);
 
   // ----------------------------------------------------------
-  // IMPORTANT:
-  // ADD NEW COLUMNS TO EXISTING USERS TABLE
+  // MIGRATION
   //
-  // This fixes the "column xp does not exist" error.
+  // This is important because CREATE TABLE IF NOT EXISTS does
+  // NOT modify an existing table.
+  //
+  // These ADD COLUMN IF NOT EXISTS statements upgrade the old
+  // users table without deleting existing users.
   // ----------------------------------------------------------
 
   await pool.query(`
@@ -106,8 +111,8 @@ async function connect() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS thread_settings (
       thread_id      TEXT PRIMARY KEY,
-      roast_enabled   BOOLEAN NOT NULL DEFAULT TRUE,
-      fun_enabled     BOOLEAN NOT NULL DEFAULT TRUE
+      roast_enabled  BOOLEAN NOT NULL DEFAULT TRUE,
+      fun_enabled    BOOLEAN NOT NULL DEFAULT TRUE
     );
   `);
 
@@ -131,13 +136,13 @@ async function connect() {
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS economy_transactions (
-      id            BIGSERIAL PRIMARY KEY,
-      thread_id     TEXT NOT NULL,
-      user_id       TEXT NOT NULL,
-      type          TEXT NOT NULL,
-      amount        INTEGER NOT NULL,
-      description   TEXT,
-      created_at    BIGINT NOT NULL
+      id           BIGSERIAL PRIMARY KEY,
+      thread_id    TEXT NOT NULL,
+      user_id      TEXT NOT NULL,
+      type         TEXT NOT NULL,
+      amount       INTEGER NOT NULL,
+      description  TEXT,
+      created_at   BIGINT NOT NULL
     );
   `);
 
@@ -159,7 +164,7 @@ function requireConn() {
 }
 
 // ============================================================
-// USER HELPERS
+// USER
 // ============================================================
 
 async function getUser(threadId, userId) {
@@ -190,7 +195,15 @@ async function getUser(threadId, userId) {
         level,
         credit_score
       )
-      VALUES ($1, $2, $3, 0, 0, 1, $4)
+      VALUES (
+        $1,
+        $2,
+        $3,
+        0,
+        0,
+        1,
+        $4
+      )
       ON CONFLICT (thread_id, user_id)
       DO NOTHING
       `,
@@ -251,7 +264,9 @@ async function updateUser(threadId, userId, fields) {
     allowedFields.includes(key)
   );
 
-  if (safeKeys.length === 0) return;
+  if (safeKeys.length === 0) {
+    return;
+  }
 
   const setClause = safeKeys
     .map((key, index) => `${key} = $${index + 3}`)
@@ -266,7 +281,11 @@ async function updateUser(threadId, userId, fields) {
     WHERE thread_id = $1
       AND user_id = $2
     `,
-    [threadId, userId, ...values]
+    [
+      threadId,
+      userId,
+      ...values,
+    ]
   );
 }
 
@@ -274,11 +293,23 @@ async function updateUser(threadId, userId, fields) {
 // DISPLAY NAME
 // ============================================================
 
-async function setUserDisplayName(threadId, userId, displayName) {
+async function setUserDisplayName(
+  threadId,
+  userId,
+  displayName
+) {
   await getUser(threadId, userId);
 
+  const name = String(displayName || "")
+    .trim()
+    .slice(0, 100);
+
+  if (!name) {
+    return;
+  }
+
   await updateUser(threadId, userId, {
-    display_name: String(displayName || "").slice(0, 100),
+    display_name: name,
   });
 }
 
@@ -286,17 +317,28 @@ async function setUserDisplayName(threadId, userId, displayName) {
 // WALLET
 // ============================================================
 
-async function addBalance(threadId, userId, amount) {
-  const user = await getUser(threadId, userId);
+async function addBalance(
+  threadId,
+  userId,
+  amount
+) {
+  const user = await getUser(
+    threadId,
+    userId
+  );
 
   const newBalance = Math.max(
     0,
     Number(user.balance) + Number(amount)
   );
 
-  await updateUser(threadId, userId, {
-    balance: newBalance,
-  });
+  await updateUser(
+    threadId,
+    userId,
+    {
+      balance: newBalance,
+    }
+  );
 
   return newBalance;
 }
@@ -305,13 +347,28 @@ async function addBalance(threadId, userId, amount) {
 // GAME STATS
 // ============================================================
 
-async function incrementGameStats(threadId, userId, won) {
-  const user = await getUser(threadId, userId);
+async function incrementGameStats(
+  threadId,
+  userId,
+  won
+) {
+  const user = await getUser(
+    threadId,
+    userId
+  );
 
-  await updateUser(threadId, userId, {
-    games_played: Number(user.games_played) + 1,
-    wins: Number(user.wins) + (won ? 1 : 0),
-  });
+  await updateUser(
+    threadId,
+    userId,
+    {
+      games_played:
+        Number(user.games_played) + 1,
+
+      wins:
+        Number(user.wins) +
+        (won ? 1 : 0),
+    }
+  );
 }
 
 // ============================================================
@@ -319,9 +376,16 @@ async function incrementGameStats(threadId, userId, won) {
 // ============================================================
 
 function calculateLevel(xp) {
-  xp = Math.max(0, Number(xp) || 0);
+  xp = Math.max(
+    0,
+    Number(xp) || 0
+  );
 
-  return Math.floor(Math.sqrt(xp / 100)) + 1;
+  return (
+    Math.floor(
+      Math.sqrt(xp / 100)
+    ) + 1
+  );
 }
 
 function getRank(xp) {
@@ -350,18 +414,35 @@ function getNextRank(xp) {
   return null;
 }
 
-async function addXP(threadId, userId, amount) {
-  const user = await getUser(threadId, userId);
+async function addXP(
+  threadId,
+  userId,
+  amount
+) {
+  const user = await getUser(
+    threadId,
+    userId
+  );
 
-  const oldXP = Number(user.xp) || 0;
-  const newXP = Math.max(0, oldXP + Number(amount));
+  const oldXP =
+    Number(user.xp) || 0;
 
-  const newLevel = calculateLevel(newXP);
+  const newXP = Math.max(
+    0,
+    oldXP + Number(amount)
+  );
 
-  await updateUser(threadId, userId, {
-    xp: newXP,
-    level: newLevel,
-  });
+  const newLevel =
+    calculateLevel(newXP);
+
+  await updateUser(
+    threadId,
+    userId,
+    {
+      xp: newXP,
+      level: newLevel,
+    }
+  );
 
   return {
     xp: newXP,
@@ -372,22 +453,144 @@ async function addXP(threadId, userId, amount) {
 }
 
 // ============================================================
+// FULL PLAYER RANKING DETAILS
+// ============================================================
+
+async function getPlayerRanking(
+  threadId,
+  userId
+) {
+  const user = await getUser(
+    threadId,
+    userId
+  );
+
+  const xp =
+    Number(user.xp) || 0;
+
+  const level =
+    Number(user.level) ||
+    calculateLevel(xp);
+
+  const currentRank =
+    getRank(xp);
+
+  const nextRank =
+    getNextRank(xp);
+
+  const displayName =
+    user.display_name &&
+    String(user.display_name).trim()
+      ? String(user.display_name).trim()
+      : `Player ${user.user_id}`;
+
+  let progress = 100;
+
+  if (nextRank) {
+    const range =
+      nextRank.xp -
+      currentRank.xp;
+
+    const earned =
+      xp -
+      currentRank.xp;
+
+    progress = Math.floor(
+      Math.min(
+        100,
+        Math.max(
+          0,
+          (earned / range) * 100
+        )
+      )
+    );
+  }
+
+  return {
+    userId: String(user.user_id),
+
+    displayName,
+
+    xp,
+    level,
+
+    rank: currentRank.name,
+    rankXP: currentRank.xp,
+
+    nextRank:
+      nextRank
+        ? nextRank.name
+        : null,
+
+    nextRankXP:
+      nextRank
+        ? nextRank.xp
+        : null,
+
+    xpToNextRank:
+      nextRank
+        ? Math.max(
+            0,
+            nextRank.xp - xp
+          )
+        : 0,
+
+    progress,
+
+    balance:
+      Number(user.balance) || 0,
+
+    bankBalance:
+      Number(user.bank_balance) || 0,
+
+    totalMoney:
+      (Number(user.balance) || 0) +
+      (Number(user.bank_balance) || 0),
+
+    gamesPlayed:
+      Number(user.games_played) || 0,
+
+    wins:
+      Number(user.wins) || 0,
+
+    creditScore:
+      Number(user.credit_score) ||
+      STARTING_CREDIT_SCORE,
+
+    loanRemaining:
+      Number(user.loan_remaining) || 0,
+  };
+}
+
+// ============================================================
 // WALLET LEADERBOARD
 // ============================================================
 
-async function leaderboard(threadId, limit = 10) {
+async function leaderboard(
+  threadId,
+  limit = 10
+) {
   const conn = requireConn();
 
-  const { rows } = await conn.query(
-    `
-    SELECT *
-    FROM users
-    WHERE thread_id = $1
-    ORDER BY balance DESC
-    LIMIT $2
-    `,
-    [String(threadId), Number(limit)]
+  const safeLimit = Math.min(
+    50,
+    Math.max(1, Number(limit) || 10)
   );
+
+  const { rows } =
+    await conn.query(
+      `
+      SELECT *
+      FROM users
+      WHERE thread_id = $1
+      ORDER BY balance DESC
+      LIMIT $2
+      `,
+      [
+        String(threadId),
+        safeLimit,
+      ]
+    );
 
   return rows;
 }
@@ -396,58 +599,182 @@ async function leaderboard(threadId, limit = 10) {
 // MONEY LEADERBOARD
 // ============================================================
 
-async function moneyLeaderboard(threadId, limit = 10) {
+async function moneyLeaderboard(
+  threadId,
+  limit = 10
+) {
   const conn = requireConn();
 
-  const { rows } = await conn.query(
-    `
-    SELECT
-      *,
-      (balance + bank_balance) AS total_money
-    FROM users
-    WHERE thread_id = $1
-    ORDER BY total_money DESC
-    LIMIT $2
-    `,
-    [String(threadId), Number(limit)]
+  const safeLimit = Math.min(
+    50,
+    Math.max(1, Number(limit) || 10)
   );
 
+  const { rows } =
+    await conn.query(
+      `
+      SELECT
+        *,
+        (balance + bank_balance) AS total_money
+      FROM users
+      WHERE thread_id = $1
+      ORDER BY total_money DESC
+      LIMIT $2
+      `,
+      [
+        String(threadId),
+        safeLimit,
+      ]
+    );
+
   return rows;
+}
+
+// ============================================================
+// XP LEADERBOARD
+// ============================================================
+
+async function xpLeaderboard(
+  threadId,
+  limit = 10
+) {
+  const conn = requireConn();
+
+  const safeLimit = Math.min(
+    50,
+    Math.max(1, Number(limit) || 10)
+  );
+
+  const { rows } =
+    await conn.query(
+      `
+      SELECT
+        user_id,
+        display_name,
+        xp,
+        level,
+        balance,
+        bank_balance,
+        games_played,
+        wins
+      FROM users
+      WHERE thread_id = $1
+      ORDER BY xp DESC, level DESC, user_id ASC
+      LIMIT $2
+      `,
+      [
+        String(threadId),
+        safeLimit,
+      ]
+    );
+
+  return rows.map(
+    (row, index) => {
+      const xp =
+        Number(row.xp) || 0;
+
+      return {
+        position: index + 1,
+
+        userId:
+          String(row.user_id),
+
+        displayName:
+          row.display_name &&
+          String(row.display_name).trim()
+            ? String(row.display_name).trim()
+            : `Player ${row.user_id}`,
+
+        xp,
+
+        level:
+          Number(row.level) ||
+          calculateLevel(xp),
+
+        rank:
+          getRank(xp),
+
+        balance:
+          Number(row.balance) || 0,
+
+        bankBalance:
+          Number(row.bank_balance) || 0,
+
+        gamesPlayed:
+          Number(row.games_played) || 0,
+
+        wins:
+          Number(row.wins) || 0,
+      };
+    }
+  );
 }
 
 // ============================================================
 // BANK DEPOSIT
 // ============================================================
 
-async function deposit(threadId, userId, amount) {
-  amount = Math.floor(Number(amount));
+async function deposit(
+  threadId,
+  userId,
+  amount
+) {
+  amount = Math.floor(
+    Number(amount)
+  );
 
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("Invalid deposit amount.");
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    throw new Error(
+      "Invalid deposit amount."
+    );
   }
 
-  await getUser(threadId, userId);
+  // Make sure the user exists BEFORE
+  // checking out the transaction client.
+  await getUser(
+    threadId,
+    userId
+  );
 
-  const client = await requireConn().connect();
+  const client =
+    await requireConn().connect();
 
   try {
     await client.query("BEGIN");
 
-    const { rows } = await client.query(
-      `
-      SELECT *
-      FROM users
-      WHERE thread_id = $1
-        AND user_id = $2
-      FOR UPDATE
-      `,
-      [String(threadId), String(userId)]
-    );
+    const { rows } =
+      await client.query(
+        `
+        SELECT *
+        FROM users
+        WHERE thread_id = $1
+          AND user_id = $2
+        FOR UPDATE
+        `,
+        [
+          String(threadId),
+          String(userId),
+        ]
+      );
 
     const user = rows[0];
 
-    if (Number(user.balance) < amount) {
-      throw new Error("Not enough wallet coins.");
+    if (!user) {
+      throw new Error(
+        "User not found."
+      );
+    }
+
+    if (
+      Number(user.balance) <
+      amount
+    ) {
+      throw new Error(
+        "Not enough wallet coins."
+      );
     }
 
     await client.query(
@@ -459,15 +786,33 @@ async function deposit(threadId, userId, amount) {
       WHERE thread_id = $1
         AND user_id = $2
       `,
-      [String(threadId), String(userId), amount]
+      [
+        String(threadId),
+        String(userId),
+        amount,
+      ]
     );
 
     await client.query(
       `
       INSERT INTO economy_transactions
-        (thread_id, user_id, type, amount, description, created_at)
+        (
+          thread_id,
+          user_id,
+          type,
+          amount,
+          description,
+          created_at
+        )
       VALUES
-        ($1, $2, 'deposit', $3, 'Bank deposit', $4)
+        (
+          $1,
+          $2,
+          'deposit',
+          $3,
+          'Bank deposit',
+          $4
+        )
       `,
       [
         String(threadId),
@@ -479,7 +824,10 @@ async function deposit(threadId, userId, amount) {
 
     await client.query("COMMIT");
 
-    return await getUser(threadId, userId);
+    return getUser(
+      threadId,
+      userId
+    );
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -492,35 +840,65 @@ async function deposit(threadId, userId, amount) {
 // BANK WITHDRAW
 // ============================================================
 
-async function withdraw(threadId, userId, amount) {
-  amount = Math.floor(Number(amount));
+async function withdraw(
+  threadId,
+  userId,
+  amount
+) {
+  amount = Math.floor(
+    Number(amount)
+  );
 
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("Invalid withdrawal amount.");
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    throw new Error(
+      "Invalid withdrawal amount."
+    );
   }
 
-  await getUser(threadId, userId);
+  await getUser(
+    threadId,
+    userId
+  );
 
-  const client = await requireConn().connect();
+  const client =
+    await requireConn().connect();
 
   try {
     await client.query("BEGIN");
 
-    const { rows } = await client.query(
-      `
-      SELECT *
-      FROM users
-      WHERE thread_id = $1
-        AND user_id = $2
-      FOR UPDATE
-      `,
-      [String(threadId), String(userId)]
-    );
+    const { rows } =
+      await client.query(
+        `
+        SELECT *
+        FROM users
+        WHERE thread_id = $1
+          AND user_id = $2
+        FOR UPDATE
+        `,
+        [
+          String(threadId),
+          String(userId),
+        ]
+      );
 
     const user = rows[0];
 
-    if (Number(user.bank_balance) < amount) {
-      throw new Error("Not enough money in the bank.");
+    if (!user) {
+      throw new Error(
+        "User not found."
+      );
+    }
+
+    if (
+      Number(user.bank_balance) <
+      amount
+    ) {
+      throw new Error(
+        "Not enough money in the bank."
+      );
     }
 
     await client.query(
@@ -532,15 +910,33 @@ async function withdraw(threadId, userId, amount) {
       WHERE thread_id = $1
         AND user_id = $2
       `,
-      [String(threadId), String(userId), amount]
+      [
+        String(threadId),
+        String(userId),
+        amount,
+      ]
     );
 
     await client.query(
       `
       INSERT INTO economy_transactions
-        (thread_id, user_id, type, amount, description, created_at)
+        (
+          thread_id,
+          user_id,
+          type,
+          amount,
+          description,
+          created_at
+        )
       VALUES
-        ($1, $2, 'withdraw', $3, 'Bank withdrawal', $4)
+        (
+          $1,
+          $2,
+          'withdraw',
+          $3,
+          'Bank withdrawal',
+          $4
+        )
       `,
       [
         String(threadId),
@@ -552,7 +948,10 @@ async function withdraw(threadId, userId, amount) {
 
     await client.query("COMMIT");
 
-    return await getUser(threadId, userId);
+    return getUser(
+      threadId,
+      userId
+    );
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -565,43 +964,107 @@ async function withdraw(threadId, userId, amount) {
 // TRANSFER
 // ============================================================
 
-async function transfer(threadId, fromUserId, toUserId, amount) {
-  amount = Math.floor(Number(amount));
+async function transfer(
+  threadId,
+  fromUserId,
+  toUserId,
+  amount
+) {
+  amount = Math.floor(
+    Number(amount)
+  );
 
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("Invalid transfer amount.");
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    throw new Error(
+      "Invalid transfer amount."
+    );
   }
 
-  fromUserId = String(fromUserId);
-  toUserId = String(toUserId);
+  fromUserId =
+    String(fromUserId);
 
-  if (fromUserId === toUserId) {
-    throw new Error("You cannot transfer coins to yourself.");
+  toUserId =
+    String(toUserId);
+
+  if (
+    fromUserId === toUserId
+  ) {
+    throw new Error(
+      "You cannot transfer coins to yourself."
+    );
   }
 
-  await getUser(threadId, fromUserId);
-  await getUser(threadId, toUserId);
+  await getUser(
+    threadId,
+    fromUserId
+  );
 
-  const client = await requireConn().connect();
+  await getUser(
+    threadId,
+    toUserId
+  );
+
+  const client =
+    await requireConn().connect();
 
   try {
     await client.query("BEGIN");
 
-    const senderResult = await client.query(
+    // Always lock IDs in a consistent
+    // order to reduce deadlock risk.
+    const firstId =
+      fromUserId < toUserId
+        ? fromUserId
+        : toUserId;
+
+    const secondId =
+      fromUserId < toUserId
+        ? toUserId
+        : fromUserId;
+
+    await client.query(
       `
-      SELECT *
+      SELECT user_id
       FROM users
       WHERE thread_id = $1
-        AND user_id = $2
+        AND user_id IN ($2, $3)
+      ORDER BY user_id
       FOR UPDATE
       `,
-      [String(threadId), fromUserId]
+      [
+        String(threadId),
+        firstId,
+        secondId,
+      ]
     );
 
-    const sender = senderResult.rows[0];
+    const senderResult =
+      await client.query(
+        `
+        SELECT *
+        FROM users
+        WHERE thread_id = $1
+          AND user_id = $2
+        `,
+        [
+          String(threadId),
+          fromUserId,
+        ]
+      );
 
-    if (Number(sender.balance) < amount) {
-      throw new Error("You don't have enough wallet coins.");
+    const sender =
+      senderResult.rows[0];
+
+    if (
+      Number(sender.balance) <
+      amount
+    ) {
+      throw new Error(
+        "You don't have enough wallet coins."
+      );
     }
 
     await client.query(
@@ -611,7 +1074,11 @@ async function transfer(threadId, fromUserId, toUserId, amount) {
       WHERE thread_id = $1
         AND user_id = $2
       `,
-      [String(threadId), fromUserId, amount]
+      [
+        String(threadId),
+        fromUserId,
+        amount,
+      ]
     );
 
     await client.query(
@@ -621,15 +1088,33 @@ async function transfer(threadId, fromUserId, toUserId, amount) {
       WHERE thread_id = $1
         AND user_id = $2
       `,
-      [String(threadId), toUserId, amount]
+      [
+        String(threadId),
+        toUserId,
+        amount,
+      ]
     );
 
     await client.query(
       `
       INSERT INTO economy_transactions
-        (thread_id, user_id, type, amount, description, created_at)
+        (
+          thread_id,
+          user_id,
+          type,
+          amount,
+          description,
+          created_at
+        )
       VALUES
-        ($1, $2, 'transfer_sent', $3, $4, $5)
+        (
+          $1,
+          $2,
+          'transfer_sent',
+          $3,
+          $4,
+          $5
+        )
       `,
       [
         String(threadId),
@@ -643,9 +1128,23 @@ async function transfer(threadId, fromUserId, toUserId, amount) {
     await client.query(
       `
       INSERT INTO economy_transactions
-        (thread_id, user_id, type, amount, description, created_at)
+        (
+          thread_id,
+          user_id,
+          type,
+          amount,
+          description,
+          created_at
+        )
       VALUES
-        ($1, $2, 'transfer_received', $3, $4, $5)
+        (
+          $1,
+          $2,
+          'transfer_received',
+          $3,
+          $4,
+          $5
+        )
       `,
       [
         String(threadId),
@@ -671,23 +1170,45 @@ async function transfer(threadId, fromUserId, toUserId, amount) {
 // LOANS
 // ============================================================
 
-async function applyLoan(threadId, userId, amount) {
-  amount = Math.floor(Number(amount));
-
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("Invalid loan amount.");
-  }
-
-  const user = await getUser(threadId, userId);
-
-  if (Number(user.loan_remaining) > 0) {
-    throw new Error("You already have an active loan.");
-  }
-
-  const maxLoan = Math.max(
-    500,
-    Math.floor(Number(user.credit_score) * 10)
+async function applyLoan(
+  threadId,
+  userId,
+  amount
+) {
+  amount = Math.floor(
+    Number(amount)
   );
+
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    throw new Error(
+      "Invalid loan amount."
+    );
+  }
+
+  const user =
+    await getUser(
+      threadId,
+      userId
+    );
+
+  if (
+    Number(user.loan_remaining) > 0
+  ) {
+    throw new Error(
+      "You already have an active loan."
+    );
+  }
+
+  const maxLoan =
+    Math.max(
+      500,
+      Math.floor(
+        Number(user.credit_score) * 10
+      )
+    );
 
   if (amount > maxLoan) {
     throw new Error(
@@ -697,19 +1218,34 @@ async function applyLoan(threadId, userId, amount) {
 
   const interestRate = 0.10;
 
-  const totalDue = Math.ceil(
-    amount * (1 + interestRate)
-  );
+  const totalDue =
+    Math.ceil(
+      amount *
+      (1 + interestRate)
+    );
 
   const dueDate =
-    Date.now() + 7 * 24 * 60 * 60 * 1000;
+    Date.now() +
+    7 * 24 * 60 * 60 * 1000;
 
-  await updateUser(threadId, userId, {
-    balance: Number(user.balance) + amount,
-    loan_principal: amount,
-    loan_remaining: totalDue,
-    loan_due: dueDate,
-  });
+  await updateUser(
+    threadId,
+    userId,
+    {
+      balance:
+        Number(user.balance) +
+        amount,
+
+      loan_principal:
+        amount,
+
+      loan_remaining:
+        totalDue,
+
+      loan_due:
+        dueDate,
+    }
+  );
 
   return {
     principal: amount,
@@ -718,51 +1254,93 @@ async function applyLoan(threadId, userId, amount) {
   };
 }
 
-async function payLoan(threadId, userId, amount) {
-  amount = Math.floor(Number(amount));
-
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("Invalid payment amount.");
-  }
-
-  const user = await getUser(threadId, userId);
-
-  if (Number(user.loan_remaining) <= 0) {
-    throw new Error("You don't have an active loan.");
-  }
-
-  if (Number(user.balance) < amount) {
-    throw new Error("You don't have enough wallet coins.");
-  }
-
-  const payment = Math.min(
-    amount,
-    Number(user.loan_remaining)
+async function payLoan(
+  threadId,
+  userId,
+  amount
+) {
+  amount = Math.floor(
+    Number(amount)
   );
 
-  const remaining =
-    Number(user.loan_remaining) - payment;
-
-  let creditScore =
-    Number(user.credit_score) || STARTING_CREDIT_SCORE;
-
-  if (remaining === 0) {
-    creditScore = Math.min(850, creditScore + 20);
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    throw new Error(
+      "Invalid payment amount."
+    );
   }
 
-  await updateUser(threadId, userId, {
-    balance: Number(user.balance) - payment,
-    loan_remaining: remaining,
-    credit_score: creditScore,
-    loan_principal:
-      remaining === 0
-        ? 0
-        : Number(user.loan_principal),
-    loan_due:
-      remaining === 0
-        ? null
-        : user.loan_due,
-  });
+  const user =
+    await getUser(
+      threadId,
+      userId
+    );
+
+  if (
+    Number(user.loan_remaining) <= 0
+  ) {
+    throw new Error(
+      "You don't have an active loan."
+    );
+  }
+
+  if (
+    Number(user.balance) < amount
+  ) {
+    throw new Error(
+      "You don't have enough wallet coins."
+    );
+  }
+
+  const payment =
+    Math.min(
+      amount,
+      Number(user.loan_remaining)
+    );
+
+  const remaining =
+    Number(user.loan_remaining) -
+    payment;
+
+  let creditScore =
+    Number(user.credit_score) ||
+    STARTING_CREDIT_SCORE;
+
+  if (remaining === 0) {
+    creditScore =
+      Math.min(
+        850,
+        creditScore + 20
+      );
+  }
+
+  await updateUser(
+    threadId,
+    userId,
+    {
+      balance:
+        Number(user.balance) -
+        payment,
+
+      loan_remaining:
+        remaining,
+
+      credit_score:
+        creditScore,
+
+      loan_principal:
+        remaining === 0
+          ? 0
+          : Number(user.loan_principal),
+
+      loan_due:
+        remaining === 0
+          ? null
+          : user.loan_due,
+    }
+  );
 
   return {
     payment,
@@ -775,25 +1353,42 @@ async function payLoan(threadId, userId, amount) {
 // BANK INTEREST
 // ============================================================
 
-async function applyBankInterest(threadId, userId) {
-  const user = await getUser(threadId, userId);
+async function applyBankInterest(
+  threadId,
+  userId
+) {
+  const user =
+    await getUser(
+      threadId,
+      userId
+    );
 
-  const bankBalance = Number(user.bank_balance) || 0;
+  const bankBalance =
+    Number(user.bank_balance) || 0;
 
   if (bankBalance <= 0) {
     return 0;
   }
 
-  // 1% interest
-  const interest = Math.floor(bankBalance * 0.01);
+  // 1% simulated bank interest.
+  // Called by !bank / economy flow.
+  const interest =
+    Math.floor(
+      bankBalance * 0.01
+    );
 
   if (interest <= 0) {
     return 0;
   }
 
-  await updateUser(threadId, userId, {
-    bank_balance: bankBalance + interest,
-  });
+  await updateUser(
+    threadId,
+    userId,
+    {
+      bank_balance:
+        bankBalance + interest,
+    }
+  );
 
   return interest;
 }
@@ -813,13 +1408,23 @@ async function addItem(
   await conn.query(
     `
     INSERT INTO inventory
-      (thread_id, user_id, item_id, amount)
+      (
+        thread_id,
+        user_id,
+        item_id,
+        amount
+      )
     VALUES
       ($1, $2, $3, $4)
-    ON CONFLICT (thread_id, user_id, item_id)
+    ON CONFLICT (
+      thread_id,
+      user_id,
+      item_id
+    )
     DO UPDATE SET
       amount =
-        inventory.amount + excluded.amount
+        inventory.amount +
+        excluded.amount
     `,
     [
       String(threadId),
@@ -830,27 +1435,32 @@ async function addItem(
   );
 }
 
-async function getInventory(threadId, userId) {
+async function getInventory(
+  threadId,
+  userId
+) {
   const conn = requireConn();
 
-  const { rows } = await conn.query(
-    `
-    SELECT item_id, amount
-    FROM inventory
-    WHERE thread_id = $1
-      AND user_id = $2
-      AND amount > 0
-    `,
-    [
-      String(threadId),
-      String(userId),
-    ]
-  );
+  const { rows } =
+    await conn.query(
+      `
+      SELECT item_id, amount
+      FROM inventory
+      WHERE thread_id = $1
+        AND user_id = $2
+        AND amount > 0
+      `,
+      [
+        String(threadId),
+        String(userId),
+      ]
+    );
 
   const result = {};
 
   for (const row of rows) {
-    result[row.item_id] = Number(row.amount);
+    result[row.item_id] =
+      Number(row.amount);
   }
 
   return result;
@@ -860,25 +1470,33 @@ async function getInventory(threadId, userId) {
 // THREAD SETTINGS
 // ============================================================
 
-async function getThreadSettings(threadId) {
+async function getThreadSettings(
+  threadId
+) {
   const conn = requireConn();
 
-  const id = String(threadId);
+  const id =
+    String(threadId);
 
-  const { rows } = await conn.query(
-    `
-    SELECT *
-    FROM thread_settings
-    WHERE thread_id = $1
-    `,
-    [id]
-  );
+  const { rows } =
+    await conn.query(
+      `
+      SELECT *
+      FROM thread_settings
+      WHERE thread_id = $1
+      `,
+      [id]
+    );
 
   if (rows.length === 0) {
     await conn.query(
       `
       INSERT INTO thread_settings
-        (thread_id, roast_enabled, fun_enabled)
+        (
+          thread_id,
+          roast_enabled,
+          fun_enabled
+        )
       VALUES
         ($1, TRUE, TRUE)
       ON CONFLICT (thread_id)
@@ -897,10 +1515,14 @@ async function getThreadSettings(threadId) {
   return rows[0];
 }
 
-async function setThreadSettings(threadId, fields) {
+async function setThreadSettings(
+  threadId,
+  fields
+) {
   const conn = requireConn();
 
-  const id = String(threadId);
+  const id =
+    String(threadId);
 
   await getThreadSettings(id);
 
@@ -909,24 +1531,28 @@ async function setThreadSettings(threadId, fields) {
     "fun_enabled",
   ];
 
-  const safeFields = Object.keys(fields).filter(
-    (key) => allowedFields.includes(key)
-  );
+  const safeFields =
+    Object.keys(fields).filter(
+      (key) =>
+        allowedFields.includes(key)
+    );
 
   if (safeFields.length === 0) {
     return getThreadSettings(id);
   }
 
-  const setClause = safeFields
-    .map(
-      (key, index) =>
-        `${key} = $${index + 2}`
-    )
-    .join(", ");
+  const setClause =
+    safeFields
+      .map(
+        (key, index) =>
+          `${key} = $${index + 2}`
+      )
+      .join(", ");
 
-  const values = safeFields.map(
-    (key) => fields[key]
-  );
+  const values =
+    safeFields.map(
+      (key) => fields[key]
+    );
 
   await conn.query(
     `
@@ -934,50 +1560,73 @@ async function setThreadSettings(threadId, fields) {
     SET ${setClause}
     WHERE thread_id = $1
     `,
-    [id, ...values]
+    [
+      id,
+      ...values,
+    ]
   );
 
   return getThreadSettings(id);
 }
 
 // ============================================================
-// BANAT
+// BANAT / ROAST
 // ============================================================
 
-async function isRoastEnabled(threadId) {
+async function isRoastEnabled(
+  threadId
+) {
   const settings =
-    await getThreadSettings(threadId);
+    await getThreadSettings(
+      threadId
+    );
 
-  return settings.roast_enabled === true;
+  return (
+    settings.roast_enabled === true
+  );
 }
 
 async function setRoastEnabled(
   threadId,
   enabled
 ) {
-  return setThreadSettings(threadId, {
-    roast_enabled: Boolean(enabled),
-  });
+  return setThreadSettings(
+    threadId,
+    {
+      roast_enabled:
+        Boolean(enabled),
+    }
+  );
 }
 
 // ============================================================
 // GAMES ENABLED
 // ============================================================
 
-async function isGameEnabled(threadId) {
+async function isGameEnabled(
+  threadId
+) {
   const settings =
-    await getThreadSettings(threadId);
+    await getThreadSettings(
+      threadId
+    );
 
-  return settings.fun_enabled === true;
+  return (
+    settings.fun_enabled === true
+  );
 }
 
 async function setGameEnabled(
   threadId,
   enabled
 ) {
-  return setThreadSettings(threadId, {
-    fun_enabled: Boolean(enabled),
-  });
+  return setThreadSettings(
+    threadId,
+    {
+      fun_enabled:
+        Boolean(enabled),
+    }
+  );
 }
 
 // ============================================================
@@ -1003,10 +1652,12 @@ module.exports = {
   calculateLevel,
   getRank,
   getNextRank,
+  getPlayerRanking,
 
   // Leaderboards
   leaderboard,
   moneyLeaderboard,
+  xpLeaderboard,
 
   // Bank
   deposit,
