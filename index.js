@@ -7,6 +7,7 @@ const express = require("express");
 const { login } = require("ws3-fca");
 
 const db = require("./db");
+
 const { handleEconomyCommand } = require("./economy");
 const { handleGamesCommand } = require("./games");
 
@@ -17,7 +18,6 @@ const {
 
 const {
   getTriggerReply,
-  getRandomRoastReply,
   getNextPublicReply,
 } = require("./triggers");
 
@@ -34,12 +34,53 @@ const {
   getClown,
 } = require("./funcommands");
 
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
 const YOUTUBE_SEARCH_TIMEOUT_MS = 30_000;
 const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 180_000;
+
+const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
+
+// This controls whether the automatic public-roast system is enabled
+// globally through the environment variable.
+//
+// IMPORTANT:
+// This is separate from the per-thread !banat on/off setting stored in Neon.
+const RANDOM_ROAST_ENABLED = !/^(0|false|no|off)$/i.test(
+  process.env.RANDOM_ROAST || ""
+);
+
+const parsedCooldown = Number(
+  process.env.RANDOM_ROAST_COOLDOWN_MS || "30000"
+);
+
+const RANDOM_ROAST_COOLDOWN_MS =
+  Number.isFinite(parsedCooldown) && parsedCooldown >= 0
+    ? parsedCooldown
+    : 30_000;
+
+// Temporary in-memory cooldown tracking.
+// This is NOT used to store whether banat is enabled.
+// Banat settings are stored permanently in Neon.
+const lastRandomRoastByThread = new Map();
+
+// Threads seen while the bot is running.
+// Used by !broadcast.
+const activeThreads = new Set();
+
+// ---------------------------------------------------------------------------
+// Timeout helper
+// ---------------------------------------------------------------------------
 
 function withTimeout(operation, timeoutMs, timeoutMessage) {
   return new Promise((resolve, reject) => {
     let settled = false;
+
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
@@ -52,12 +93,14 @@ function withTimeout(operation, timeoutMs, timeoutMessage) {
       .then(
         (value) => {
           if (settled) return;
+
           settled = true;
           clearTimeout(timer);
           resolve(value);
         },
         (error) => {
           if (settled) return;
+
           settled = true;
           clearTimeout(timer);
           reject(error);
@@ -66,6 +109,29 @@ function withTimeout(operation, timeoutMs, timeoutMessage) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Messenger Promise wrapper
+// ---------------------------------------------------------------------------
+
+function sendMessengerMessage(api, message, threadID) {
+  return new Promise((resolve, reject) => {
+    try {
+      api.sendMessage(message, threadID, (error) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// YouTube audio
+// ---------------------------------------------------------------------------
 
 /**
  * Searches YouTube, downloads the audio, sends it to Messenger,
@@ -100,7 +166,10 @@ async function sendAudioTrack(api, requestedSong, threadID) {
       threadID,
       (error) => {
         if (error) {
-          console.error("Search status message failed:", error);
+          console.error(
+            "Search status message failed:",
+            error
+          );
         }
       }
     );
@@ -118,61 +187,61 @@ async function sendAudioTrack(api, requestedSong, threadID) {
     }
 
     await withTimeout(
-      () => downloadYouTubeAudio(video.url, temporaryFile),
+      () =>
+        downloadYouTubeAudio(
+          video.url,
+          temporaryFile
+        ),
       YOUTUBE_DOWNLOAD_TIMEOUT_MS,
       "YouTube download timed out after 3 minutes. The host may be blocked by YouTube; please try again."
     );
 
     const fileInfo = await fsp.stat(temporaryFile);
 
-    if (!fileInfo.isFile() || fileInfo.size === 0) {
-      throw new Error("The downloaded audio file is empty.");
+    if (
+      !fileInfo.isFile() ||
+      fileInfo.size === 0
+    ) {
+      throw new Error(
+        "The downloaded audio file is empty."
+      );
     }
 
     await sendMessengerMessage(
       api,
       {
         body: `🎵 ${video.title || requestedSong}`,
-        attachment: fs.createReadStream(temporaryFile),
+        attachment: fs.createReadStream(
+          temporaryFile
+        ),
       },
       threadID
     );
   } catch (error) {
-    console.error("Audio command failed:", error);
+    console.error(
+      "Audio command failed:",
+      error
+    );
 
     api.sendMessage(
       `❌ Unable to download that song.\n${error.message}`,
       threadID,
       (sendError) => {
         if (sendError) {
-          console.error("Audio error message failed:", sendError);
+          console.error(
+            "Audio error message failed:",
+            sendError
+          );
         }
       }
     );
   } finally {
-    await fsp.unlink(temporaryFile).catch(() => {
-      // The file may not have been created.
-    });
-  }
-}
-
-/**
- * Converts ws3-fca's callback-based sendMessage API into a Promise.
- */
-function sendMessengerMessage(api, message, threadID) {
-  return new Promise((resolve, reject) => {
-    try {
-      api.sendMessage(message, threadID, (error) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve();
-        }
+    await fsp
+      .unlink(temporaryFile)
+      .catch(() => {
+        // File may not have been created.
       });
-    } catch (error) {
-      reject(error);
-    }
-  });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,33 +254,55 @@ app.get("/", (_req, res) => {
   res.status(200).send("Bot is running ✅");
 });
 
-const port = Number.parseInt(process.env.PORT || "3000", 10);
+const port = Number.parseInt(
+  process.env.PORT || "3000",
+  10
+);
 
-if (!Number.isInteger(port) || port < 1 || port > 65535) {
-  throw new Error(`Invalid PORT value: ${process.env.PORT}`);
+if (
+  !Number.isInteger(port) ||
+  port < 1 ||
+  port > 65535
+) {
+  throw new Error(
+    `Invalid PORT value: ${process.env.PORT}`
+  );
 }
 
-const server = app.listen(port, "0.0.0.0", () => {
-  console.log(`Web server listening on port ${port}`);
-});
+const server = app.listen(
+  port,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `Web server listening on port ${port}`
+    );
+  }
+);
 
 server.on("error", (error) => {
-  console.error("Web server error:", error);
+  console.error(
+    "Web server error:",
+    error
+  );
+
   process.exitCode = 1;
 });
 
 // ---------------------------------------------------------------------------
-// Load Facebook cookies from FB_COOKIES
+// Facebook cookies
 // ---------------------------------------------------------------------------
 
 function readAppState() {
-  const rawCookies = process.env.FB_COOKIES;
+  const rawCookies =
+    process.env.FB_COOKIES;
 
   if (
     typeof rawCookies !== "string" ||
     !rawCookies.trim()
   ) {
-    throw new Error("FB_COOKIES is missing.");
+    throw new Error(
+      "FB_COOKIES is missing."
+    );
   }
 
   let parsed;
@@ -219,7 +310,7 @@ function readAppState() {
   try {
     parsed = JSON.parse(rawCookies);
 
-    // Supports a JSON-encoded JSON string.
+    // Supports JSON encoded JSON string.
     if (typeof parsed === "string") {
       parsed = JSON.parse(parsed);
     }
@@ -229,7 +320,10 @@ function readAppState() {
     );
   }
 
-  if (!Array.isArray(parsed) || parsed.length === 0) {
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0
+  ) {
     throw new Error(
       "FB_COOKIES must be a non-empty cookie array."
     );
@@ -273,37 +367,12 @@ let appState;
 try {
   appState = readAppState();
 } catch (error) {
-  console.error(`Configuration error: ${error.message}`);
+  console.error(
+    `Configuration error: ${error.message}`
+  );
+
   process.exit(1);
 }
-
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-const ADMIN_IDS = (process.env.ADMIN_IDS || "")
-  .split(",")
-  .map((id) => id.trim())
-  .filter(Boolean);
-
-// NOTE: this flag now gates the deterministic "public roast" behavior
-// (anyone who isn't a matched trigger/target gets roasted on cooldown),
-// not a percentage-chance roll anymore.
-const RANDOM_ROAST_ENABLED = !/^(0|false|no|off)$/i.test(
-  process.env.RANDOM_ROAST || ""
-);
-
-const parsedCooldown = Number(
-  process.env.RANDOM_ROAST_COOLDOWN_MS || "30000"
-);
-
-const RANDOM_ROAST_COOLDOWN_MS =
-  Number.isFinite(parsedCooldown) && parsedCooldown >= 0
-    ? parsedCooldown
-    : 30000;
-
-const lastRandomRoastByThread = new Map();
-const activeThreads = new Set();
 
 // ---------------------------------------------------------------------------
 // Login to Facebook
@@ -317,33 +386,65 @@ login(
     selfListen: false,
     randomUserAgent: false,
   },
-  (loginError, api) => {
+
+  async (loginError, api) => {
     if (loginError) {
-      console.error("Login failed:", loginError);
+      console.error(
+        "Login failed:",
+        loginError
+      );
+
       process.exit(1);
     }
 
     if (!api) {
-      console.error("Login failed: Facebook API object was not returned.");
+      console.error(
+        "Login failed: Facebook API object was not returned."
+      );
+
       process.exit(1);
     }
 
-    console.log("Logged in successfully.");
+    console.log(
+      "Logged in successfully."
+    );
 
-    // Connect to Postgres (Neon) for the economy/games balances.
-    // Non-fatal on purpose: if DATABASE_URL isn't set yet, the rest
-    // of the bot (!ping, triggers, music) keeps working — only
-    // !balance/!daily/!work/etc. and the games will error individually.
-    db.connect().catch((err) => {
-      console.error("Database connection failed:", err.message);
-    });
+    // -----------------------------------------------------------------------
+    // Connect Neon BEFORE starting the Messenger listener.
+    // -----------------------------------------------------------------------
+
+    try {
+      await db.connect();
+
+      console.log(
+        "Neon database connected successfully."
+      );
+    } catch (error) {
+      console.error(
+        "Database connection failed:",
+        error
+      );
+
+      // The bot now depends on Neon for persistent economy,
+      // games, and thread settings, so don't start half-working.
+      process.exit(1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Facebook API options
+    // -----------------------------------------------------------------------
 
     api.setOptions({
       listenEvents: true,
       selfListen: false,
     });
 
-    const startupThreadID = process.env.STARTUP_THREAD_ID;
+    // -----------------------------------------------------------------------
+    // Optional startup message
+    // -----------------------------------------------------------------------
+
+    const startupThreadID =
+      process.env.STARTUP_THREAD_ID;
 
     if (startupThreadID) {
       api.sendMessage(
@@ -351,7 +452,10 @@ login(
         startupThreadID,
         (sendError) => {
           if (sendError) {
-            console.error("Startup message failed:", sendError);
+            console.error(
+              "Startup message failed:",
+              sendError
+            );
           }
         }
       );
@@ -361,36 +465,62 @@ login(
       "Listener started. Send a message from a different Facebook account."
     );
 
-    api.listenMqtt((listenError, event) => {
-      if (listenError) {
-        console.error("Listener error:", listenError);
-        return;
-      }
+    // -----------------------------------------------------------------------
+    // Messenger event listener
+    // -----------------------------------------------------------------------
 
-      if (!event || typeof event !== "object") {
-        return;
-      }
+    api.listenMqtt(
+      (listenError, event) => {
+        if (listenError) {
+          console.error(
+            "Listener error:",
+            listenError
+          );
 
-      console.log("Incoming event:", {
-        type: event.type,
-        senderID: event.senderID,
-        threadID: event.threadID,
-      });
+          return;
+        }
 
-      if (event.threadID) {
-        activeThreads.add(String(event.threadID));
+        if (
+          !event ||
+          typeof event !== "object"
+        ) {
+          return;
+        }
+
         console.log(
-          `[Threads] Active threads: ${activeThreads.size}`
+          "Incoming event:",
+          {
+            type: event.type,
+            senderID: event.senderID,
+            threadID: event.threadID,
+          }
         );
-      }
 
-      if (
-        event.type === "message" ||
-        event.type === "message_reply"
-      ) {
-        handleMessage(api, event);
+        if (event.threadID) {
+          const threadID =
+            String(event.threadID);
+
+          activeThreads.add(threadID);
+
+          console.log(
+            `[Threads] Active threads: ${activeThreads.size}`
+          );
+        }
+
+        if (
+          event.type === "message" ||
+          event.type === "message_reply"
+        ) {
+          // handleMessage is async.
+          // We intentionally don't await it here because
+          // the Messenger listener callback itself is synchronous.
+          void handleMessage(
+            api,
+            event
+          );
+        }
       }
-    });
+    );
   }
 );
 
@@ -398,7 +528,10 @@ login(
 // Message handling
 // ---------------------------------------------------------------------------
 
-function handleMessage(api, event) {
+async function handleMessage(
+  api,
+  event
+) {
   const {
     threadID,
     senderID,
@@ -413,26 +546,75 @@ function handleMessage(api, event) {
     return;
   }
 
-  const originalText = body.trim();
-  const text = originalText.toLowerCase();
-  const senderId = String(senderID || "").trim();
+  const threadId =
+    String(threadID);
 
-  // Economy + games — checked first so bets/session replies (like
-  // blackjack's !hit/!stand or a trivia letter) get first crack,
-  // before falling through to !ping/!help/triggers/etc. below.
-  void (async () => {
-    try {
-      if (await handleGamesCommand(api, event, text, originalText)) return;
-      if (await handleEconomyCommand(api, event, text, originalText)) return;
-    } catch (err) {
-      console.error("Economy/games command failed:", err);
+  const originalText =
+    body.trim();
+
+  const text =
+    originalText.toLowerCase();
+
+  const senderId =
+    String(senderID || "").trim();
+
+  // -------------------------------------------------------------------------
+  // Economy + games FIRST
+  // -------------------------------------------------------------------------
+  //
+  // These need to be awaited and returned properly.
+  // This prevents commands such as !blackjack, !hit,
+  // trivia answers, etc. from continuing into the roast system.
+  // -------------------------------------------------------------------------
+
+  try {
+    if (
+      await handleGamesCommand(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
+      return;
     }
-  })();
 
-  if (text === "!ping") {
-    sendReplyWithTyping(api, "pong 🏓", threadID);
+    if (
+      await handleEconomyCommand(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
+      return;
+    }
+  } catch (error) {
+    console.error(
+      "Economy/games command failed:",
+      error
+    );
+
     return;
   }
+
+  // -------------------------------------------------------------------------
+  // Ping
+  // -------------------------------------------------------------------------
+
+  if (text === "!ping") {
+    sendReplyWithTyping(
+      api,
+      "pong 🏓",
+      threadID
+    );
+
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Help
+  // -------------------------------------------------------------------------
 
   if (text === "!help") {
     sendReplyWithTyping(
@@ -449,87 +631,329 @@ function handleMessage(api, event) {
         "!clown <name> - random clown meter",
         "!broadcast <text> - admin only",
         "",
+        "Banat:",
+        "!banat on - enable banat",
+        "!banat off - disable banat",
+        "",
         "Economy:",
         "!balance / !daily / !work / !pay / !leaderboard",
         "!shop / !buy <item> / !inventory",
         "",
         "Games:",
-        "!games / !trivia / !rps / !roll / !guess / !coinflip / !slots / !blackjack / !8ball",
+        "!games",
+        "!game on / !game off",
+        "!trivia / !rps / !roll / !guess",
+        "!coinflip / !slots / !blackjack / !8ball",
       ].join("\n"),
       threadID
     );
+
     return;
   }
 
-  if (text === "!play" || text.startsWith("!play ")) {
-    const requestedSong = originalText
-      .slice("!play".length)
-      .trim();
+  // -------------------------------------------------------------------------
+  // Banat / roast toggle
+  // -------------------------------------------------------------------------
 
-    void sendAudioTrack(api, requestedSong, threadID);
+  if (text === "!banat on") {
+    try {
+      await db.setRoastEnabled(
+        threadId,
+        true
+      );
+
+      sendReplyWithTyping(
+        api,
+        "🔥 Banat is now ON for this group.",
+        threadID
+      );
+    } catch (error) {
+      console.error(
+        "Failed to enable banat:",
+        error
+      );
+
+      sendReplyWithTyping(
+        api,
+        "❌ Failed to update banat setting.",
+        threadID
+      );
+    }
+
     return;
   }
 
-  if (text === "!rizz" || text.startsWith("!rizz ")) {
-    const name = originalText.slice("!rizz".length).trim() || "You";
-    sendReplyWithTyping(api, getRizz(name).text, threadID);
+  if (text === "!banat off") {
+    try {
+      await db.setRoastEnabled(
+        threadId,
+        false
+      );
+
+      // Clear the temporary cooldown too.
+      lastRandomRoastByThread.delete(
+        threadId
+      );
+
+      sendReplyWithTyping(
+        api,
+        "🛑 Banat is now OFF for this group.",
+        threadID
+      );
+    } catch (error) {
+      console.error(
+        "Failed to disable banat:",
+        error
+      );
+
+      sendReplyWithTyping(
+        api,
+        "❌ Failed to update banat setting.",
+        threadID
+      );
+    }
+
     return;
   }
 
-  if (text === "!aura" || text.startsWith("!aura ")) {
-    const name = originalText.slice("!aura".length).trim() || "You";
-    sendReplyWithTyping(api, getAura(name).text, threadID);
+  // -------------------------------------------------------------------------
+  // Play
+  // -------------------------------------------------------------------------
+
+  if (
+    text === "!play" ||
+    text.startsWith("!play ")
+  ) {
+    const requestedSong =
+      originalText
+        .slice("!play".length)
+        .trim();
+
+    void sendAudioTrack(
+      api,
+      requestedSong,
+      threadID
+    );
+
     return;
   }
 
-  if (text === "!iq" || text.startsWith("!iq ")) {
-    const name = originalText.slice("!iq".length).trim() || "You";
-    sendReplyWithTyping(api, getIQ(name).text, threadID);
+  // -------------------------------------------------------------------------
+  // Rizz
+  // -------------------------------------------------------------------------
+
+  if (
+    text === "!rizz" ||
+    text.startsWith("!rizz ")
+  ) {
+    const name =
+      originalText
+        .slice("!rizz".length)
+        .trim() || "You";
+
+    sendReplyWithTyping(
+      api,
+      getRizz(name).text,
+      threadID
+    );
+
     return;
   }
 
-  if (text === "!simp" || text.startsWith("!simp ")) {
-    const name = originalText.slice("!simp".length).trim() || "You";
-    sendReplyWithTyping(api, getSimp(name).text, threadID);
+  // -------------------------------------------------------------------------
+  // Aura
+  // -------------------------------------------------------------------------
+
+  if (
+    text === "!aura" ||
+    text.startsWith("!aura ")
+  ) {
+    const name =
+      originalText
+        .slice("!aura".length)
+        .trim() || "You";
+
+    sendReplyWithTyping(
+      api,
+      getAura(name).text,
+      threadID
+    );
+
     return;
   }
 
-  if (text === "!clown" || text.startsWith("!clown ")) {
-    const name = originalText.slice("!clown".length).trim() || "You";
-    sendReplyWithTyping(api, getClown(name).text, threadID);
+  // -------------------------------------------------------------------------
+  // IQ
+  // -------------------------------------------------------------------------
+
+  if (
+    text === "!iq" ||
+    text.startsWith("!iq ")
+  ) {
+    const name =
+      originalText
+        .slice("!iq".length)
+        .trim() || "You";
+
+    sendReplyWithTyping(
+      api,
+      getIQ(name).text,
+      threadID
+    );
+
     return;
   }
+
+  // -------------------------------------------------------------------------
+  // Simp
+  // -------------------------------------------------------------------------
+
+  if (
+    text === "!simp" ||
+    text.startsWith("!simp ")
+  ) {
+    const name =
+      originalText
+        .slice("!simp".length)
+        .trim() || "You";
+
+    sendReplyWithTyping(
+      api,
+      getSimp(name).text,
+      threadID
+    );
+
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Clown
+  // -------------------------------------------------------------------------
+
+  if (
+    text === "!clown" ||
+    text.startsWith("!clown ")
+  ) {
+    const name =
+      originalText
+        .slice("!clown".length)
+        .trim() || "You";
+
+    sendReplyWithTyping(
+      api,
+      getClown(name).text,
+      threadID
+    );
+
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Broadcast
+  // -------------------------------------------------------------------------
 
   if (
     text.startsWith("!broadcast ") &&
     ADMIN_IDS.includes(senderId)
   ) {
-    const message = originalText
-      .slice("!broadcast ".length)
-      .trim();
+    const message =
+      originalText
+        .slice("!broadcast ".length)
+        .trim();
 
-    broadcastToAllThreads(api, message);
+    broadcastToAllThreads(
+      api,
+      message
+    );
+
     return;
   }
 
-  const triggerReply = getTriggerReply(body, senderId);
+  // -------------------------------------------------------------------------
+  // Targeted trigger / roast
+  // -------------------------------------------------------------------------
+  //
+  // getTriggerReply must be async because it checks the
+  // persistent roast_enabled setting in Neon.
+  // -------------------------------------------------------------------------
 
-  if (triggerReply) {
-    sendReplyWithTyping(api, triggerReply, threadID, true);
+  try {
+    const triggerReply =
+      await getTriggerReply(
+        body,
+        senderId,
+        threadId
+      );
+
+    if (triggerReply) {
+      sendReplyWithTyping(
+        api,
+        triggerReply,
+        threadID,
+        true
+      );
+
+      return;
+    }
+  } catch (error) {
+    console.error(
+      "Trigger system failed:",
+      error
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Public roast
+  // -------------------------------------------------------------------------
+  //
+  // This checks BOTH:
+  //
+  // 1. RANDOM_ROAST environment setting
+  // 2. Per-thread roast_enabled setting in Neon
+  //
+  // Therefore:
+  //
+  // !banat off
+  //
+  // actually disables all automatic roast behavior in that group.
+  // -------------------------------------------------------------------------
+
+  if (!RANDOM_ROAST_ENABLED) {
     return;
   }
 
-  // Anyone who isn't a matched trigger/target gets a public roast line,
-  // once per cooldown window per thread (no random chance — deterministic).
+  try {
+    const roastEnabled =
+      await db.isRoastEnabled(
+        threadId
+      );
+
+    if (!roastEnabled) {
+      return;
+    }
+  } catch (error) {
+    console.error(
+      "Could not check roast setting:",
+      error
+    );
+
+    // Fail closed.
+    // If we cannot determine whether banat is enabled,
+    // don't send an automatic roast.
+    return;
+  }
+
   if (
-    RANDOM_ROAST_ENABLED &&
-    canRandomRoastThread(String(threadID))
+    canRandomRoastThread(
+      threadId
+    )
   ) {
-    const publicReply = getNextPublicReply();
+    const publicReply =
+      getNextPublicReply();
 
     if (publicReply) {
       lastRandomRoastByThread.set(
-        String(threadID),
+        threadId,
         Date.now()
       );
 
@@ -543,10 +967,19 @@ function handleMessage(api, event) {
   }
 }
 
-function canRandomRoastThread(threadID) {
+// ---------------------------------------------------------------------------
+// Random roast cooldown
+// ---------------------------------------------------------------------------
+
+function canRandomRoastThread(
+  threadID
+) {
   const now = Date.now();
+
   const lastRoastAt =
-    lastRandomRoastByThread.get(threadID) || 0;
+    lastRandomRoastByThread.get(
+      threadID
+    ) || 0;
 
   if (
     now - lastRoastAt <
@@ -555,16 +988,30 @@ function canRandomRoastThread(threadID) {
     return false;
   }
 
-  if (lastRandomRoastByThread.size > 1000) {
-    for (const [
-      knownThreadID,
-      roastAt,
-    ] of lastRandomRoastByThread.entries()) {
+  // Prevent unlimited memory growth.
+  if (
+    lastRandomRoastByThread.size >
+    1000
+  ) {
+    const expiry =
+      Math.max(
+        RANDOM_ROAST_COOLDOWN_MS * 2,
+        60_000
+      );
+
+    for (
+      const [
+        knownThreadID,
+        roastAt,
+      ] of lastRandomRoastByThread.entries()
+    ) {
       if (
         now - roastAt >
-        Math.max(RANDOM_ROAST_COOLDOWN_MS * 2, 60000)
+        expiry
       ) {
-        lastRandomRoastByThread.delete(knownThreadID);
+        lastRandomRoastByThread.delete(
+          knownThreadID
+        );
       }
     }
   }
@@ -576,16 +1023,29 @@ function canRandomRoastThread(threadID) {
 // Broadcast
 // ---------------------------------------------------------------------------
 
-function broadcastToAllThreads(api, message) {
-  if (!message || !message.trim()) {
-    console.log("[Broadcast] No message to broadcast.");
+function broadcastToAllThreads(
+  api,
+  message
+) {
+  if (
+    !message ||
+    !message.trim()
+  ) {
+    console.log(
+      "[Broadcast] No message to broadcast."
+    );
+
     return;
   }
 
-  const threads = Array.from(activeThreads);
+  const threads =
+    Array.from(activeThreads);
 
   if (threads.length === 0) {
-    console.log("[Broadcast] No active threads.");
+    console.log(
+      "[Broadcast] No active threads."
+    );
+
     return;
   }
 
@@ -593,28 +1053,31 @@ function broadcastToAllThreads(api, message) {
     `[Broadcast] Broadcasting to ${threads.length} threads.`
   );
 
-  const broadcastMessage = `📢 ${message.trim()}`;
+  const broadcastMessage =
+    `📢 ${message.trim()}`;
 
-  threads.forEach((threadID, index) => {
-    setTimeout(() => {
-      api.sendMessage(
-        broadcastMessage,
-        threadID,
-        (sendError) => {
-          if (sendError) {
-            console.error(
-              `[Broadcast] Failed for ${threadID}:`,
-              sendError
-            );
-          } else {
-            console.log(
-              `[Broadcast] Sent to ${threadID}`
-            );
+  threads.forEach(
+    (threadID, index) => {
+      setTimeout(() => {
+        api.sendMessage(
+          broadcastMessage,
+          threadID,
+          (sendError) => {
+            if (sendError) {
+              console.error(
+                `[Broadcast] Failed for ${threadID}:`,
+                sendError
+              );
+            } else {
+              console.log(
+                `[Broadcast] Sent to ${threadID}`
+              );
+            }
           }
-        }
-      );
-    }, index * 500);
-  });
+        );
+      }, index * 500);
+    }
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -631,7 +1094,8 @@ function sendReplyWithTyping(
 
   try {
     if (
-      typeof api.sendTypingIndicator === "function"
+      typeof api.sendTypingIndicator ===
+      "function"
     ) {
       api.sendTypingIndicator(
         threadID,
@@ -654,16 +1118,21 @@ function sendReplyWithTyping(
 
   setTimeout(() => {
     try {
-      const memePath = attachMeme
-        ? getRandomMemePath()
-        : null;
+      const memePath =
+        attachMeme
+          ? getRandomMemePath()
+          : null;
 
-      const outgoingMessage = memePath
-        ? {
-            body: message,
-            attachment: fs.createReadStream(memePath),
-          }
-        : message;
+      const outgoingMessage =
+        memePath
+          ? {
+              body: message,
+              attachment:
+                fs.createReadStream(
+                  memePath
+                ),
+            }
+          : message;
 
       api.sendMessage(
         outgoingMessage,
@@ -678,7 +1147,10 @@ function sendReplyWithTyping(
         }
       );
     } catch (sendError) {
-      console.error("Reply error:", sendError);
+      console.error(
+        "Reply error:",
+        sendError
+      );
     }
   }, typingDelayMs);
 }
@@ -688,39 +1160,67 @@ function sendReplyWithTyping(
 // ---------------------------------------------------------------------------
 
 function getRandomMemePath() {
-  const memeDirectory = path.join(__dirname, "memes");
+  const memeDirectory =
+    path.join(
+      __dirname,
+      "memes"
+    );
 
-  const supportedExtensions = new Set([
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".webp",
-  ]);
+  const supportedExtensions =
+    new Set([
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".gif",
+      ".webp",
+    ]);
 
   try {
-    if (!fs.existsSync(memeDirectory)) {
+    if (
+      !fs.existsSync(
+        memeDirectory
+      )
+    ) {
       return null;
     }
 
-    const files = fs
-      .readdirSync(memeDirectory)
-      .filter((fileName) =>
-        supportedExtensions.has(
-          path.extname(fileName).toLowerCase()
+    const files =
+      fs
+        .readdirSync(
+          memeDirectory
         )
-      );
+        .filter((fileName) =>
+          supportedExtensions.has(
+            path.extname(
+              fileName
+            ).toLowerCase()
+          )
+        );
 
-    if (files.length === 0) {
+    if (
+      files.length === 0
+    ) {
       return null;
     }
 
     const randomFile =
-      files[Math.floor(Math.random() * files.length)];
+      files[
+        Math.floor(
+          Math.random() *
+            files.length
+        )
+      ];
 
-    return path.join(memeDirectory, randomFile);
+    return path.join(
+      memeDirectory,
+      randomFile
+    );
   } catch (error) {
-    console.error("Could not load memes:", error);
+    console.error(
+      "Could not load memes:",
+      error
+    );
+
     return null;
   }
 }
