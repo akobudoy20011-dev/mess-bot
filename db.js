@@ -1,23 +1,28 @@
 /**
- * db.js
- * =====
- * Neon PostgreSQL persistence
+ * ╔══════════════════════════════════════════════════════════╗
+ * ║                     DATABASE LAYER                      ║
+ * ║                  Neon PostgreSQL                         ║
+ * ╚══════════════════════════════════════════════════════════╝
  *
- * Includes:
- * - Wallet balance
- * - Bank balance
- * - XP + levels
- * - Ranks
- * - Daily rewards
- * - Work rewards
- * - Transfers
- * - Credit score
- * - Loan simulation
- * - Economy transactions
- * - Inventory
- * - Thread settings
- * - Display names
- * - XP leaderboard
+ * Virtual economy persistence for the Messenger bot.
+ *
+ * ──────────────────────────────────────────────────────────
+ * FEATURES
+ * ──────────────────────────────────────────────────────────
+ * • Wallet balance
+ * • Bank balance
+ * • XP + levels
+ * • Ranks
+ * • Daily rewards
+ * • Work rewards
+ * • Transfers
+ * • Credit score
+ * • Loan simulation
+ * • Economy transactions
+ * • Inventory
+ * • Thread settings
+ * • Display names
+ * • XP / money leaderboards
  *
  * NOTE:
  * This is a virtual game economy.
@@ -26,30 +31,44 @@
 
 const { Pool } = require("pg");
 
+
+// ═══════════════════════════════════════════════════════════
+// CONFIGURATION
+// ═══════════════════════════════════════════════════════════
+
 const STARTING_BALANCE = 100;
 const STARTING_CREDIT_SCORE = 600;
 
-// ============================================================
-// RANKS
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// RANK SYSTEM
+// ═══════════════════════════════════════════════════════════
 
 const RANKS = [
-  { name: "Beginner", xp: 0 },
-  { name: "Bronze", xp: 500 },
-  { name: "Silver", xp: 2000 },
-  { name: "Gold", xp: 5000 },
-  { name: "Platinum", xp: 12000 },
-  { name: "Diamond", xp: 25000 },
-  { name: "Master", xp: 50000 },
-  { name: "Grandmaster", xp: 100000 },
+  { name: "Beginner",    xp: 0 },
+  { name: "Bronze",      xp: 500 },
+  { name: "Silver",      xp: 2_000 },
+  { name: "Gold",        xp: 5_000 },
+  { name: "Platinum",    xp: 12_000 },
+  { name: "Diamond",     xp: 25_000 },
+  { name: "Master",      xp: 50_000 },
+  { name: "Grandmaster", xp: 100_000 },
 ];
 
-// ============================================================
-// DATABASE
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// DATABASE CONNECTION
+// ═══════════════════════════════════════════════════════════
 
 let pool = null;
 
+
+/**
+ * Connect to Neon PostgreSQL and initialize the database schema.
+ *
+ * Existing tables are preserved.
+ * Missing columns are added through migrations.
+ */
 async function connect() {
   if (!process.env.DATABASE_URL) {
     throw new Error(
@@ -59,99 +78,167 @@ async function connect() {
 
   pool = new Pool({
     connectionString: process.env.DATABASE_URL,
+
     ssl: {
       rejectUnauthorized: false,
     },
   });
 
-  // ----------------------------------------------------------
+
+  // ─────────────────────────────────────────────────────────
   // USERS
-  // ----------------------------------------------------------
+  // ─────────────────────────────────────────────────────────
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       thread_id     TEXT NOT NULL,
       user_id       TEXT NOT NULL,
+
       balance       INTEGER NOT NULL DEFAULT ${STARTING_BALANCE},
+
       last_daily    BIGINT,
       last_work     BIGINT,
+
       daily_streak  INTEGER NOT NULL DEFAULT 0,
       games_played  INTEGER NOT NULL DEFAULT 0,
       wins          INTEGER NOT NULL DEFAULT 0,
+
       PRIMARY KEY (thread_id, user_id)
     );
   `);
 
-  // ----------------------------------------------------------
-  // MIGRATION
+
+  // ─────────────────────────────────────────────────────────
+  // USER MIGRATIONS
   //
-  // This is important because CREATE TABLE IF NOT EXISTS does
-  // NOT modify an existing table.
+  // CREATE TABLE IF NOT EXISTS does NOT modify an existing
+  // table. These migrations safely add newer columns.
   //
-  // These ADD COLUMN IF NOT EXISTS statements upgrade the old
-  // users table without deleting existing users.
-  // ----------------------------------------------------------
+  // Existing users/data are preserved.
+  // ─────────────────────────────────────────────────────────
 
   await pool.query(`
     ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS bank_balance INTEGER NOT NULL DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS xp INTEGER NOT NULL DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS level INTEGER NOT NULL DEFAULT 1,
-      ADD COLUMN IF NOT EXISTS credit_score INTEGER NOT NULL DEFAULT ${STARTING_CREDIT_SCORE},
-      ADD COLUMN IF NOT EXISTS loan_principal INTEGER NOT NULL DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS loan_remaining INTEGER NOT NULL DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS loan_due BIGINT,
-      ADD COLUMN IF NOT EXISTS display_name TEXT;
+
+      ADD COLUMN IF NOT EXISTS
+        bank_balance INTEGER NOT NULL DEFAULT 0,
+
+      ADD COLUMN IF NOT EXISTS
+        xp INTEGER NOT NULL DEFAULT 0,
+
+      ADD COLUMN IF NOT EXISTS
+        level INTEGER NOT NULL DEFAULT 1,
+
+      ADD COLUMN IF NOT EXISTS
+        credit_score INTEGER NOT NULL DEFAULT ${STARTING_CREDIT_SCORE},
+
+      ADD COLUMN IF NOT EXISTS
+        loan_principal INTEGER NOT NULL DEFAULT 0,
+
+      ADD COLUMN IF NOT EXISTS
+        loan_remaining INTEGER NOT NULL DEFAULT 0,
+
+      ADD COLUMN IF NOT EXISTS
+        loan_due BIGINT,
+
+      ADD COLUMN IF NOT EXISTS
+        display_name TEXT;
   `);
 
-  // ----------------------------------------------------------
+
+  // ─────────────────────────────────────────────────────────
   // THREAD SETTINGS
-  // ----------------------------------------------------------
+  // ─────────────────────────────────────────────────────────
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS thread_settings (
       thread_id      TEXT PRIMARY KEY,
+
       roast_enabled  BOOLEAN NOT NULL DEFAULT TRUE,
       fun_enabled    BOOLEAN NOT NULL DEFAULT TRUE
     );
   `);
 
-  // ----------------------------------------------------------
+
+  // ─────────────────────────────────────────────────────────
   // INVENTORY
-  // ----------------------------------------------------------
+  // ─────────────────────────────────────────────────────────
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS inventory (
       thread_id  TEXT NOT NULL,
       user_id    TEXT NOT NULL,
-      item_id     TEXT NOT NULL,
-      amount      INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (thread_id, user_id, item_id)
+      item_id    TEXT NOT NULL,
+
+      amount     INTEGER NOT NULL DEFAULT 0,
+
+      PRIMARY KEY (
+        thread_id,
+        user_id,
+        item_id
+      )
     );
   `);
 
-  // ----------------------------------------------------------
+
+  // ─────────────────────────────────────────────────────────
   // ECONOMY TRANSACTIONS
-  // ----------------------------------------------------------
+  // ─────────────────────────────────────────────────────────
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS economy_transactions (
       id           BIGSERIAL PRIMARY KEY,
+
       thread_id    TEXT NOT NULL,
       user_id      TEXT NOT NULL,
+
       type         TEXT NOT NULL,
       amount       INTEGER NOT NULL,
+
       description  TEXT,
+
       created_at   BIGINT NOT NULL
     );
   `);
 
-  console.log("[db] connected + schema/migrations ready");
+
+  console.log(
+    "╔══════════════════════════════════════════════════════════╗"
+  );
+
+  console.log(
+    "║                 DATABASE ONLINE ✓                       ║"
+  );
+
+  console.log(
+    "║                  Neon PostgreSQL                        ║"
+  );
+
+  console.log(
+    "║                                                        ║"
+  );
+
+  console.log(
+    "║  ✓ Users        ✓ Inventory       ✓ Transactions       ║"
+  );
+
+  console.log(
+    "║  ✓ Banking      ✓ Loans           ✓ Thread settings    ║"
+  );
+
+  console.log(
+    "║  ✓ XP / Ranks   ✓ Display names                         ║"
+  );
+
+  console.log(
+    "╚══════════════════════════════════════════════════════════╝"
+  );
 }
 
-// ============================================================
-// CONNECTION CHECK
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// CONNECTION GUARD
+// ═══════════════════════════════════════════════════════════
 
 function requireConn() {
   if (!pool) {
@@ -163,121 +250,185 @@ function requireConn() {
   return pool;
 }
 
-// ============================================================
-// USER
-// ============================================================
 
+// ═══════════════════════════════════════════════════════════
+// USER MANAGEMENT
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Get an existing user.
+ *
+ * If the user doesn't exist yet, automatically creates them
+ * with the starting balance and credit score.
+ */
 async function getUser(threadId, userId) {
   const conn = requireConn();
 
   threadId = String(threadId);
   userId = String(userId);
 
+
   const { rows } = await conn.query(
     `
     SELECT *
     FROM users
+
     WHERE thread_id = $1
       AND user_id = $2
     `,
-    [threadId, userId]
+    [
+      threadId,
+      userId,
+    ]
   );
 
-  if (rows.length === 0) {
-    await conn.query(
-      `
-      INSERT INTO users (
-        thread_id,
-        user_id,
-        balance,
-        bank_balance,
-        xp,
-        level,
-        credit_score
-      )
-      VALUES (
-        $1,
-        $2,
-        $3,
-        0,
-        0,
-        1,
-        $4
-      )
-      ON CONFLICT (thread_id, user_id)
-      DO NOTHING
-      `,
-      [
-        threadId,
-        userId,
-        STARTING_BALANCE,
-        STARTING_CREDIT_SCORE,
-      ]
-    );
 
-    const created = await conn.query(
-      `
-      SELECT *
-      FROM users
-      WHERE thread_id = $1
-        AND user_id = $2
-      `,
-      [threadId, userId]
-    );
-
-    return created.rows[0];
+  if (rows.length > 0) {
+    return rows[0];
   }
 
-  return rows[0];
+
+  // ─────────────────────────────────────────────────────────
+  // CREATE NEW USER
+  // ─────────────────────────────────────────────────────────
+
+  await conn.query(
+    `
+    INSERT INTO users (
+      thread_id,
+      user_id,
+      balance,
+      bank_balance,
+      xp,
+      level,
+      credit_score
+    )
+
+    VALUES (
+      $1,
+      $2,
+      $3,
+      0,
+      0,
+      1,
+      $4
+    )
+
+    ON CONFLICT (
+      thread_id,
+      user_id
+    )
+
+    DO NOTHING
+    `,
+    [
+      threadId,
+      userId,
+      STARTING_BALANCE,
+      STARTING_CREDIT_SCORE,
+    ]
+  );
+
+
+  const created = await conn.query(
+    `
+    SELECT *
+    FROM users
+
+    WHERE thread_id = $1
+      AND user_id = $2
+    `,
+    [
+      threadId,
+      userId,
+    ]
+  );
+
+
+  return created.rows[0];
 }
 
-// ============================================================
-// UPDATE USER
-// ============================================================
 
-async function updateUser(threadId, userId, fields) {
+// ═══════════════════════════════════════════════════════════
+// USER UPDATES
+// ═══════════════════════════════════════════════════════════
+
+async function updateUser(
+  threadId,
+  userId,
+  fields
+) {
   const conn = requireConn();
 
   threadId = String(threadId);
   userId = String(userId);
 
-  await getUser(threadId, userId);
 
+  // Make sure the user exists first.
+  await getUser(
+    threadId,
+    userId
+  );
+
+
+  // Only these database columns may be modified.
   const allowedFields = [
     "balance",
     "bank_balance",
+
     "last_daily",
     "last_work",
+
     "daily_streak",
     "games_played",
     "wins",
+
     "xp",
     "level",
+
     "credit_score",
+
     "loan_principal",
     "loan_remaining",
     "loan_due",
+
     "display_name",
   ];
 
-  const safeKeys = Object.keys(fields).filter((key) =>
-    allowedFields.includes(key)
-  );
+
+  const safeKeys =
+    Object.keys(fields).filter(
+      (key) =>
+        allowedFields.includes(key)
+    );
+
 
   if (safeKeys.length === 0) {
     return;
   }
 
-  const setClause = safeKeys
-    .map((key, index) => `${key} = $${index + 3}`)
-    .join(", ");
 
-  const values = safeKeys.map((key) => fields[key]);
+  const setClause =
+    safeKeys
+      .map(
+        (key, index) =>
+          `${key} = $${index + 3}`
+      )
+      .join(", ");
+
+
+  const values =
+    safeKeys.map(
+      (key) => fields[key]
+    );
+
 
   await conn.query(
     `
     UPDATE users
+
     SET ${setClause}
+
     WHERE thread_id = $1
       AND user_id = $2
     `,
@@ -289,48 +440,66 @@ async function updateUser(threadId, userId, fields) {
   );
 }
 
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
 // DISPLAY NAME
-// ============================================================
+// ═══════════════════════════════════════════════════════════
 
 async function setUserDisplayName(
   threadId,
   userId,
   displayName
 ) {
-  await getUser(threadId, userId);
+  await getUser(
+    threadId,
+    userId
+  );
 
-  const name = String(displayName || "")
-    .trim()
-    .slice(0, 100);
+
+  const name =
+    String(displayName || "")
+      .trim()
+      .slice(0, 100);
+
 
   if (!name) {
     return;
   }
 
-  await updateUser(threadId, userId, {
-    display_name: name,
-  });
+
+  await updateUser(
+    threadId,
+    userId,
+    {
+      display_name: name,
+    }
+  );
 }
 
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
 // WALLET
-// ============================================================
+// ═══════════════════════════════════════════════════════════
 
 async function addBalance(
   threadId,
   userId,
   amount
 ) {
-  const user = await getUser(
-    threadId,
-    userId
-  );
+  const user =
+    await getUser(
+      threadId,
+      userId
+    );
 
-  const newBalance = Math.max(
-    0,
-    Number(user.balance) + Number(amount)
-  );
+
+  const newBalance =
+    Math.max(
+      0,
+      Number(user.balance) +
+        Number(amount)
+    );
+
 
   await updateUser(
     threadId,
@@ -340,22 +509,26 @@ async function addBalance(
     }
   );
 
+
   return newBalance;
 }
 
-// ============================================================
-// GAME STATS
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// GAME STATISTICS
+// ═══════════════════════════════════════════════════════════
 
 async function incrementGameStats(
   threadId,
   userId,
   won
 ) {
-  const user = await getUser(
-    threadId,
-    userId
-  );
+  const user =
+    await getUser(
+      threadId,
+      userId
+    );
+
 
   await updateUser(
     threadId,
@@ -371,27 +544,37 @@ async function incrementGameStats(
   );
 }
 
-// ============================================================
-// XP
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// XP / LEVEL SYSTEM
+// ═══════════════════════════════════════════════════════════
 
 function calculateLevel(xp) {
-  xp = Math.max(
-    0,
-    Number(xp) || 0
-  );
+  xp =
+    Math.max(
+      0,
+      Number(xp) || 0
+    );
+
 
   return (
     Math.floor(
-      Math.sqrt(xp / 100)
+      Math.sqrt(
+        xp / 100
+      )
     ) + 1
   );
 }
 
-function getRank(xp) {
-  xp = Number(xp) || 0;
 
-  let current = RANKS[0];
+function getRank(xp) {
+  xp =
+    Number(xp) || 0;
+
+
+  let current =
+    RANKS[0];
+
 
   for (const rank of RANKS) {
     if (xp >= rank.xp) {
@@ -399,11 +582,15 @@ function getRank(xp) {
     }
   }
 
+
   return current;
 }
 
+
 function getNextRank(xp) {
-  xp = Number(xp) || 0;
+  xp =
+    Number(xp) || 0;
+
 
   for (const rank of RANKS) {
     if (xp < rank.xp) {
@@ -411,29 +598,39 @@ function getNextRank(xp) {
     }
   }
 
+
   return null;
 }
+
 
 async function addXP(
   threadId,
   userId,
   amount
 ) {
-  const user = await getUser(
-    threadId,
-    userId
-  );
+  const user =
+    await getUser(
+      threadId,
+      userId
+    );
+
 
   const oldXP =
     Number(user.xp) || 0;
 
-  const newXP = Math.max(
-    0,
-    oldXP + Number(amount)
-  );
+
+  const newXP =
+    Math.max(
+      0,
+      oldXP + Number(amount)
+    );
+
 
   const newLevel =
-    calculateLevel(newXP);
+    calculateLevel(
+      newXP
+    );
+
 
   await updateUser(
     threadId,
@@ -444,78 +641,111 @@ async function addXP(
     }
   );
 
+
   return {
     xp: newXP,
+
     level: newLevel,
-    rank: getRank(newXP),
-    nextRank: getNextRank(newXP),
+
+    rank:
+      getRank(newXP),
+
+    nextRank:
+      getNextRank(newXP),
   };
 }
 
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
 // FULL PLAYER RANKING DETAILS
-// ============================================================
+// ═══════════════════════════════════════════════════════════
 
 async function getPlayerRanking(
   threadId,
   userId
 ) {
-  const user = await getUser(
-    threadId,
-    userId
-  );
+  const user =
+    await getUser(
+      threadId,
+      userId
+    );
+
 
   const xp =
     Number(user.xp) || 0;
+
 
   const level =
     Number(user.level) ||
     calculateLevel(xp);
 
+
   const currentRank =
     getRank(xp);
+
 
   const nextRank =
     getNextRank(xp);
 
+
   const displayName =
     user.display_name &&
-    String(user.display_name).trim()
-      ? String(user.display_name).trim()
+    String(
+      user.display_name
+    ).trim()
+
+      ? String(
+          user.display_name
+        ).trim()
+
       : `Player ${user.user_id}`;
 
+
+  // ─────────────────────────────────────────────────────────
+  // RANK PROGRESS
+  // ─────────────────────────────────────────────────────────
+
   let progress = 100;
+
 
   if (nextRank) {
     const range =
       nextRank.xp -
       currentRank.xp;
 
+
     const earned =
       xp -
       currentRank.xp;
 
-    progress = Math.floor(
-      Math.min(
-        100,
-        Math.max(
-          0,
-          (earned / range) * 100
+
+    progress =
+      Math.floor(
+        Math.min(
+          100,
+          Math.max(
+            0,
+            (earned / range) * 100
+          )
         )
-      )
-    );
+      );
   }
 
+
   return {
-    userId: String(user.user_id),
+    userId:
+      String(user.user_id),
 
     displayName,
 
     xp,
     level,
 
-    rank: currentRank.name,
-    rankXP: currentRank.xp,
+    rank:
+      currentRank.name,
+
+    rankXP:
+      currentRank.xp,
 
     nextRank:
       nextRank
@@ -562,28 +792,39 @@ async function getPlayerRanking(
   };
 }
 
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
 // WALLET LEADERBOARD
-// ============================================================
+// ═══════════════════════════════════════════════════════════
 
 async function leaderboard(
   threadId,
   limit = 10
 ) {
-  const conn = requireConn();
+  const conn =
+    requireConn();
 
-  const safeLimit = Math.min(
-    50,
-    Math.max(1, Number(limit) || 10)
-  );
+
+  const safeLimit =
+    Math.min(
+      50,
+      Math.max(
+        1,
+        Number(limit) || 10
+      )
+    );
+
 
   const { rows } =
     await conn.query(
       `
       SELECT *
       FROM users
+
       WHERE thread_id = $1
+
       ORDER BY balance DESC
+
       LIMIT $2
       `,
       [
@@ -592,33 +833,49 @@ async function leaderboard(
       ]
     );
 
+
   return rows;
 }
 
-// ============================================================
-// MONEY LEADERBOARD
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// TOTAL MONEY LEADERBOARD
+// ═══════════════════════════════════════════════════════════
 
 async function moneyLeaderboard(
   threadId,
   limit = 10
 ) {
-  const conn = requireConn();
+  const conn =
+    requireConn();
 
-  const safeLimit = Math.min(
-    50,
-    Math.max(1, Number(limit) || 10)
-  );
+
+  const safeLimit =
+    Math.min(
+      50,
+      Math.max(
+        1,
+        Number(limit) || 10
+      )
+    );
+
 
   const { rows } =
     await conn.query(
       `
       SELECT
         *,
-        (balance + bank_balance) AS total_money
+        (
+          balance +
+          bank_balance
+        ) AS total_money
+
       FROM users
+
       WHERE thread_id = $1
+
       ORDER BY total_money DESC
+
       LIMIT $2
       `,
       [
@@ -627,23 +884,32 @@ async function moneyLeaderboard(
       ]
     );
 
+
   return rows;
 }
 
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
 // XP LEADERBOARD
-// ============================================================
+// ═══════════════════════════════════════════════════════════
 
 async function xpLeaderboard(
   threadId,
   limit = 10
 ) {
-  const conn = requireConn();
+  const conn =
+    requireConn();
 
-  const safeLimit = Math.min(
-    50,
-    Math.max(1, Number(limit) || 10)
-  );
+
+  const safeLimit =
+    Math.min(
+      50,
+      Math.max(
+        1,
+        Number(limit) || 10
+      )
+    );
+
 
   const { rows } =
     await conn.query(
@@ -651,15 +917,25 @@ async function xpLeaderboard(
       SELECT
         user_id,
         display_name,
+
         xp,
         level,
+
         balance,
         bank_balance,
+
         games_played,
         wins
+
       FROM users
+
       WHERE thread_id = $1
-      ORDER BY xp DESC, level DESC, user_id ASC
+
+      ORDER BY
+        xp DESC,
+        level DESC,
+        user_id ASC
+
       LIMIT $2
       `,
       [
@@ -668,21 +944,32 @@ async function xpLeaderboard(
       ]
     );
 
+
   return rows.map(
     (row, index) => {
       const xp =
         Number(row.xp) || 0;
 
+
       return {
-        position: index + 1,
+        position:
+          index + 1,
 
         userId:
-          String(row.user_id),
+          String(
+            row.user_id
+          ),
 
         displayName:
           row.display_name &&
-          String(row.display_name).trim()
-            ? String(row.display_name).trim()
+          String(
+            row.display_name
+          ).trim()
+
+            ? String(
+                row.display_name
+              ).trim()
+
             : `Player ${row.user_id}`,
 
         xp,
@@ -710,18 +997,21 @@ async function xpLeaderboard(
   );
 }
 
-// ============================================================
-// BANK DEPOSIT
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// BANK — DEPOSIT
+// ═══════════════════════════════════════════════════════════
 
 async function deposit(
   threadId,
   userId,
   amount
 ) {
-  amount = Math.floor(
-    Number(amount)
-  );
+  amount =
+    Math.floor(
+      Number(amount)
+    );
+
 
   if (
     !Number.isFinite(amount) ||
@@ -732,6 +1022,7 @@ async function deposit(
     );
   }
 
+
   // Make sure the user exists BEFORE
   // checking out the transaction client.
   await getUser(
@@ -739,19 +1030,26 @@ async function deposit(
     userId
   );
 
+
   const client =
     await requireConn().connect();
 
+
   try {
-    await client.query("BEGIN");
+    await client.query(
+      "BEGIN"
+    );
+
 
     const { rows } =
       await client.query(
         `
         SELECT *
         FROM users
+
         WHERE thread_id = $1
           AND user_id = $2
+
         FOR UPDATE
         `,
         [
@@ -760,13 +1058,17 @@ async function deposit(
         ]
       );
 
-    const user = rows[0];
+
+    const user =
+      rows[0];
+
 
     if (!user) {
       throw new Error(
         "User not found."
       );
     }
+
 
     if (
       Number(user.balance) <
@@ -777,12 +1079,18 @@ async function deposit(
       );
     }
 
+
     await client.query(
       `
       UPDATE users
+
       SET
-        balance = balance - $3,
-        bank_balance = bank_balance + $3
+        balance =
+          balance - $3,
+
+        bank_balance =
+          bank_balance + $3
+
       WHERE thread_id = $1
         AND user_id = $2
       `,
@@ -793,26 +1101,26 @@ async function deposit(
       ]
     );
 
+
     await client.query(
       `
-      INSERT INTO economy_transactions
-        (
-          thread_id,
-          user_id,
-          type,
-          amount,
-          description,
-          created_at
-        )
-      VALUES
-        (
-          $1,
-          $2,
-          'deposit',
-          $3,
-          'Bank deposit',
-          $4
-        )
+      INSERT INTO economy_transactions (
+        thread_id,
+        user_id,
+        type,
+        amount,
+        description,
+        created_at
+      )
+
+      VALUES (
+        $1,
+        $2,
+        'deposit',
+        $3,
+        'Bank deposit',
+        $4
+      )
       `,
       [
         String(threadId),
@@ -822,32 +1130,46 @@ async function deposit(
       ]
     );
 
-    await client.query("COMMIT");
+
+    await client.query(
+      "COMMIT"
+    );
+
 
     return getUser(
       threadId,
       userId
     );
+
   } catch (error) {
-    await client.query("ROLLBACK");
+
+    await client.query(
+      "ROLLBACK"
+    );
+
     throw error;
+
   } finally {
+
     client.release();
   }
 }
 
-// ============================================================
-// BANK WITHDRAW
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// BANK — WITHDRAW
+// ═══════════════════════════════════════════════════════════
 
 async function withdraw(
   threadId,
   userId,
   amount
 ) {
-  amount = Math.floor(
-    Number(amount)
-  );
+  amount =
+    Math.floor(
+      Number(amount)
+    );
+
 
   if (
     !Number.isFinite(amount) ||
@@ -858,24 +1180,32 @@ async function withdraw(
     );
   }
 
+
   await getUser(
     threadId,
     userId
   );
 
+
   const client =
     await requireConn().connect();
 
+
   try {
-    await client.query("BEGIN");
+    await client.query(
+      "BEGIN"
+    );
+
 
     const { rows } =
       await client.query(
         `
         SELECT *
         FROM users
+
         WHERE thread_id = $1
           AND user_id = $2
+
         FOR UPDATE
         `,
         [
@@ -884,13 +1214,17 @@ async function withdraw(
         ]
       );
 
-    const user = rows[0];
+
+    const user =
+      rows[0];
+
 
     if (!user) {
       throw new Error(
         "User not found."
       );
     }
+
 
     if (
       Number(user.bank_balance) <
@@ -901,12 +1235,18 @@ async function withdraw(
       );
     }
 
+
     await client.query(
       `
       UPDATE users
+
       SET
-        bank_balance = bank_balance - $3,
-        balance = balance + $3
+        bank_balance =
+          bank_balance - $3,
+
+        balance =
+          balance + $3
+
       WHERE thread_id = $1
         AND user_id = $2
       `,
@@ -917,26 +1257,26 @@ async function withdraw(
       ]
     );
 
+
     await client.query(
       `
-      INSERT INTO economy_transactions
-        (
-          thread_id,
-          user_id,
-          type,
-          amount,
-          description,
-          created_at
-        )
-      VALUES
-        (
-          $1,
-          $2,
-          'withdraw',
-          $3,
-          'Bank withdrawal',
-          $4
-        )
+      INSERT INTO economy_transactions (
+        thread_id,
+        user_id,
+        type,
+        amount,
+        description,
+        created_at
+      )
+
+      VALUES (
+        $1,
+        $2,
+        'withdraw',
+        $3,
+        'Bank withdrawal',
+        $4
+      )
       `,
       [
         String(threadId),
@@ -946,23 +1286,35 @@ async function withdraw(
       ]
     );
 
-    await client.query("COMMIT");
+
+    await client.query(
+      "COMMIT"
+    );
+
 
     return getUser(
       threadId,
       userId
     );
+
   } catch (error) {
-    await client.query("ROLLBACK");
+
+    await client.query(
+      "ROLLBACK"
+    );
+
     throw error;
+
   } finally {
+
     client.release();
   }
 }
 
-// ============================================================
-// TRANSFER
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// TRANSFERS
+// ═══════════════════════════════════════════════════════════
 
 async function transfer(
   threadId,
@@ -970,9 +1322,11 @@ async function transfer(
   toUserId,
   amount
 ) {
-  amount = Math.floor(
-    Number(amount)
-  );
+  amount =
+    Math.floor(
+      Number(amount)
+    );
+
 
   if (
     !Number.isFinite(amount) ||
@@ -983,11 +1337,13 @@ async function transfer(
     );
   }
 
+
   fromUserId =
     String(fromUserId);
 
   toUserId =
     String(toUserId);
+
 
   if (
     fromUserId === toUserId
@@ -997,41 +1353,59 @@ async function transfer(
     );
   }
 
+
   await getUser(
     threadId,
     fromUserId
   );
+
 
   await getUser(
     threadId,
     toUserId
   );
 
+
   const client =
     await requireConn().connect();
 
-  try {
-    await client.query("BEGIN");
 
-    // Always lock IDs in a consistent
-    // order to reduce deadlock risk.
+  try {
+    await client.query(
+      "BEGIN"
+    );
+
+
+    // ───────────────────────────────────────────────────────
+    // LOCK USERS IN CONSISTENT ORDER
+    //
+    // This reduces the risk of database deadlocks when two
+    // transfers happen at the same time in opposite directions.
+    // ───────────────────────────────────────────────────────
+
     const firstId =
       fromUserId < toUserId
         ? fromUserId
         : toUserId;
+
 
     const secondId =
       fromUserId < toUserId
         ? toUserId
         : fromUserId;
 
+
     await client.query(
       `
       SELECT user_id
+
       FROM users
+
       WHERE thread_id = $1
         AND user_id IN ($2, $3)
+
       ORDER BY user_id
+
       FOR UPDATE
       `,
       [
@@ -1041,11 +1415,13 @@ async function transfer(
       ]
     );
 
+
     const senderResult =
       await client.query(
         `
         SELECT *
         FROM users
+
         WHERE thread_id = $1
           AND user_id = $2
         `,
@@ -1055,8 +1431,10 @@ async function transfer(
         ]
       );
 
+
     const sender =
       senderResult.rows[0];
+
 
     if (
       Number(sender.balance) <
@@ -1067,10 +1445,18 @@ async function transfer(
       );
     }
 
+
+    // ───────────────────────────────────────────────────────
+    // REMOVE FROM SENDER
+    // ───────────────────────────────────────────────────────
+
     await client.query(
       `
       UPDATE users
-      SET balance = balance - $3
+
+      SET balance =
+        balance - $3
+
       WHERE thread_id = $1
         AND user_id = $2
       `,
@@ -1081,10 +1467,18 @@ async function transfer(
       ]
     );
 
+
+    // ───────────────────────────────────────────────────────
+    // ADD TO RECEIVER
+    // ───────────────────────────────────────────────────────
+
     await client.query(
       `
       UPDATE users
-      SET balance = balance + $3
+
+      SET balance =
+        balance + $3
+
       WHERE thread_id = $1
         AND user_id = $2
       `,
@@ -1095,26 +1489,30 @@ async function transfer(
       ]
     );
 
+
+    // ───────────────────────────────────────────────────────
+    // SENDER TRANSACTION
+    // ───────────────────────────────────────────────────────
+
     await client.query(
       `
-      INSERT INTO economy_transactions
-        (
-          thread_id,
-          user_id,
-          type,
-          amount,
-          description,
-          created_at
-        )
-      VALUES
-        (
-          $1,
-          $2,
-          'transfer_sent',
-          $3,
-          $4,
-          $5
-        )
+      INSERT INTO economy_transactions (
+        thread_id,
+        user_id,
+        type,
+        amount,
+        description,
+        created_at
+      )
+
+      VALUES (
+        $1,
+        $2,
+        'transfer_sent',
+        $3,
+        $4,
+        $5
+      )
       `,
       [
         String(threadId),
@@ -1125,26 +1523,30 @@ async function transfer(
       ]
     );
 
+
+    // ───────────────────────────────────────────────────────
+    // RECEIVER TRANSACTION
+    // ───────────────────────────────────────────────────────
+
     await client.query(
       `
-      INSERT INTO economy_transactions
-        (
-          thread_id,
-          user_id,
-          type,
-          amount,
-          description,
-          created_at
-        )
-      VALUES
-        (
-          $1,
-          $2,
-          'transfer_received',
-          $3,
-          $4,
-          $5
-        )
+      INSERT INTO economy_transactions (
+        thread_id,
+        user_id,
+        type,
+        amount,
+        description,
+        created_at
+      )
+
+      VALUES (
+        $1,
+        $2,
+        'transfer_received',
+        $3,
+        $4,
+        $5
+      )
       `,
       [
         String(threadId),
@@ -1155,29 +1557,43 @@ async function transfer(
       ]
     );
 
-    await client.query("COMMIT");
+
+    await client.query(
+      "COMMIT"
+    );
+
 
     return true;
+
   } catch (error) {
-    await client.query("ROLLBACK");
+
+    await client.query(
+      "ROLLBACK"
+    );
+
     throw error;
+
   } finally {
+
     client.release();
   }
 }
 
-// ============================================================
-// LOANS
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// LOANS — APPLY
+// ═══════════════════════════════════════════════════════════
 
 async function applyLoan(
   threadId,
   userId,
   amount
 ) {
-  amount = Math.floor(
-    Number(amount)
-  );
+  amount =
+    Math.floor(
+      Number(amount)
+    );
+
 
   if (
     !Number.isFinite(amount) ||
@@ -1188,11 +1604,13 @@ async function applyLoan(
     );
   }
 
+
   const user =
     await getUser(
       threadId,
       userId
     );
+
 
   if (
     Number(user.loan_remaining) > 0
@@ -1202,6 +1620,7 @@ async function applyLoan(
     );
   }
 
+
   const maxLoan =
     Math.max(
       500,
@@ -1210,13 +1629,19 @@ async function applyLoan(
       )
     );
 
-  if (amount > maxLoan) {
+
+  if (
+    amount > maxLoan
+  ) {
     throw new Error(
       `Your credit score allows a maximum loan of ${maxLoan} coins.`
     );
   }
 
+
+  // 10% simulated interest.
   const interestRate = 0.10;
+
 
   const totalDue =
     Math.ceil(
@@ -1224,9 +1649,16 @@ async function applyLoan(
       (1 + interestRate)
     );
 
+
+  // Seven-day repayment period.
   const dueDate =
     Date.now() +
-    7 * 24 * 60 * 60 * 1000;
+    7 *
+      24 *
+      60 *
+      60 *
+      1000;
+
 
   await updateUser(
     threadId,
@@ -1247,21 +1679,32 @@ async function applyLoan(
     }
   );
 
+
   return {
-    principal: amount,
+    principal:
+      amount,
+
     totalDue,
+
     dueDate,
   };
 }
+
+
+// ═══════════════════════════════════════════════════════════
+// LOANS — PAYMENT
+// ═══════════════════════════════════════════════════════════
 
 async function payLoan(
   threadId,
   userId,
   amount
 ) {
-  amount = Math.floor(
-    Number(amount)
-  );
+  amount =
+    Math.floor(
+      Number(amount)
+    );
+
 
   if (
     !Number.isFinite(amount) ||
@@ -1272,11 +1715,13 @@ async function payLoan(
     );
   }
 
+
   const user =
     await getUser(
       threadId,
       userId
     );
+
 
   if (
     Number(user.loan_remaining) <= 0
@@ -1286,6 +1731,7 @@ async function payLoan(
     );
   }
 
+
   if (
     Number(user.balance) < amount
   ) {
@@ -1294,27 +1740,36 @@ async function payLoan(
     );
   }
 
+
   const payment =
     Math.min(
       amount,
       Number(user.loan_remaining)
     );
 
+
   const remaining =
     Number(user.loan_remaining) -
     payment;
+
 
   let creditScore =
     Number(user.credit_score) ||
     STARTING_CREDIT_SCORE;
 
-  if (remaining === 0) {
+
+  // Reward the player for completely
+  // paying off their loan.
+  if (
+    remaining === 0
+  ) {
     creditScore =
       Math.min(
         850,
         creditScore + 20
       );
   }
+
 
   await updateUser(
     threadId,
@@ -1333,7 +1788,9 @@ async function payLoan(
       loan_principal:
         remaining === 0
           ? 0
-          : Number(user.loan_principal),
+          : Number(
+              user.loan_principal
+            ),
 
       loan_due:
         remaining === 0
@@ -1342,16 +1799,20 @@ async function payLoan(
     }
   );
 
+
   return {
     payment,
+
     remaining,
+
     creditScore,
   };
 }
 
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
 // BANK INTEREST
-// ============================================================
+// ═══════════════════════════════════════════════════════════
 
 async function applyBankInterest(
   threadId,
@@ -1363,39 +1824,53 @@ async function applyBankInterest(
       userId
     );
 
-  const bankBalance =
-    Number(user.bank_balance) || 0;
 
-  if (bankBalance <= 0) {
+  const bankBalance =
+    Number(
+      user.bank_balance
+    ) || 0;
+
+
+  if (
+    bankBalance <= 0
+  ) {
     return 0;
   }
 
+
   // 1% simulated bank interest.
-  // Called by !bank / economy flow.
+  // Called by the !bank / economy flow.
   const interest =
     Math.floor(
       bankBalance * 0.01
     );
 
-  if (interest <= 0) {
+
+  if (
+    interest <= 0
+  ) {
     return 0;
   }
+
 
   await updateUser(
     threadId,
     userId,
     {
       bank_balance:
-        bankBalance + interest,
+        bankBalance +
+        interest,
     }
   );
+
 
   return interest;
 }
 
-// ============================================================
-// INVENTORY
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// INVENTORY — ADD ITEM
+// ═══════════════════════════════════════════════════════════
 
 async function addItem(
   threadId,
@@ -1403,24 +1878,32 @@ async function addItem(
   itemId,
   amount = 1
 ) {
-  const conn = requireConn();
+  const conn =
+    requireConn();
+
 
   await conn.query(
     `
-    INSERT INTO inventory
-      (
-        thread_id,
-        user_id,
-        item_id,
-        amount
-      )
-    VALUES
-      ($1, $2, $3, $4)
+    INSERT INTO inventory (
+      thread_id,
+      user_id,
+      item_id,
+      amount
+    )
+
+    VALUES (
+      $1,
+      $2,
+      $3,
+      $4
+    )
+
     ON CONFLICT (
       thread_id,
       user_id,
       item_id
     )
+
     DO UPDATE SET
       amount =
         inventory.amount +
@@ -1435,17 +1918,28 @@ async function addItem(
   );
 }
 
+
+// ═══════════════════════════════════════════════════════════
+// INVENTORY — GET
+// ═══════════════════════════════════════════════════════════
+
 async function getInventory(
   threadId,
   userId
 ) {
-  const conn = requireConn();
+  const conn =
+    requireConn();
+
 
   const { rows } =
     await conn.query(
       `
-      SELECT item_id, amount
+      SELECT
+        item_id,
+        amount
+
       FROM inventory
+
       WHERE thread_id = $1
         AND user_id = $2
         AND amount > 0
@@ -1456,80 +1950,116 @@ async function getInventory(
       ]
     );
 
+
   const result = {};
+
 
   for (const row of rows) {
     result[row.item_id] =
       Number(row.amount);
   }
 
+
   return result;
 }
 
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
 // THREAD SETTINGS
-// ============================================================
+// ═══════════════════════════════════════════════════════════
 
 async function getThreadSettings(
   threadId
 ) {
-  const conn = requireConn();
+  const conn =
+    requireConn();
+
 
   const id =
     String(threadId);
+
 
   const { rows } =
     await conn.query(
       `
       SELECT *
       FROM thread_settings
+
       WHERE thread_id = $1
       `,
       [id]
     );
 
+
   if (rows.length === 0) {
+
     await conn.query(
       `
-      INSERT INTO thread_settings
-        (
-          thread_id,
-          roast_enabled,
-          fun_enabled
-        )
-      VALUES
-        ($1, TRUE, TRUE)
-      ON CONFLICT (thread_id)
+      INSERT INTO thread_settings (
+        thread_id,
+        roast_enabled,
+        fun_enabled
+      )
+
+      VALUES (
+        $1,
+        TRUE,
+        TRUE
+      )
+
+      ON CONFLICT (
+        thread_id
+      )
+
       DO NOTHING
       `,
       [id]
     );
 
+
     return {
-      thread_id: id,
-      roast_enabled: true,
-      fun_enabled: true,
+      thread_id:
+        id,
+
+      roast_enabled:
+        true,
+
+      fun_enabled:
+        true,
     };
   }
 
+
   return rows[0];
 }
+
+
+// ═══════════════════════════════════════════════════════════
+// THREAD SETTINGS — UPDATE
+// ═══════════════════════════════════════════════════════════
 
 async function setThreadSettings(
   threadId,
   fields
 ) {
-  const conn = requireConn();
+  const conn =
+    requireConn();
+
 
   const id =
     String(threadId);
 
-  await getThreadSettings(id);
+
+  await getThreadSettings(
+    id
+  );
+
 
   const allowedFields = [
     "roast_enabled",
     "fun_enabled",
   ];
+
 
   const safeFields =
     Object.keys(fields).filter(
@@ -1537,9 +2067,15 @@ async function setThreadSettings(
         allowedFields.includes(key)
     );
 
-  if (safeFields.length === 0) {
-    return getThreadSettings(id);
+
+  if (
+    safeFields.length === 0
+  ) {
+    return getThreadSettings(
+      id
+    );
   }
+
 
   const setClause =
     safeFields
@@ -1549,15 +2085,19 @@ async function setThreadSettings(
       )
       .join(", ");
 
+
   const values =
     safeFields.map(
       (key) => fields[key]
     );
 
+
   await conn.query(
     `
     UPDATE thread_settings
+
     SET ${setClause}
+
     WHERE thread_id = $1
     `,
     [
@@ -1566,12 +2106,16 @@ async function setThreadSettings(
     ]
   );
 
-  return getThreadSettings(id);
+
+  return getThreadSettings(
+    id
+  );
 }
 
-// ============================================================
-// BANAT / ROAST
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// ROAST / BANAT SETTINGS
+// ═══════════════════════════════════════════════════════════
 
 async function isRoastEnabled(
   threadId
@@ -1581,10 +2125,12 @@ async function isRoastEnabled(
       threadId
     );
 
+
   return (
     settings.roast_enabled === true
   );
 }
+
 
 async function setRoastEnabled(
   threadId,
@@ -1599,9 +2145,10 @@ async function setRoastEnabled(
   );
 }
 
-// ============================================================
-// GAMES ENABLED
-// ============================================================
+
+// ═══════════════════════════════════════════════════════════
+// GAME SETTINGS
+// ═══════════════════════════════════════════════════════════
 
 async function isGameEnabled(
   threadId
@@ -1611,10 +2158,12 @@ async function isGameEnabled(
       threadId
     );
 
+
   return (
     settings.fun_enabled === true
   );
 }
+
 
 async function setGameEnabled(
   threadId,
@@ -1629,61 +2178,115 @@ async function setGameEnabled(
   );
 }
 
-// ============================================================
-// EXPORTS
-// ============================================================
+
+// ╔══════════════════════════════════════════════════════════╗
+// ║                         EXPORTS                          ║
+// ╚══════════════════════════════════════════════════════════╝
 
 module.exports = {
+
+  // ─────────────────────────────────────────────────────────
+  // DATABASE
+  // ─────────────────────────────────────────────────────────
+
   connect,
 
-  // Users
+
+  // ─────────────────────────────────────────────────────────
+  // USERS
+  // ─────────────────────────────────────────────────────────
+
   getUser,
   updateUser,
   setUserDisplayName,
 
-  // Wallet
+
+  // ─────────────────────────────────────────────────────────
+  // WALLET
+  // ─────────────────────────────────────────────────────────
+
   addBalance,
 
-  // Stats
+
+  // ─────────────────────────────────────────────────────────
+  // GAME STATS
+  // ─────────────────────────────────────────────────────────
+
   incrementGameStats,
 
-  // XP / ranks
+
+  // ─────────────────────────────────────────────────────────
+  // XP / RANKS
+  // ─────────────────────────────────────────────────────────
+
   addXP,
   calculateLevel,
   getRank,
   getNextRank,
   getPlayerRanking,
 
-  // Leaderboards
+
+  // ─────────────────────────────────────────────────────────
+  // LEADERBOARDS
+  // ─────────────────────────────────────────────────────────
+
   leaderboard,
   moneyLeaderboard,
   xpLeaderboard,
 
-  // Bank
+
+  // ─────────────────────────────────────────────────────────
+  // BANK
+  // ─────────────────────────────────────────────────────────
+
   deposit,
   withdraw,
   applyBankInterest,
 
-  // Transfers
+
+  // ─────────────────────────────────────────────────────────
+  // TRANSFERS
+  // ─────────────────────────────────────────────────────────
+
   transfer,
 
-  // Loans
+
+  // ─────────────────────────────────────────────────────────
+  // LOANS
+  // ─────────────────────────────────────────────────────────
+
   applyLoan,
   payLoan,
 
-  // Inventory
+
+  // ─────────────────────────────────────────────────────────
+  // INVENTORY
+  // ─────────────────────────────────────────────────────────
+
   addItem,
   getInventory,
 
-  // Thread settings
+
+  // ─────────────────────────────────────────────────────────
+  // THREAD SETTINGS
+  // ─────────────────────────────────────────────────────────
+
   getThreadSettings,
   setThreadSettings,
 
-  // Banat
+
+  // ─────────────────────────────────────────────────────────
+  // ROAST / BANAT
+  // ─────────────────────────────────────────────────────────
+
   isRoastEnabled,
   setRoastEnabled,
 
-  // Games
+
+  // ─────────────────────────────────────────────────────────
+  // GAMES
+  // ─────────────────────────────────────────────────────────
+
   isGameEnabled,
   setGameEnabled,
 };
