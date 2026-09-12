@@ -46,11 +46,8 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .map((id) => id.trim())
   .filter(Boolean);
 
-// This controls whether the automatic public-roast system is enabled
-// globally through the environment variable.
-//
-// IMPORTANT:
-// This is separate from the per-thread !banat on/off setting stored in Neon.
+// Global automatic roast switch.
+// Individual groups can still use !banat on/off.
 const RANDOM_ROAST_ENABLED = !/^(0|false|no|off)$/i.test(
   process.env.RANDOM_ROAST || ""
 );
@@ -64,9 +61,8 @@ const RANDOM_ROAST_COOLDOWN_MS =
     ? parsedCooldown
     : 30_000;
 
-// Temporary in-memory cooldown tracking.
-// This is NOT used to store whether banat is enabled.
-// Banat settings are stored permanently in Neon.
+// Temporary cooldown tracking.
+// Persistent banat settings are stored in Neon.
 const lastRandomRoastByThread = new Map();
 
 // Threads seen while the bot is running.
@@ -133,17 +129,13 @@ function sendMessengerMessage(api, message, threadID) {
 // YouTube audio
 // ---------------------------------------------------------------------------
 
-/**
- * Searches YouTube, downloads the audio, sends it to Messenger,
- * and removes the temporary file afterward.
- */
 async function sendAudioTrack(api, requestedSong, threadID) {
   if (
     typeof requestedSong !== "string" ||
     !requestedSong.trim()
   ) {
     api.sendMessage(
-      "Usage: !play <song name>",
+      "🎵 Usage: !play <song name>",
       threadID,
       (error) => {
         if (error) {
@@ -193,7 +185,7 @@ async function sendAudioTrack(api, requestedSong, threadID) {
           temporaryFile
         ),
       YOUTUBE_DOWNLOAD_TIMEOUT_MS,
-      "YouTube download timed out after 3 minutes. The host may be blocked by YouTube; please try again."
+      "YouTube download timed out after 3 minutes. Please try again."
     );
 
     const fileInfo = await fsp.stat(temporaryFile);
@@ -238,9 +230,7 @@ async function sendAudioTrack(api, requestedSong, threadID) {
   } finally {
     await fsp
       .unlink(temporaryFile)
-      .catch(() => {
-        // File may not have been created.
-      });
+      .catch(() => {});
   }
 }
 
@@ -310,7 +300,6 @@ function readAppState() {
   try {
     parsed = JSON.parse(rawCookies);
 
-    // Supports JSON encoded JSON string.
     if (typeof parsed === "string") {
       parsed = JSON.parse(parsed);
     }
@@ -410,7 +399,7 @@ login(
     );
 
     // -----------------------------------------------------------------------
-    // Connect Neon BEFORE starting the Messenger listener.
+    // Connect Neon BEFORE Messenger listener
     // -----------------------------------------------------------------------
 
     try {
@@ -425,8 +414,6 @@ login(
         error
       );
 
-      // The bot now depends on Neon for persistent economy,
-      // games, and thread settings, so don't start half-working.
       process.exit(1);
     }
 
@@ -448,7 +435,7 @@ login(
 
     if (startupThreadID) {
       api.sendMessage(
-        "Bot is online ✅",
+        "🟢 Bot is online and ready.",
         startupThreadID,
         (sendError) => {
           if (sendError) {
@@ -511,9 +498,6 @@ login(
           event.type === "message" ||
           event.type === "message_reply"
         ) {
-          // handleMessage is async.
-          // We intentionally don't await it here because
-          // the Messenger listener callback itself is synchronous.
           void handleMessage(
             api,
             event
@@ -559,12 +543,7 @@ async function handleMessage(
     String(senderID || "").trim();
 
   // -------------------------------------------------------------------------
-  // Economy + games FIRST
-  // -------------------------------------------------------------------------
-  //
-  // These need to be awaited and returned properly.
-  // This prevents commands such as !blackjack, !hit,
-  // trivia answers, etc. from continuing into the roast system.
+  // Games FIRST
   // -------------------------------------------------------------------------
 
   try {
@@ -605,7 +584,7 @@ async function handleMessage(
   if (text === "!ping") {
     sendReplyWithTyping(
       api,
-      "pong 🏓",
+      "🏓 Pong!",
       threadID
     );
 
@@ -613,37 +592,127 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-  // Help
+  // HELP
   // -------------------------------------------------------------------------
 
   if (text === "!help") {
     sendReplyWithTyping(
       api,
       [
-        "Commands:",
-        "!ping - health check",
-        "!help - this message",
-        "!play <song> - send an audio track",
-        "!rizz <name> - random rizz meter",
-        "!aura <name> - random aura points",
-        "!iq <name> - random IQ score",
-        "!simp <name> - random simp meter",
-        "!clown <name> - random clown meter",
-        "!broadcast <text> - admin only",
+        "╭━━━━━━━━━━━━━━━━━━━━╮",
+        "       🤖 BOT MENU",
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
         "",
-        "Banat:",
-        "!banat on - enable banat",
-        "!banat off - disable banat",
+        "⚡ GENERAL",
+        "• !ping",
+        "  Check if the bot is online.",
         "",
-        "Economy:",
-        "!balance / !daily / !work / !pay / !leaderboard",
-        "!shop / !buy <item> / !inventory",
+        "• !help",
+        "  Show this command menu.",
         "",
-        "Games:",
-        "!games",
-        "!game on / !game off",
-        "!trivia / !rps / !roll / !guess",
-        "!coinflip / !slots / !blackjack / !8ball",
+        "🎵 MUSIC",
+        "• !play <song>",
+        "  Search YouTube and send the audio.",
+        "  Example: !play Die With A Smile",
+        "",
+        "✨ FUN",
+        "• !rizz <name>",
+        "  Random rizz score.",
+        "",
+        "• !aura <name>",
+        "  Random aura points.",
+        "",
+        "• !iq <name>",
+        "  Random IQ score.",
+        "",
+        "• !simp <name>",
+        "  Random simp percentage.",
+        "",
+        "• !clown <name>",
+        "  Random clown percentage.",
+        "",
+        "🔥 BANAT",
+        "• !banat on",
+        "  Turn automatic banat ON.",
+        "",
+        "• !banat off",
+        "  Turn automatic banat OFF.",
+        "",
+        "💰 ECONOMY",
+        "• !balance / !bal",
+        "  Check your coins.",
+        "",
+        "• !daily",
+        "  Claim your daily coins.",
+        "",
+        "• !work",
+        "  Work for coins.",
+        "",
+        "• !pay <amount>",
+        "  Pay someone by replying to them.",
+        "",
+        "• !leaderboard / !lb",
+        "  View the richest players.",
+        "",
+        "• !shop",
+        "  View available items.",
+        "",
+        "• !buy <item>",
+        "  Purchase an item.",
+        "",
+        "• !inventory / !inv",
+        "  View your items.",
+        "",
+        "🎮 GAMES",
+        "• !games",
+        "  Open the full Game Center + rules.",
+        "",
+        "• !game on",
+        "  Enable games in this group.",
+        "",
+        "• !game off",
+        "  Disable games in this group.",
+        "",
+        "🧠 !trivia",
+        "  Answer A, B, C, or D.",
+        "  Correct answers earn coins.",
+        "",
+        "✊ !rps <choice> [bet]",
+        "  Rock, Paper, Scissors.",
+        "  Win = 2× • Tie = refund.",
+        "",
+        "🎲 !roll <bet>",
+        "  Roll a d100.",
+        "  55+ wins 2×.",
+        "",
+        "🎯 !guess <1-10> [bet]",
+        "  Guess the secret number.",
+        "  Exact guess = 5×.",
+        "",
+        "🪙 !coinflip <bet> <heads/tails>",
+        "  Pick heads or tails.",
+        "  Correct = 2×.",
+        "",
+        "🎰 !slots <bet>",
+        "  Spin the slot machine.",
+        "  Matching symbols pay out.",
+        "",
+        "🃏 !blackjack <bet>",
+        "  Play against the dealer.",
+        "  Use !hit or !stand.",
+        "",
+        "🔮 !8ball <question>",
+        "  Ask the Magic 8-Ball.",
+        "",
+        "👑 ADMIN",
+        "• !broadcast <text>",
+        "  Send a message to active threads.",
+        "  Admin only.",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "💡 Type !games for detailed",
+        "   game rules and payouts.",
+        "━━━━━━━━━━━━━━━━━━━━━━",
       ].join("\n"),
       threadID
     );
@@ -652,7 +721,7 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-  // Banat / roast toggle
+  // BANAT ON
   // -------------------------------------------------------------------------
 
   if (text === "!banat on") {
@@ -664,7 +733,16 @@ async function handleMessage(
 
       sendReplyWithTyping(
         api,
-        "🔥 Banat is now ON for this group.",
+        [
+          "╭━━━━━━━━━━━━━━╮",
+          "      🔥 BANAT",
+          "╰━━━━━━━━━━━━━━╯",
+          "",
+          "🟢 Status: ON",
+          "",
+          "Automatic banat has been",
+          "enabled for this group.",
+        ].join("\n"),
         threadID
       );
     } catch (error) {
@@ -683,6 +761,10 @@ async function handleMessage(
     return;
   }
 
+  // -------------------------------------------------------------------------
+  // BANAT OFF
+  // -------------------------------------------------------------------------
+
   if (text === "!banat off") {
     try {
       await db.setRoastEnabled(
@@ -690,14 +772,22 @@ async function handleMessage(
         false
       );
 
-      // Clear the temporary cooldown too.
       lastRandomRoastByThread.delete(
         threadId
       );
 
       sendReplyWithTyping(
         api,
-        "🛑 Banat is now OFF for this group.",
+        [
+          "╭━━━━━━━━━━━━━━╮",
+          "      🛑 BANAT",
+          "╰━━━━━━━━━━━━━━╯",
+          "",
+          "🔴 Status: OFF",
+          "",
+          "Automatic banat has been",
+          "disabled for this group.",
+        ].join("\n"),
         threadID
       );
     } catch (error) {
@@ -717,7 +807,7 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-  // Play
+  // PLAY
   // -------------------------------------------------------------------------
 
   if (
@@ -739,7 +829,7 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-  // Rizz
+  // RIZZ
   // -------------------------------------------------------------------------
 
   if (
@@ -761,7 +851,7 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-  // Aura
+  // AURA
   // -------------------------------------------------------------------------
 
   if (
@@ -805,7 +895,7 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-  // Simp
+  // SIMP
   // -------------------------------------------------------------------------
 
   if (
@@ -827,7 +917,7 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-  // Clown
+  // CLOWN
   // -------------------------------------------------------------------------
 
   if (
@@ -849,7 +939,7 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-  // Broadcast
+  // BROADCAST
   // -------------------------------------------------------------------------
 
   if (
@@ -870,11 +960,7 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-  // Targeted trigger / roast
-  // -------------------------------------------------------------------------
-  //
-  // getTriggerReply must be async because it checks the
-  // persistent roast_enabled setting in Neon.
+  // TARGETED TRIGGER / ROAST
   // -------------------------------------------------------------------------
 
   try {
@@ -903,19 +989,7 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-  // Public roast
-  // -------------------------------------------------------------------------
-  //
-  // This checks BOTH:
-  //
-  // 1. RANDOM_ROAST environment setting
-  // 2. Per-thread roast_enabled setting in Neon
-  //
-  // Therefore:
-  //
-  // !banat off
-  //
-  // actually disables all automatic roast behavior in that group.
+  // PUBLIC RANDOM ROAST
   // -------------------------------------------------------------------------
 
   if (!RANDOM_ROAST_ENABLED) {
@@ -938,8 +1012,6 @@ async function handleMessage(
     );
 
     // Fail closed.
-    // If we cannot determine whether banat is enabled,
-    // don't send an automatic roast.
     return;
   }
 
@@ -988,7 +1060,6 @@ function canRandomRoastThread(
     return false;
   }
 
-  // Prevent unlimited memory growth.
   if (
     lastRandomRoastByThread.size >
     1000
@@ -1054,7 +1125,13 @@ function broadcastToAllThreads(
   );
 
   const broadcastMessage =
-    `📢 ${message.trim()}`;
+    [
+      "╭━━━━━━━━━━━━━━━━╮",
+      "        📢 ANNOUNCEMENT",
+      "╰━━━━━━━━━━━━━━━━╯",
+      "",
+      message.trim(),
+    ].join("\n");
 
   threads.forEach(
     (threadID, index) => {
