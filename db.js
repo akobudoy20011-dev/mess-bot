@@ -447,6 +447,54 @@ async function connect() {
     );
   `);
 
+  // ---------------------------------------------------------------------------
+  // CHARACTER AI
+  // ---------------------------------------------------------------------------
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_conversations (
+      id BIGSERIAL PRIMARY KEY,
+      character_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      UNIQUE (character_id, thread_id, user_id)
+    );
+    CREATE TABLE IF NOT EXISTS ai_messages (
+      id BIGSERIAL PRIMARY KEY,
+      conversation_id BIGINT NOT NULL REFERENCES ai_conversations(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+      content TEXT NOT NULL,
+      created_at BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS ai_memories (
+      id BIGSERIAL PRIMARY KEY,
+      character_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'general',
+      content TEXT NOT NULL,
+      importance INTEGER NOT NULL DEFAULT 2,
+      created_at BIGINT NOT NULL,
+      last_used_at BIGINT NOT NULL,
+      UNIQUE (character_id, thread_id, user_id, content)
+    );
+    CREATE TABLE IF NOT EXISTS ai_sessions (
+      character_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      conversation_id BIGINT NOT NULL REFERENCES ai_conversations(id) ON DELETE CASCADE,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY (character_id, thread_id, user_id)
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS ai_messages_conversation_created_idx ON ai_messages (conversation_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS ai_memories_lookup_idx ON ai_memories (character_id, thread_id, user_id, importance DESC, created_at DESC);
+    CREATE INDEX IF NOT EXISTS ai_sessions_active_idx ON ai_sessions (character_id, thread_id, user_id, active);
+  `);
   console.log(
     "╔══════════════════════════════════════════════════════════╗"
   );
