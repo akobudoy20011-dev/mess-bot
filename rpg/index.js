@@ -354,8 +354,8 @@ async function handleHelp(api, event) {
 
 async function handleRpgCommand(api, event, text, originalText) {
   const cleanText = String(originalText || text || "").trim();
-  if (!/^!rpg(?:\\s|$)/i.test(cleanText)) return false;
-  const parts = cleanText.split(/\\s+/);
+  if (!/^!rpg(?:\s|$)/i.test(cleanText)) return false;
+  const parts = cleanText.split(/\s+/);
   const action = normalizeKey(parts[1] || "help");
   const args = parts.slice(2);
   try {
