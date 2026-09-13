@@ -66,6 +66,16 @@ const {
 } = require("./adventure");
 
 const {
+  scoutLocation,
+  scoutSummary,
+} = require("./scouting");
+
+const {
+  ambushArmy,
+  raidLocation,
+} = require("./warfare");
+
+const {
   AFFINITY_TIERS,
   SCHOOLS,
   getAffinity,
@@ -1670,6 +1680,124 @@ async function handleRest(api, event) {
 
 
 /* =========================================================
+   SCOUTING
+========================================================= */
+
+async function handleScout(api, event, args) {
+  const report = await scoutLocation(
+    event.threadID,
+    event.senderID,
+    args.join(" ")
+  );
+
+  await send(
+    api,
+    event.threadID,
+    box(
+      "🔭 SCOUTING REPORT",
+      scoutSummary(report)
+    )
+  );
+}
+
+
+/* =========================================================
+   RAID
+========================================================= */
+
+async function handleRaid(api, event, args) {
+  const result = await raidLocation(
+    event.threadID,
+    event.senderID,
+    args.join(" ")
+  );
+
+  await send(
+    api,
+    event.threadID,
+    box("🔥 RAID SUCCESSFUL", [
+      "🏘️ Target: " +
+        result.location.name,
+
+      "💰 Looted: " +
+        formatNumber(result.lootGold) +
+        " coins",
+
+      "🛡️ Garrison weakened by " +
+        formatNumber(result.garrisonLoss),
+
+      "",
+
+      "⚠️ Reputation -5. Hostility in this region has risen.",
+    ])
+  );
+}
+
+
+/* =========================================================
+   AMBUSH
+========================================================= */
+
+async function handleAmbush(api, event, args) {
+  const targetID =
+    event.messageReply?.senderID ||
+    args[0];
+
+  if (!targetID) {
+    throw new Error(
+      "Reply to the player you want to ambush, or use !rpg ambush <userID>."
+    );
+  }
+
+  const result =
+    await ambushArmy(
+      event.threadID,
+      event.senderID,
+      targetID
+    );
+
+  await send(
+    api,
+    event.threadID,
+    box(
+      result.attackerWins
+        ? "⚔️ AMBUSH SUCCESSFUL"
+        : "⚔️ AMBUSH REPELLED",
+      [
+        result.surprise
+          ? "🌑 Surprise achieved."
+          : "👁️ The enemy spotted you coming.",
+
+        "☠️ Your losses: " +
+          formatNumber(
+            result.attackerLosses
+          ),
+
+        "☠️ Enemy losses: " +
+          formatNumber(
+            result.defenderLosses
+          ),
+
+        ...(result.lootGold
+          ? [
+              "💰 Looted: " +
+                formatNumber(
+                  result.lootGold
+                ) +
+                " coins",
+            ]
+          : []),
+
+        "",
+
+        "⚠️ Reputation -8.",
+      ]
+    )
+  );
+}
+
+
+/* =========================================================
    HELP
 ========================================================= */
 
@@ -1787,6 +1915,22 @@ async function handleHelp(api, event) {
 
       "▶ !rpg army regiment",
       "View your regiments.",
+
+      "━━━━━━━━━━━━━━━━━━━━━━",
+
+      "🔭 SCOUTING & WARFARE",
+
+      "▶ !rpg scout <location>",
+      "Gather intel on a location's garrison and defenses.",
+      "Example: !rpg scout stonehold",
+
+      "▶ !rpg raid <location>",
+      "Raid a location with your army for gold.",
+      "Example: !rpg raid willowmere",
+
+      "▶ !rpg ambush <userID>",
+      "Ambush another player's marching army.",
+      "Reply to their message to target them.",
 
       "━━━━━━━━━━━━━━━━━━━━━━",
 
@@ -2092,8 +2236,53 @@ async function handleRpgCommand(
 
 
     /* =====================================================
+       SCOUT
+    ===================================================== */
+
+    else if (
+      action === "scout"
+    ) {
+      await handleScout(
+        api,
+        event,
+        args
+      );
+    }
+
+
+    /* =====================================================
+       RAID
+    ===================================================== */
+
+    else if (
+      action === "raid"
+    ) {
+      await handleRaid(
+        api,
+        event,
+        args
+      );
+    }
+
+
+    /* =====================================================
+       AMBUSH
+    ===================================================== */
+
+    else if (
+      action === "ambush"
+    ) {
+      await handleAmbush(
+        api,
+        event,
+        args
+      );
+    }
+
+
+    /* =====================================================
        COMBAT
-       
+
        IMPORTANT:
        "spell" MUST be here.
     ===================================================== */
