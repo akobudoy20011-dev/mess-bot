@@ -9,7 +9,11 @@ const { login } = require("ws3-fca");
 const db = require("./db");
 
 const { handleEconomyCommand } = require("./economy");
-const { handleGamesCommand } = require("./games");
+const {
+  handleGamesCommand,
+  handleGameResponse,
+} = require("./games");
+
 const { handleRpgCommand } = require("./rpg");
 const { handleRpgCharacterMessage } = require("./rpg/character-ai");
 const { handleAiMessage } = require("./ai");
