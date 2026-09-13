@@ -27,6 +27,7 @@ const WORK_COOLDOWN_MS = 60 * 60 * 1000;
 const sessions = new Map();
 const sessionTimers = new Map();
 const activeGames = new Set();
+const triviaDecks = new Map();
 
 function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -737,10 +738,60 @@ function normalizeTriviaQuestion(raw) {
   const question = raw.question || raw.q || raw.text || raw.prompt;
   const options = raw.options || raw.choices || raw.answers;
   const answer = raw.answer ?? raw.correct ?? raw.correctAnswer ?? raw.correctIndex;
+  const correctIndex = Number(answer);
 
-  if (!question || !Array.isArray(options) || options.length < 4) return null;
+  if (
+    !question ||
+    !Array.isArray(options) ||
+    options.length < 4 ||
+    !Number.isInteger(correctIndex) ||
+    correctIndex < 0 ||
+    correctIndex > 3
+  ) {
+    return null;
+  }
 
-  return { question, options: options.slice(0, 4), answer: Number(answer) };
+  return {
+    question: String(question),
+    options: options.slice(0, 4).map((option) => String(option)),
+    answer: correctIndex,
+  };
+}
+
+function getTriviaQuestionPool() {
+  return getTriviaQuestions()
+    .map(normalizeTriviaQuestion)
+    .filter(Boolean);
+}
+
+function shuffleTriviaQuestions(questions) {
+  const shuffled = questions.slice();
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = randInt(0, index);
+    [shuffled[index], shuffled[swapIndex]] = [
+      shuffled[swapIndex],
+      shuffled[index],
+    ];
+  }
+  return shuffled;
+}
+
+function nextTriviaQuestion(deckKey, pool) {
+  const existing = triviaDecks.get(deckKey);
+  const deck = existing && existing.poolSize === pool.length
+    ? existing.questions
+    : [];
+
+  if (deck.length === 0) {
+    const reshuffled = shuffleTriviaQuestions(pool);
+    triviaDecks.set(deckKey, {
+      poolSize: pool.length,
+      questions: reshuffled,
+    });
+    return reshuffled.pop();
+  }
+
+  return deck.pop();
 }
 
 async function handleTrivia(api, event) {
@@ -753,19 +804,18 @@ async function handleTrivia(api, event) {
   }
 
   try {
-    const list = getTriviaQuestions();
+    const list = getTriviaQuestionPool();
     if (!list.length) {
       unlockGame(threadID, userID);
-      await safeReply(api, event, "❌ No trivia questions are configured.");
+      await safeReply(api, event, "❌ No valid trivia questions are configured.");
       return;
     }
 
-    const raw = list[randInt(0, list.length - 1)];
-    const q = normalizeTriviaQuestion(raw);
+    const q = nextTriviaQuestion(sessionKey(threadID, userID), list);
 
     if (!q) {
       unlockGame(threadID, userID);
-      await safeReply(api, event, "❌ Trivia question is malformed.");
+      await safeReply(api, event, "❌ Trivia question selection failed.");
       return;
     }
 
