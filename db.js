@@ -292,6 +292,161 @@ async function connect() {
     );
   `);
 
+
+  // ---------------------------------------------------------------------------
+  // RPG MODULAR SCHEMA MIGRATIONS
+  // ---------------------------------------------------------------------------
+
+  await pool.query(`
+    ALTER TABLE rpg_players
+      ADD COLUMN IF NOT EXISTS location_id TEXT NOT NULL DEFAULT 'eclipse_castle',
+      ADD COLUMN IF NOT EXISTS subclass TEXT,
+      ADD COLUMN IF NOT EXISTS hp INTEGER NOT NULL DEFAULT 130,
+      ADD COLUMN IF NOT EXISTS max_hp INTEGER NOT NULL DEFAULT 130,
+      ADD COLUMN IF NOT EXISTS mp INTEGER NOT NULL DEFAULT 35,
+      ADD COLUMN IF NOT EXISTS max_mp INTEGER NOT NULL DEFAULT 35,
+      ADD COLUMN IF NOT EXISTS stamina INTEGER NOT NULL DEFAULT 120,
+      ADD COLUMN IF NOT EXISTS max_stamina INTEGER NOT NULL DEFAULT 120,
+      ADD COLUMN IF NOT EXISTS strength INTEGER NOT NULL DEFAULT 18,
+      ADD COLUMN IF NOT EXISTS defense INTEGER NOT NULL DEFAULT 16,
+      ADD COLUMN IF NOT EXISTS agility INTEGER NOT NULL DEFAULT 10,
+      ADD COLUMN IF NOT EXISTS intelligence INTEGER NOT NULL DEFAULT 6,
+      ADD COLUMN IF NOT EXISTS vitality INTEGER NOT NULL DEFAULT 16,
+      ADD COLUMN IF NOT EXISTS luck INTEGER NOT NULL DEFAULT 8,
+      ADD COLUMN IF NOT EXISTS reputation INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS renown INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+
+    ALTER TABLE rpg_armies
+      ADD COLUMN IF NOT EXISTS location_id TEXT NOT NULL DEFAULT 'eclipse_castle',
+      ADD COLUMN IF NOT EXISTS destination_location TEXT,
+      ADD COLUMN IF NOT EXISTS supplies INTEGER NOT NULL DEFAULT 100,
+      ADD COLUMN IF NOT EXISTS formation TEXT NOT NULL DEFAULT 'balanced',
+      ADD COLUMN IF NOT EXISTS spearmen INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS heavy_swordsmen INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS shielders INTEGER NOT NULL DEFAULT 0;
+
+    CREATE TABLE IF NOT EXISTS rpg_properties (
+      thread_id   TEXT NOT NULL,
+      user_id     TEXT NOT NULL,
+      tier        INTEGER NOT NULL DEFAULT 0,
+      name        TEXT,
+      maintenance INTEGER NOT NULL DEFAULT 0,
+      walls       INTEGER NOT NULL DEFAULT 0,
+      towers      INTEGER NOT NULL DEFAULT 0,
+      gates       INTEGER NOT NULL DEFAULT 0,
+      moats       INTEGER NOT NULL DEFAULT 0,
+      guards      INTEGER NOT NULL DEFAULT 0,
+      traps       INTEGER NOT NULL DEFAULT 0,
+      barrier     INTEGER NOT NULL DEFAULT 0,
+      updated_at  BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_player_skills (
+      thread_id TEXT NOT NULL,
+      user_id   TEXT NOT NULL,
+      skill_id  TEXT NOT NULL,
+      level     INTEGER NOT NULL DEFAULT 1,
+      unlocked  BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, user_id, skill_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_inventory_items (
+      thread_id TEXT NOT NULL,
+      user_id   TEXT NOT NULL,
+      item_id   TEXT NOT NULL,
+      quantity  INTEGER NOT NULL DEFAULT 0,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, user_id, item_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_equipment (
+      thread_id TEXT NOT NULL,
+      user_id   TEXT NOT NULL,
+      slot      TEXT NOT NULL,
+      item_id   TEXT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, user_id, slot)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_combat_sessions (
+      id BIGSERIAL PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      enemy_id TEXT NOT NULL,
+      enemy_name TEXT NOT NULL,
+      enemy_hp INTEGER NOT NULL,
+      enemy_max_hp INTEGER NOT NULL,
+      enemy_attack INTEGER NOT NULL,
+      enemy_defense INTEGER NOT NULL,
+      player_hp INTEGER NOT NULL,
+      player_mp INTEGER NOT NULL,
+      player_stamina INTEGER NOT NULL,
+      turn_number INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'active',
+      defending BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_quests (
+      id BIGSERIAL PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      quest_type TEXT NOT NULL,
+      quest_key TEXT NOT NULL,
+      title TEXT NOT NULL,
+      objective TEXT NOT NULL,
+      progress INTEGER NOT NULL DEFAULT 0,
+      target INTEGER NOT NULL,
+      reward_gold INTEGER NOT NULL DEFAULT 0,
+      reward_xp INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'active',
+      expires_at BIGINT,
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_dungeons (
+      id BIGSERIAL PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      dungeon_key TEXT NOT NULL,
+      stage INTEGER NOT NULL DEFAULT 1,
+      max_stage INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_regiments (
+      id BIGSERIAL PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      unit_type TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      experience_tier TEXT NOT NULL DEFAULT 'recruit',
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_marches (
+      id BIGSERIAL PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      origin TEXT NOT NULL,
+      destination TEXT NOT NULL,
+      distance INTEGER NOT NULL,
+      duration_ms BIGINT NOT NULL,
+      departure_at BIGINT NOT NULL,
+      arrival_at BIGINT NOT NULL,
+      army_size INTEGER NOT NULL DEFAULT 0,
+      commander_id BIGINT,
+      status TEXT NOT NULL DEFAULT 'marching',
+      updated_at BIGINT NOT NULL
+    );
+  `);
+
   console.log(
     "╔══════════════════════════════════════════════════════════╗"
   );
