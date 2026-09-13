@@ -80,7 +80,8 @@ async function startMarch(threadID, userID, destinationValue) {
       }.`
     );
   }
-  if (army.region_id === destination.id || player.region_id === destination.id) {
+  const destinationRegionId = destination.regionId || destination.id;
+  if (army.region_id === destinationRegionId || player.region_id === destinationRegionId) {
     throw new Error("Your army is already in that region.");
   }
   if (totalUnits(army) <= 0) {
@@ -185,7 +186,7 @@ function marchSummary(status) {
       `👥 Army: ${totalUnits(status.army)} soldiers`,
       `⏳ ETA: ${formatDuration(status.remaining)}`,
       `📅 Arrival: ${formatUtc(status.arrival)} UTC`,
-      "There is no global maximum march duration.",
+      "⏱️ Maximum travel time: 2 minutes",
     ],
   };
 }
