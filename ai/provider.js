@@ -116,7 +116,7 @@ async function requestGemini(messages, model, key) {
 
     if (!response.ok) {
       const providerMessage = data?.error?.message || "HTTP " + response.status;
-      const retryable = [500, 502, 503, 504].includes(response.status);
+      const retryable = [429, 500, 502, 503, 504].includes(response.status);
       console.error("[Gemini] API request failed:", {
         keySlot: key.name,
         status: response.status,
