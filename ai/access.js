@@ -1,1 +1,10 @@
-function getAuthorizedUserId() {\n  return String(process.env.ALAIZA_MESSENGER_ID || "").trim();\n}\n\nfunction isAuthorized(senderID) {\n  const authorized = getAuthorizedUserId();\n  return Boolean(authorized && String(senderID || "").trim() === authorized);\n}\n\nmodule.exports = { getAuthorizedUserId, isAuthorized };
+function getAuthorizedUserId() {
+  return String(process.env.ALAIZA_MESSENGER_ID || "").trim();
+}
+
+function isAuthorized(senderID) {
+  const authorized = getAuthorizedUserId();
+  return Boolean(authorized && String(senderID || "").trim() === authorized);
+}
+
+module.exports = { getAuthorizedUserId, isAuthorized };
