@@ -158,7 +158,8 @@ async function buyProperty(threadID, userID, requestedKey) {
 }
 async function build(threadID, userID, buildingKey) {
   const property = await getProperty(threadID, userID);
-  const definition = BUILDINGS[String(buildingKey || "").toLowerCase()];
+  const key = String(buildingKey || "").toLowerCase();
+  const definition = BUILDINGS[key];
   if (!definition) {
     throw new Error(`Choose a building: ${Object.keys(BUILDINGS).join(", ")}.`);
   }
@@ -173,7 +174,7 @@ async function build(threadID, userID, buildingKey) {
       AND user_id = $2
       AND building_key = $3
     `,
-    [String(threadID), String(userID), definition.name.toLowerCase()]
+    [String(threadID), String(userID), key]
   );
   const currentLevel = Number(result.rows[0]?.level || 0);
   const nextLevel = currentLevel + 1;
@@ -197,7 +198,7 @@ async function build(threadID, userID, buildingKey) {
     [
       String(threadID),
       String(userID),
-      String(buildingKey).toLowerCase(),
+      key,
       nextLevel,
       Date.now(),
     ]
