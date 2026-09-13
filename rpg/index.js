@@ -179,6 +179,9 @@ async function handleMap(api, event, args) {
 async function handleProperty(api, event, args) {
   const threadID = event.threadID;
   const userID = event.senderID;
+  await ensurePlayer(threadID, userID);
+  args = Array.isArray(args) ? args : [];
+  const userID = event.senderID;
   const action = normalizeKey(args[0] || "info");
   if (action === "buy") {
     const target = normalizeKey(args[1]);
@@ -224,6 +227,7 @@ async function handleProperty(api, event, args) {
 async function handleArmy(api, event, args) {
   const threadID = event.threadID;
   const userID = event.senderID;
+  await ensurePlayer(threadID, userID);
   if (args[0] && normalizeKey(args[0]) === "train") {
     const result = await train(threadID, userID, args[1], args[2]);
     await send(api, threadID, box("⚔️ TRAINING COMPLETE", [
@@ -263,6 +267,7 @@ async function handleArmy(api, event, args) {
 }
 
 async function handleMarch(api, event, args) {
+  await ensurePlayer(event.threadID, event.senderID);
   const action = normalizeKey(args[0] || "status");
   if (action === "status") {
     const status = await marchStatus(event.threadID, event.senderID);
@@ -309,6 +314,7 @@ async function handleQuest(api, event, args) {
 }
 
 async function handleDungeon(api, event, args) {
+  await ensurePlayer(event.threadID, event.senderID);
   const action = normalizeKey(args[0] || "status");
   if (action === "enter") {
     const result = await enterDungeon(event.threadID, event.senderID, normalizeKey(args[1] || "abyssal_crypt"));
