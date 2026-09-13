@@ -1,0 +1,1 @@
+function getAuthorizedUserId() {\n  return String(process.env.ALAIZA_MESSENGER_ID || "").trim();\n}\n\nfunction isAuthorized(senderID) {\n  const authorized = getAuthorizedUserId();\n  return Boolean(authorized && String(senderID || "").trim() === authorized);\n}\n\nmodule.exports = { getAuthorizedUserId, isAuthorized };
