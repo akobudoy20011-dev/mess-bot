@@ -1,4 +1,5 @@
 const db = require("../db");
+const { getStartingSpells, grantSpell } = require("./magic");
 const { getClass, getClassKey, getSkillsForClass } = require("./classes");
 const { getItem } = require("./items");
 const { REGIONS, resolveLocation } = require("./world");
