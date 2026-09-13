@@ -2,6 +2,12 @@ const db = require("../db");
 const { getSkill } = require("./classes");
 const { getItem } = require("./items");
 const {
+  getSpell,
+  getAffinity,
+  AFFINITY_TIERS,
+  getLearnedSpells,
+} = require("./magic");
+const {
   addItem,
   addXp,
   consumeItem,
@@ -13,9 +19,11 @@ const {
   box,
   clamp,
   formatNumber,
+  normalizeKey,
   randomInt,
   statLine,
 } = require("./utils");
+
 const ENEMIES = [
   {
     id: "shadow_beast",
@@ -62,9 +70,11 @@ const ENEMIES = [
     loot: "ember_core",
   },
 ];
+
 function pickEnemy() {
   return ENEMIES[randomInt(0, ENEMIES.length - 1)];
 }
+
 async function getCombat(threadID, userID) {
   const result = await db.query(
     `
@@ -76,19 +86,30 @@ async function getCombat(threadID, userID) {
     `,
     [String(threadID), String(userID)]
   );
+
   return result.rows[0] || null;
 }
+
 async function createHunt(threadID, userID) {
   const existing = await getCombat(threadID, userID);
+
   if (existing) {
-    throw new Error("You are already in combat. Attack, defend, or use a skill.");
+    throw new Error(
+      "You are already in combat. Attack, defend, or use a skill."
+    );
   }
+
   const state = await getUserState(threadID, userID);
+
   if (Number(state.player.hp) <= 0 || state.player.status === "dead") {
-    throw new Error("You are defeated. Use !rpg rest before hunting again.");
+    throw new Error(
+      "You are defeated. Use !rpg rest before hunting again."
+    );
   }
+
   const enemy = pickEnemy();
   const now = Date.now();
+
   await db.query(
     `
     INSERT INTO rpg_combat_sessions (
@@ -112,22 +133,38 @@ async function createHunt(threadID, userID) {
       now,
     ]
   );
-  return { enemy, session: await getCombat(threadID, userID) };
+
+  return {
+    enemy,
+    session: await getCombat(threadID, userID),
+  };
 }
+
 function playerDamage(player, enemy, multiplier = 1, magical = false) {
-  const offensive = magical ? Number(player.intelligence) : Number(player.strength);
+  const offensive = magical
+    ? Number(player.intelligence)
+    : Number(player.strength);
+
   const defense = Number(enemy.enemy_defense || 0);
   const base = offensive * multiplier + randomInt(4, 12);
+
   return Math.max(1, Math.round(base - defense * 0.35));
 }
+
 function enemyDamage(player, session, defending) {
   const armor = Number(player.defense || 0);
   const mitigation = defending ? armor * 0.75 : armor * 0.35;
+
   return Math.max(
     1,
-    Math.round(Number(session.enemy_attack) + randomInt(-4, 8) - mitigation)
+    Math.round(
+      Number(session.enemy_attack) +
+        randomInt(-4, 8) -
+        mitigation
+    )
   );
 }
+
 async function finishCombat(threadID, userID, session, result) {
   await db.query(
     `
@@ -140,17 +177,23 @@ async function finishCombat(threadID, userID, session, result) {
     `,
     [String(threadID), String(userID), result, Date.now()]
   );
+
   if (result === "victory") {
-    const enemy = ENEMIES.find((item) => item.id === session.enemy_id) || ENEMIES[0];
+    const enemy =
+      ENEMIES.find((item) => item.id === session.enemy_id) ||
+      ENEMIES[0];
+
     await db.addBalance(threadID, userID, enemy.reward);
     await addXp(threadID, userID, enemy.xp);
     await addItem(threadID, userID, enemy.loot, 1);
+
     await updateVitals(threadID, userID, {
       hp: Math.max(1, Number(session.player_hp)),
       mp: Number(session.player_mp),
       stamina: Number(session.player_stamina),
       status: "active",
     });
+
     return [
       "🏆 VICTORY",
       `💰 Loot: +${formatNumber(enemy.reward)} coins`,
@@ -158,98 +201,300 @@ async function finishCombat(threadID, userID, session, result) {
       `🎁 Item: ${getItem(enemy.loot)?.name || enemy.loot}`,
     ];
   }
+
   await updateVitals(threadID, userID, {
     hp: 0,
     mp: Number(session.player_mp),
     stamina: Number(session.player_stamina),
     status: "dead",
   });
+
   return [
     "💀 DEFEAT",
     "Your character fell in battle.",
     "Use !rpg rest to recover before entering another fight.",
   ];
 }
-async function combatAction(threadID, userID, action, argument = "") {
+
+async function combatAction(
+  threadID,
+  userID,
+  action,
+  argument = ""
+) {
   const session = await getCombat(threadID, userID);
+
   if (!session) {
-    throw new Error("You are not currently in combat. Try !rpg hunt.");
+    throw new Error(
+      "You are not currently in combat. Try !rpg hunt."
+    );
   }
+
   const state = await getUserState(threadID, userID);
+
   let playerHp = Number(session.player_hp);
   let playerMp = Number(session.player_mp);
   let stamina = Number(session.player_stamina);
   let enemyHp = Number(session.enemy_hp);
   let defending = false;
   let message = [];
-  const skill = action === "skill" ? getSkill(argument) : null;
+
+  const skill =
+    action === "skill" ? getSkill(argument) : null;
+
   if (action === "attack") {
     const damage = playerDamage(state.player, session);
+
     enemyHp = Math.max(0, enemyHp - damage);
-    message = [`⚔️ You strike for ${damage} damage.`];
+
+    message = [
+      `⚔️ You strike for ${damage} damage.`,
+    ];
   } else if (action === "defend") {
     defending = true;
-    stamina = Math.min(Number(state.player.max_stamina), stamina + 12);
-    message = ["🛡️ You brace for the next attack and recover stamina."];
+
+    stamina = Math.min(
+      Number(state.player.max_stamina),
+      stamina + 12
+    );
+
+    message = [
+      "🛡️ You brace for the next attack and recover stamina.",
+    ];
   } else if (action === "skill") {
-    if (!skill) throw new Error("That skill is not available.");
-    if (playerMp < skill.cost) throw new Error("Not enough mana.");
-    if (stamina < skill.stamina) throw new Error("Not enough stamina.");
+    if (!skill) {
+      throw new Error("That skill is not available.");
+    }
+
+    if (playerMp < skill.cost) {
+      throw new Error("Not enough mana.");
+    }
+
+    if (stamina < skill.stamina) {
+      throw new Error("Not enough stamina.");
+    }
+
     playerMp -= skill.cost;
     stamina -= skill.stamina;
-    if (skill.effect === "guard" || skill.effect === "dodge") {
+
+    if (
+      skill.effect === "guard" ||
+      skill.effect === "dodge"
+    ) {
       defending = true;
-      message = [`${skill.emoji} ${skill.name} activated.`];
+
+      message = [
+        `${skill.emoji} ${skill.name} activated.`,
+      ];
     } else {
       const magical = skill.effect === "magic";
+
       const damage = playerDamage(
         state.player,
         session,
         skill.multiplier,
         magical
       );
+
       enemyHp = Math.max(0, enemyHp - damage);
-      message = [`${skill.emoji} ${skill.name} deals ${damage} damage.`];
-      if (skill.effect === "heal_damage" || skill.effect === "guard_heal") {
-        const healing = skill.effect === "guard_heal" ? 35 : 18;
-        playerHp = Math.min(Number(state.player.max_hp), playerHp + healing);
+
+      message = [
+        `${skill.emoji} ${skill.name} deals ${damage} damage.`,
+      ];
+
+      if (
+        skill.effect === "heal_damage" ||
+        skill.effect === "guard_heal"
+      ) {
+        const healing =
+          skill.effect === "guard_heal" ? 35 : 18;
+
+        playerHp = Math.min(
+          Number(state.player.max_hp),
+          playerHp + healing
+        );
+
         message.push(`✨ Restored ${healing} HP.`);
       }
     }
+  } else if (action === "spell") {
+    const spell = getSpell(argument);
+
+    if (!spell || spell.target === "utility") {
+      throw new Error(
+        "That is not a combat spell. Use !rpg magic to view your spells."
+      );
+    }
+
+    const spellKey = normalizeKey(argument);
+    const learned = await getLearnedSpells(
+      threadID,
+      userID
+    );
+
+    if (!learned.includes(spellKey)) {
+      throw new Error(
+        `You have not learned ${spell.name}. Use !rpg learn ${spellKey}.`
+      );
+    }
+
+    const affinity = getAffinity(
+      state.player.character_class
+    );
+
+    const tier = AFFINITY_TIERS[affinity.tier];
+
+    if (
+      spell.school !== affinity.school ||
+      !tier.canCast
+    ) {
+      throw new Error(
+        `Your magic affinity cannot cast ${spell.name}.`
+      );
+    }
+
+    const manaCost = Math.ceil(
+      spell.manaCost * tier.costMultiplier
+    );
+
+    if (playerMp < manaCost) {
+      throw new Error("Not enough mana.");
+    }
+
+    playerMp -= manaCost;
+
+    const powerScale = spell.power * tier.power;
+
+    if (
+      spell.effect === "guard" ||
+      spell.effect === "dodge"
+    ) {
+      defending = true;
+
+      message = [
+        `${spell.emoji} ${spell.name} activated.`,
+      ];
+    } else if (spell.effect === "heal") {
+      const healing = Math.round(20 * powerScale);
+
+      playerHp = Math.min(
+        Number(state.player.max_hp),
+        playerHp + healing
+      );
+
+      message = [
+        `${spell.emoji} ${spell.name} restores ${healing} HP.`,
+      ];
+    } else {
+      let damage = Math.max(
+        1,
+        Math.round(
+          Number(state.player.intelligence) *
+            powerScale +
+            randomInt(4, 12) -
+            Number(session.enemy_defense || 0) *
+              0.3
+        )
+      );
+
+      const extra = [];
+
+      if (spell.effect === "damage_weaken") {
+        damage = Math.round(damage * 1.1);
+
+        extra.push(
+          `🧊 ${session.enemy_name} is weakened.`
+        );
+      }
+
+      if (spell.effect === "drain") {
+        const healed = Math.round(damage * 0.4);
+
+        playerHp = Math.min(
+          Number(state.player.max_hp),
+          playerHp + healed
+        );
+
+        extra.push(
+          `🩸 You drain ${healed} HP.`
+        );
+      }
+
+      enemyHp = Math.max(0, enemyHp - damage);
+
+      message = [
+        `${spell.emoji} ${spell.name} deals ${damage} damage.`,
+        ...extra,
+      ];
+    }
   } else if (action === "item") {
     const item = getItem(argument);
+
     if (!item || item.type !== "consumable") {
-      throw new Error("Use a consumable item such as minor_potion or mana_potion.");
+      throw new Error(
+        "Use a consumable item such as minor_potion or mana_potion."
+      );
     }
+
     await consumeItem(threadID, userID, item.id);
+
     playerHp = Math.min(
       Number(state.player.max_hp),
       playerHp + Number(item.effect?.hp || 0)
     );
+
     playerMp = Math.min(
       Number(state.player.max_mp),
       playerMp + Number(item.effect?.mp || 0)
     );
-    message = [`${item.emoji} Used ${item.name}.`];
+
+    message = [
+      `${item.emoji} Used ${item.name}.`,
+    ];
   } else {
-    throw new Error("Choose attack, skill, defend, or item.");
+    throw new Error(
+      "Choose attack, skill, spell, defend, or item."
+    );
   }
+
   if (enemyHp <= 0) {
-    const rewards = await finishCombat(threadID, userID, {
-      ...session,
-      player_hp: playerHp,
-      player_mp: playerMp,
-      player_stamina: stamina,
-      enemy_hp: enemyHp,
-    }, "victory");
-    return { result: "victory", message: message.concat(rewards) };
+    const rewards = await finishCombat(
+      threadID,
+      userID,
+      {
+        ...session,
+        player_hp: playerHp,
+        player_mp: playerMp,
+        player_stamina: stamina,
+        enemy_hp: enemyHp,
+      },
+      "victory"
+    );
+
+    return {
+      result: "victory",
+      message: message.concat(rewards),
+    };
   }
-  const incoming = enemyDamage(state.player, session, defending);
-  playerHp = Math.max(0, playerHp - incoming);
+
+  const incoming = enemyDamage(
+    state.player,
+    session,
+    defending
+  );
+
+  playerHp = Math.max(
+    0,
+    playerHp - incoming
+  );
+
   message.push(
     `👹 ${session.enemy_name} hits you for ${incoming} damage.`
   );
-  const nextTurn = Number(session.turn_number) + 1;
+
+  const nextTurn =
+    Number(session.turn_number) + 1;
+
   await db.query(
     `
     UPDATE rpg_combat_sessions
@@ -276,11 +521,13 @@ async function combatAction(threadID, userID, action, argument = "") {
       Date.now(),
     ]
   );
+
   await updateVitals(threadID, userID, {
     hp: playerHp,
     mp: playerMp,
     stamina,
   });
+
   if (playerHp <= 0) {
     const rewards = await finishCombat(
       threadID,
@@ -294,27 +541,61 @@ async function combatAction(threadID, userID, action, argument = "") {
       },
       "defeat"
     );
-    return { result: "defeat", message: message.concat(rewards) };
+
+    return {
+      result: "defeat",
+      message: message.concat(rewards),
+    };
   }
-  return { result: "active", message };
+
+  return {
+    result: "active",
+    message,
+  };
 }
-function renderCombat(session, player, message = []) {
+
+function renderCombat(
+  session,
+  player,
+  message = []
+) {
   return box("⚔️ BATTLE", [
     `👤 ${player.character_class}`,
-    statLine("❤️", "HP", session.player_hp, player.max_hp),
-    statLine("🔷", "MP", session.player_mp, player.max_mp),
-    statLine("⚡", "STA", session.player_stamina, player.max_stamina),
+    statLine(
+      "❤️",
+      "HP",
+      session.player_hp,
+      player.max_hp
+    ),
+    statLine(
+      "🔷",
+      "MP",
+      session.player_mp,
+      player.max_mp
+    ),
+    statLine(
+      "⚡",
+      "STA",
+      session.player_stamina,
+      player.max_stamina
+    ),
     "",
     `👹 ${session.enemy_name}`,
-    statLine("❤️", "HP", session.enemy_hp, session.enemy_max_hp),
+    statLine(
+      "❤️",
+      "HP",
+      session.enemy_hp,
+      session.enemy_max_hp
+    ),
     "",
     `⚔️ Turn ${session.turn_number}`,
     ...message,
     "",
-    "Commands: !rpg attack · !rpg skill <skill> · !rpg defend",
+    "Commands: !rpg attack · !rpg skill <skill> · !rpg spell <spell> · !rpg defend",
     "!rpg item <minor_potion|mana_potion>",
   ]);
 }
+
 module.exports = {
   ENEMIES,
   combatAction,
