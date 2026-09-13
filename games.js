@@ -2629,6 +2629,7 @@ async function handleGameResponse(
 
 module.exports = {
   handleGameCommand,
+  handleGamesCommand: handleGameCommand,
   handleGameResponse,
   lockGame,
   unlockGame,
