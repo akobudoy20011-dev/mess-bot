@@ -23,7 +23,6 @@ const EDIT_MAX_RETRIES = 2;
 const EDIT_RETRY_DELAY_MS = 400;
 const DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const WORK_COOLDOWN_MS = 60 * 60 * 1000;
-const BANK_INTEREST_RATE = 0.01;
 
 const sessions = new Map();
 const sessionTimers = new Map();
@@ -43,56 +42,6 @@ function editDelay() {
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString("en-US");
-}
-
-// ============================================================
-// SHARED BOX RENDERER
-//
-// The old version hand-padded every title with spaces
-// ("        🎲 DICE"), which drifted out of alignment depending
-// on title length. This centers the title automatically against
-// a fixed-width box and closes with a soft divider instead of a
-// second heavy border, for a cleaner, more consistent look across
-// every game/menu message.
-// ============================================================
-
-const BOX_WIDTH = 22;
-
-function visualLength(text) {
-  // Rough visual-width estimate: most emoji render ~2 cells wide
-  // in Messenger even though they're 1-2 UTF-16 code units. This
-  // isn't perfect (font rendering varies), but it centers titles
-  // noticeably better than plain .length did.
-  const emojiMatches = text.match(
-    /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu
-  );
-  const emojiCount = emojiMatches ? emojiMatches.length : 0;
-  return [...text].length + emojiCount;
-}
-
-function centerText(text, width) {
-  const len = visualLength(text);
-  if (len >= width) return text;
-  const totalPad = width - len;
-  const left = Math.floor(totalPad / 2);
-  const right = totalPad - left;
-  return " ".repeat(left) + text + " ".repeat(right);
-}
-
-function renderBox(title, lines = []) {
-  const top = "╭" + "─".repeat(BOX_WIDTH) + "╮";
-  const bottom = "╰" + "─".repeat(BOX_WIDTH) + "╯";
-  const titleLine = "│" + centerText(title, BOX_WIDTH) + "│";
-
-  return [
-    top,
-    titleLine,
-    bottom,
-    "",
-    ...lines,
-    "",
-    "· ".repeat(Math.floor((BOX_WIDTH + 2) / 2)).trim(),
-  ].join("\n");
 }
 
 function sessionKey(threadID, userID) {
@@ -315,6 +264,35 @@ function unlockGame(threadID, userID) {
   activeGames.delete(sessionKey(threadID, userID));
 }
 
+// ============================================================
+// INSTANT-GAME COOLDOWN
+//
+// !roll, !rps, !coinflip, !slots, !guess, and !8ball all resolve
+// immediately (no reply/session step like trivia or blackjack),
+// which meant they had zero cooldown and could be spammed for
+// unlimited coin farming. This is a lightweight in-memory
+// per-user cooldown — it resets on restart, which is fine since
+// its only job is to stop rapid-fire spam, not to be a durable
+// game rule.
+// ============================================================
+
+const INSTANT_GAME_COOLDOWN_MS = 15_000;
+const lastInstantGameAt = new Map();
+
+function checkInstantGameCooldown(threadID, userID) {
+  const key = sessionKey(threadID, userID);
+  const now = Date.now();
+  const last = lastInstantGameAt.get(key) || 0;
+  const elapsed = now - last;
+
+  if (elapsed < INSTANT_GAME_COOLDOWN_MS) {
+    return Math.ceil((INSTANT_GAME_COOLDOWN_MS - elapsed) / 1000);
+  }
+
+  lastInstantGameAt.set(key, now);
+  return 0;
+}
+
 async function gamesAreEnabled(threadID) {
   try {
     return await db.isGameEnabled(String(threadID));
@@ -340,8 +318,8 @@ async function handleGameToggle(api, event, text) {
     await safeReply(
       api, event,
       enabled
-        ? ["╭━━━━━━━━━━━━━━━━━━━━╮", "      🎮 GAMES      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "", "✦ Status: 🟢 ON", "", "Games are now enabled.", "", "Use !games to see everything."].join("\n")
-        : ["╭━━━━━━━━━━━━━━━━━━━━╮", "      🎮 GAMES      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "", "✦ Status: 🔴 OFF", "", "Games have been disabled."].join("\n")
+        ? ["╭━━━━━━━━━━━━━━━━━━━━╮", "      🎮 GAMES      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "", "✦ Status: 🟢 ON", "", "Games are now enabled.", "", "Use !games to see everything."].join("\n")
+        : ["╭━━━━━━━━━━━━━━━━━━━━╮", "      🎮 GAMES      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "", "✦ Status: 🔴 OFF", "", "Games have been disabled."].join("\n")
     );
     return true;
   } catch (error) {
@@ -356,7 +334,7 @@ async function handleGamesMenu(api, event) {
   const status = enabled ? "🟢 ON" : "🔴 OFF";
 
   const menu = [
-    "╭━━━━━━━━━━━━━━━━━━━━╮", "    🎮 GAME ROOM    ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+    "╭━━━━━━━━━━━━━━━━━━━━╮", "    🎮 GAME ROOM    ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
     `✦ Status: ${status}`, "",
     "╭─ 🎯 GAMES", "│",
     "├ ✊ !rps rock", "├ 🎲 !roll", "├ 🎯 !guess 1-10", "├ 🪙 !coinflip heads",
@@ -365,7 +343,7 @@ async function handleGamesMenu(api, event) {
     "╰────────────────────", "",
     "╭─ 💰 ECONOMY", "│",
     "├ 💰 !balance", "├ 🏦 !bank", "├ 💵 !deposit <amount>", "├ 💸 !withdraw <amount>",
-    "├ 🔄 !transfer <user> <amount>", "├ 🎁 !daily", "├ 💼 !work", "│",
+    "├ 🔄 !transfer <amount> (reply)", "├ 🎁 !daily", "├ 💼 !work", "│",
     "├ 👤 !profile", "├ 🏆 !rank", "├ 📊 !leaderboard", "│",
     "├ 🏦 !loan", "├ 📝 !loan apply <amount>", "├ 💳 !loan pay <amount>", "│",
     "╰────────────────────", "",
@@ -429,7 +407,7 @@ async function handleProfile(api, event) {
     : `${formatNumber(user.xp)} XP`;
 
   const message = [
-    "╭━━━━━━━━━━━━━━━━━━━━╮", "     👤 PROFILE     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+    "╭━━━━━━━━━━━━━━━━━━━━╮", "     👤 PROFILE     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
     `👤 ${getPlayerName(event)}`, "",
     `${rank.emoji} Rank: ${rank.name}`, `⭐ Level: ${user.level}`, `✨ XP: ${progress}`, "",
     `💰 Wallet: ${formatNumber(user.balance)}`, `🏦 Bank: ${formatNumber(user.bank_balance)}`,
@@ -450,7 +428,7 @@ async function handleBalance(api, event) {
   const total = Number(user.balance) + Number(user.bank_balance);
 
   await safeReply(api, event, [
-    "╭━━━━━━━━━━━━━━━━━━━━╮", "     💰 WALLET      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+    "╭━━━━━━━━━━━━━━━━━━━━╮", "     💰 WALLET      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
     `👤 ${getPlayerName(event)}`, "",
     `💵 Wallet: ${formatNumber(user.balance)}`, `🏦 Bank: ${formatNumber(user.bank_balance)}`, "",
     `📊 Total: ${formatNumber(total)}`, "", "Use !bank for banking options.",
@@ -460,16 +438,29 @@ async function handleBalance(api, event) {
 async function handleBank(api, event) {
   const threadID = String(event.threadID);
   const userID = String(event.senderID);
+
+  // This now actually credits interest (once per day) instead of
+  // only ever showing a number that never lands in the account.
+  const interestResult = await db.applyBankInterest(threadID, userID);
   const user = await db.getUser(threadID, userID);
-  const interest = Math.floor(Number(user.bank_balance) * BANK_INTEREST_RATE);
+
+  let interestLine;
+  if (interestResult.applied) {
+    interestLine = `📈 Interest credited: +${formatNumber(interestResult.interest)} 🎉`;
+  } else if (interestResult.onCooldown) {
+    const hours = Math.ceil(interestResult.msRemaining / (60 * 60 * 1000));
+    interestLine = `📈 Interest already paid today.\n   Next payout in about ${hours} hour(s).`;
+  } else {
+    interestLine = "📈 Interest: deposit coins to start earning.";
+  }
 
   await safeReply(api, event, [
-    "╭━━━━━━━━━━━━━━━━━━━━╮", "      🏦 BANK       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+    "╭━━━━━━━━━━━━━━━━━━━━╮", "      🏦 BANK       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
     `👤 ${getPlayerName(event)}`, "",
     `💵 Wallet: ${formatNumber(user.balance)}`, `🏦 Savings: ${formatNumber(user.bank_balance)}`, "",
-    `📈 Interest preview: +${formatNumber(interest)}`, "",
-    "Commands:", "💵 !deposit <amount>", "💸 !withdraw <amount>", "🔄 !transfer <user> <amount>", "",
-    "🏦 Your savings earn simulated interest.",
+    interestLine, "",
+    "Commands:", "💵 !deposit <amount>", "💸 !withdraw <amount>", "🔄 !transfer <amount> (reply to someone)", "",
+    "🏦 Savings earn 1% interest, paid once every 24 hours.",
   ].join("\n"));
 }
 
@@ -483,7 +474,7 @@ async function handleDeposit(api, event, args) {
   try {
     const user = await db.deposit(event.threadID, event.senderID, amount);
     await safeReply(api, event, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "     💵 DEPOSIT     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "     💵 DEPOSIT     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `💵 Deposited: ${formatNumber(amount)}`, `💰 Wallet: ${formatNumber(user.balance)}`,
       `🏦 Bank: ${formatNumber(user.bank_balance)}`, "", "✅ Deposit complete.",
     ].join("\n"));
@@ -506,7 +497,7 @@ async function handleWithdraw(api, event, args) {
   try {
     const user = await db.withdraw(event.threadID, event.senderID, amount);
     await safeReply(api, event, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "    💸 WITHDRAW     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "    💸 WITHDRAW     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `💵 Withdrawn: ${formatNumber(amount)}`, `💰 Wallet: ${formatNumber(user.balance)}`,
       `🏦 Bank: ${formatNumber(user.bank_balance)}`, "", "✅ Withdrawal complete.",
     ].join("\n"));
@@ -517,24 +508,42 @@ async function handleWithdraw(api, event, args) {
 }
 
 async function handleTransfer(api, event, args) {
-  if (args.length < 2) {
-    await safeReply(api, event, "🔄 Usage: !transfer <userID> <amount>");
+  const { threadID, senderID, messageReply } = event;
+  const amount = Number(args[0]);
+
+  if (!Number.isInteger(amount) || amount <= 0) {
+    await safeReply(api, event, "🔄 Usage: reply to the person's message with\n!transfer <amount>\n\nExample:\n!transfer 500");
     return;
   }
 
-  const targetID = String(args[0]).replace(/[<@>]/g, "");
-  const amount = Number(args[1]);
+  // Requiring a reply (instead of a typed user ID) means the target
+  // is always someone who actually sent a message in this thread —
+  // no more silently creating a phantom account from a typo'd ID.
+  if (!messageReply || !messageReply.senderID) {
+    await safeReply(api, event, "🔄 Reply to the person's message to transfer coins to them.\n\nExample:\n!transfer 500");
+    return;
+  }
 
-  if (!targetID || !Number.isInteger(amount) || amount <= 0) {
-    await safeReply(api, event, "❌ Invalid transfer.");
+  const targetID = String(messageReply.senderID);
+  const senderIDString = String(senderID);
+
+  if (targetID === senderIDString) {
+    await safeReply(api, event, "❌ You can't transfer coins to yourself.");
     return;
   }
 
   try {
-    await db.transfer(event.threadID, event.senderID, targetID, amount);
+    await db.transfer(threadID, senderIDString, targetID, amount);
+
+    const recipient = await db.getUser(threadID, targetID);
+    const recipientName =
+      recipient.display_name && String(recipient.display_name).trim()
+        ? String(recipient.display_name).trim()
+        : `Player ${targetID.slice(-4)}`;
+
     await safeReply(api, event, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🔄 TRANSFER     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
-      `👤 From: ${getPlayerName(event)}`, `🎯 To: ${targetID}`, `💰 Amount: ${formatNumber(amount)}`, "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🔄 TRANSFER     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
+      `👤 From: ${getPlayerName(event)}`, `🎯 To: ${recipientName}`, `💰 Amount: ${formatNumber(amount)}`, "",
       "✅ Transfer completed.",
     ].join("\n"));
   } catch (error) {
@@ -574,7 +583,7 @@ async function handleDaily(api, event) {
   await db.updateUser(threadID, userID, { last_daily: now, daily_streak: streak });
 
   await safeReply(api, event, [
-    "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎁 DAILY      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+    "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎁 DAILY      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
     `👤 ${getPlayerName(event)}`, "",
     `💰 Reward: +${formatNumber(reward)}`, "⭐ XP: +50", `🔥 Streak: ${streak}`, "",
     `${xp.rank.emoji} ${xp.rank.name}`,
@@ -611,7 +620,7 @@ async function handleWork(api, event) {
   await db.updateUser(threadID, userID, { last_work: now });
 
   await safeReply(api, event, [
-    "╭━━━━━━━━━━━━━━━━━━━━╮", "      💼 WORK       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+    "╭━━━━━━━━━━━━━━━━━━━━╮", "      💼 WORK       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
     `👤 ${getPlayerName(event)}`, "",
     `💼 Job: ${selected.job}`, `💰 Earned: +${formatNumber(reward)}`, "⭐ XP: +25", "",
     `${xp.rank.emoji} ${xp.rank.name}`,
@@ -624,7 +633,7 @@ async function handleRank(api, event) {
   const next = db.getNextRank(Number(user.xp));
 
   await safeReply(api, event, [
-    "╭━━━━━━━━━━━━━━━━━━━━╮", "      🏆 RANK       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+    "╭━━━━━━━━━━━━━━━━━━━━╮", "      🏆 RANK       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
     `👤 ${getPlayerName(event)}`, "",
     `${rank.emoji} ${rank.name}`, `⭐ Level ${user.level}`, `✨ XP: ${formatNumber(user.xp)}`, "",
     next
@@ -641,7 +650,7 @@ async function handleLeaderboard(api, event) {
     return;
   }
 
-  const lines = ["╭━━━━━━━━━━━━━━━━━━━━╮", "   🏆 LEADERBOARD   ", "╰━━━━━━━━━━━━━━━━━━━━╯", ""];
+  const lines = ["╭━━━━━━━━━━━━━━━━━━━━╮", "   🏆 LEADERBOARD   ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", ""];
   rows.forEach((user, index) => {
     const rank = db.getRank(Number(user.xp));
     lines.push(`${index + 1}. ${rank.emoji} ${user.user_id}`, `   Lv.${user.level} • ${formatNumber(user.xp)} XP`, "");
@@ -653,7 +662,7 @@ async function handleLeaderboard(api, event) {
 async function handleLoanMenu(api, event) {
   const user = await db.getUser(event.threadID, event.senderID);
   await safeReply(api, event, [
-    "╭━━━━━━━━━━━━━━━━━━━━╮", "      🏦 LOANS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+    "╭━━━━━━━━━━━━━━━━━━━━╮", "      🏦 LOANS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
     `💳 Credit Score: ${user.credit_score}`, `🧾 Current Loan: ${formatNumber(user.loan_remaining)}`, "",
     "Commands:", "", "!loan apply <amount>", "!loan pay <amount>", "",
     "Maximum loan: 50,000", "Minimum loan: 500", "", "This is a simulated game economy.",
@@ -671,7 +680,7 @@ async function handleLoanApply(api, event, args) {
     // db.applyLoan() returns { principal, interestRate, totalDue, dueDate }
     const loan = await db.applyLoan(event.threadID, event.senderID, amount);
     await safeReply(api, event, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "  🏦 LOAN APPROVED  ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "  🏦 LOAN APPROVED  ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `💰 Borrowed: ${formatNumber(loan.principal)}`,
       `📈 Interest: ${Math.round(loan.interestRate * 100)}%`,
       `🧾 Repayment: ${formatNumber(loan.totalDue)}`, "",
@@ -696,7 +705,7 @@ async function handleLoanPay(api, event, args) {
   try {
     const result = await db.payLoan(event.threadID, event.senderID, amount);
     await safeReply(api, event, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "  💳 LOAN PAYMENT   ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "  💳 LOAN PAYMENT   ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `💵 Paid: ${formatNumber(result.payment)}`, `🧾 Remaining: ${formatNumber(result.remaining)}`,
       `💳 Credit Score: ${result.creditScore}`, "",
       result.remaining === 0 ? "✅ Loan completely paid!" : "⏳ Keep making payments.",
@@ -761,7 +770,7 @@ async function handleTrivia(api, event) {
     }
 
     const text = [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🧠 TRIVIA      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🧠 TRIVIA      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, "", `❓ ${q.question}`, "",
       `A. ${q.options[0]}`, `B. ${q.options[1]}`, `C. ${q.options[2]}`, `D. ${q.options[3]}`, "",
       "⭐ Reward: +50 XP", "💰 Correct: +150 coins", "", "⏳ Reply A / B / C / D",
@@ -797,7 +806,7 @@ async function resolveTrivia(api, event, answer) {
     const balanceText = await getFinalBalanceText(threadID, userID);
 
     const finalText = [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🧠 TRIVIA      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🧠 TRIVIA      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       correct ? "🏆 CORRECT ANSWER!" : "❌ WRONG ANSWER", "",
       `👤 ${getPlayerName(event)}`, `🎯 Your answer: ${normalizedAnswer}`, `✅ Correct: ${correctLetter}`, "",
       `💰 Reward: +${formatNumber(reward.coins)} coins`, `⭐ XP: +${reward.xp}`, balanceText, "",
@@ -830,6 +839,12 @@ async function handleRPS(api, event, args) {
     return;
   }
 
+  const cooldown = checkInstantGameCooldown(threadID, userID);
+  if (cooldown > 0) {
+    await safeReply(api, event, `⏳ Slow down! Try again in ${cooldown}s.`);
+    return;
+  }
+
   if (!lockGame(threadID, userID)) {
     await safeReply(api, event, "⏳ Finish your current game first.");
     return;
@@ -851,19 +866,19 @@ async function handleRPS(api, event, args) {
     const won = result === "win";
 
     const animator = await createAnimator(api, threadID, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "       ✊ RPS       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "       ✊ RPS       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, "", "🤖 BOT", "     🪨   📄   ✂", "",
       `✦ Your choice: ${emoji[choice]}`, "", "⏳ Choosing...",
     ].join("\n"), "rps");
 
     let success = await animator.waitAndEdit([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "       ✊ RPS       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "       ✊ RPS       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 You: ${emoji[choice]}`, "🤖 Bot: 🌀", "", "     🪨  →  📄  →  ✂", "", "⚡ Match locked.",
     ].join("\n"));
 
     if (success) {
       success = await animator.waitAndEdit([
-        "╭━━━━━━━━━━━━━━━━━━━━╮", "       ✊ RPS       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+        "╭━━━━━━━━━━━━━━━━━━━━╮", "       ✊ RPS       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
         `👤 You: ${emoji[choice]}`, `🤖 Bot: ${emoji[botChoice]}`, "", "⚡ RESULT READY...",
       ].join("\n"));
     }
@@ -873,7 +888,7 @@ async function handleRPS(api, event, args) {
     const title = result === "win" ? "🏆 YOU WIN!" : result === "tie" ? "🤝 DRAW!" : "❌ YOU LOSE";
 
     await animator.final([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "       ✊ RPS       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "       ✊ RPS       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       title, "", `👤 ${getPlayerName(event)}`, "",
       `✦ You: ${emoji[choice]} ${choice}`, `✦ Bot: ${emoji[botChoice]} ${botChoice}`, "",
       `💰 Reward: +${formatNumber(reward.coins)} coins`, `⭐ XP: +${reward.xp}`, balanceText, "",
@@ -906,6 +921,12 @@ async function handleRoll(api, event, args) {
     }
   }
 
+  const cooldown = checkInstantGameCooldown(threadID, userID);
+  if (cooldown > 0) {
+    await safeReply(api, event, `⏳ Slow down! Try again in ${cooldown}s.`);
+    return;
+  }
+
   if (!lockGame(threadID, userID)) {
     await safeReply(api, event, "⏳ Finish your current game first.");
     return;
@@ -917,20 +938,20 @@ async function handleRoll(api, event, args) {
     const won = roll >= target;
 
     const animator = await createAnimator(api, threadID, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎲 DICE       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎲 DICE       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, `🎯 D${sides}`, "", "🎲 Rolling...", "", "        ⚀", "",
       "⏳ The dice are moving...",
     ].join("\n"), "roll");
 
     let success = await animator.waitAndEdit([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎲 DICE       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎲 DICE       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, `🎯 D${sides}`, "", "🎲 Rolling...", "",
       `       [ ${randInt(1, sides)} ]`, "", "🌀 Shaking...",
     ].join("\n"));
 
     if (success) {
       await animator.waitAndEdit([
-        "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎲 DICE       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+        "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎲 DICE       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
         `👤 ${getPlayerName(event)}`, `🎯 Target: ${target}+`, "", "🎲 Final roll...", "",
         `       [ ${randInt(1, sides)} ]`, "", "⚡ LOCKING IN...",
       ].join("\n"));
@@ -940,7 +961,7 @@ async function handleRoll(api, event, args) {
     const balanceText = await getFinalBalanceText(threadID, userID);
 
     await animator.final([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎲 DICE       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎲 DICE       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       won ? "🏆 HIGH ROLL!" : "❌ LOW ROLL", "", `👤 ${getPlayerName(event)}`, "",
       `🎲 Result: ${roll} / ${sides}`, `🎯 Target: ${target}+`, "",
       `💰 Reward: +${formatNumber(reward.coins)} coins`, `⭐ XP: +${reward.xp}`, balanceText, "",
@@ -967,6 +988,12 @@ async function handleGuess(api, event, args) {
     return;
   }
 
+  const cooldown = checkInstantGameCooldown(threadID, userID);
+  if (cooldown > 0) {
+    await safeReply(api, event, `⏳ Slow down! Try again in ${cooldown}s.`);
+    return;
+  }
+
   if (!lockGame(threadID, userID)) {
     await safeReply(api, event, "⏳ Finish your current game first.");
     return;
@@ -977,20 +1004,20 @@ async function handleGuess(api, event, args) {
     const won = guess === secret;
 
     const animator = await createAnimator(api, threadID, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎯 GUESS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎯 GUESS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, `🎯 Your guess: ${guess}`, "", "🔎 Searching...", "",
       "1 • 2 • 3 • 4 • 5", "6 • 7 • 8 • 9 • 10", "", "⏳ Finding the number...",
     ].join("\n"), "guess");
 
     let success = await animator.waitAndEdit([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎯 GUESS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎯 GUESS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, `🎯 Your guess: ${guess}`, "", "🔎 SCANNING...", "",
       "1 → 4 → 7 → 10 → ?", "", "🌀 Searching...",
     ].join("\n"));
 
     if (success) {
       await animator.waitAndEdit([
-        "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎯 GUESS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+        "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎯 GUESS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
         `👤 ${getPlayerName(event)}`, "", "🎯 TARGET LOCKED", "", "1  2  3  4  5", "6  7  8  9  10", "",
         `🔒 Locking on ${guess}...`,
       ].join("\n"));
@@ -1000,7 +1027,7 @@ async function handleGuess(api, event, args) {
     const balanceText = await getFinalBalanceText(threadID, userID);
 
     await animator.final([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎯 GUESS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎯 GUESS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       won ? "🎯 PERFECT GUESS!" : "❌ WRONG GUESS", "", `👤 ${getPlayerName(event)}`, "",
       `✦ You picked: ${guess}`, `✦ Number was: ${secret}`, "",
       `💰 Reward: +${formatNumber(reward.coins)} coins`, `⭐ XP: +${reward.xp}`, balanceText, "",
@@ -1027,6 +1054,12 @@ async function handleCoinflip(api, event, args) {
   const threadID = String(event.threadID);
   const userID = String(event.senderID);
 
+  const cooldown = checkInstantGameCooldown(threadID, userID);
+  if (cooldown > 0) {
+    await safeReply(api, event, `⏳ Slow down! Try again in ${cooldown}s.`);
+    return;
+  }
+
   if (!lockGame(threadID, userID)) {
     await safeReply(api, event, "⏳ Finish your current game first.");
     return;
@@ -1037,19 +1070,19 @@ async function handleCoinflip(api, event, args) {
     const won = choice === result;
 
     const animator = await createAnimator(api, threadID, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🪙 COINFLIP     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🪙 COINFLIP     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, `✦ Pick: ${choice}`, "", "🪙 FLIPPING", "",
       "       🪙", "      ↗", "     ↘", "", "⏳ The coin is in the air...",
     ].join("\n"), "coinflip");
 
     let success = await animator.waitAndEdit([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🪙 COINFLIP     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🪙 COINFLIP     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 Pick: ${choice}`, "", "        🪙", "       ↗", "      ↘", "     🪙", "", "🌀 Still flipping...",
     ].join("\n"));
 
     if (success) {
       await animator.waitAndEdit([
-        "╭━━━━━━━━━━━━━━━━━━━━╮", "    🪙 COINFLIP     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+        "╭━━━━━━━━━━━━━━━━━━━━╮", "    🪙 COINFLIP     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
         `👤 Pick: ${choice}`, "", "          🪙", "", "████████████████", "", "⚡ FINAL...",
       ].join("\n"));
     }
@@ -1058,7 +1091,7 @@ async function handleCoinflip(api, event, args) {
     const balanceText = await getFinalBalanceText(threadID, userID);
 
     await animator.final([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🪙 COINFLIP     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🪙 COINFLIP     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       won ? "🏆 CORRECT!" : "❌ WRONG", "", `👤 ${getPlayerName(event)}`, "",
       `✦ Pick: ${choice}`, `✦ Result: ${result}`, "",
       `💰 Reward: +${formatNumber(reward.coins)} coins`, `⭐ XP: +${reward.xp}`, balanceText, "",
@@ -1078,6 +1111,12 @@ async function handleCoinflip(api, event, args) {
 async function handleSlots(api, event) {
   const threadID = String(event.threadID);
   const userID = String(event.senderID);
+
+  const cooldown = checkInstantGameCooldown(threadID, userID);
+  if (cooldown > 0) {
+    await safeReply(api, event, `⏳ Slow down! Try again in ${cooldown}s.`);
+    return;
+  }
 
   if (!lockGame(threadID, userID)) {
     await safeReply(api, event, "⏳ Finish your current game first.");
@@ -1104,20 +1143,20 @@ async function handleSlots(api, event) {
     const frame3 = randomReels();
 
     const animator = await createAnimator(api, threadID, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎰 SLOTS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎰 SLOTS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, "", "┌────────────────────┐", reelText(["❔", "❔", "❔"]),
       "└────────────────────┘", "", "🎰 Starting...",
     ].join("\n"), "slots");
 
     let success = await animator.waitAndEdit([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎰 SLOTS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎰 SLOTS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       "┌────────────────────┐", reelText(frame1), "└────────────────────┘", "",
       "🎰 REELS SPINNING", "", "🌀 • 🌀 • 🌀",
     ].join("\n"));
 
     if (success) {
       success = await animator.waitAndEdit([
-        "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎰 SLOTS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+        "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎰 SLOTS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
         "┌────────────────────┐", reelText(frame2), "└────────────────────┘", "",
         "🎰 REEL 1 • LOCKED", "🎰 REEL 2 • SPINNING", "🎰 REEL 3 • SPINNING",
       ].join("\n"));
@@ -1125,7 +1164,7 @@ async function handleSlots(api, event) {
 
     if (success) {
       await animator.waitAndEdit([
-        "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎰 SLOTS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+        "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎰 SLOTS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
         "┌────────────────────┐", reelText(frame3), "└────────────────────┘", "",
         "🎰 REEL 1 • LOCKED", "🎰 REEL 2 • LOCKED", "🎰 REEL 3 • FINAL SPIN",
       ].join("\n"));
@@ -1135,7 +1174,7 @@ async function handleSlots(api, event) {
     const balanceText = await getFinalBalanceText(threadID, userID);
 
     await animator.final([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎰 SLOTS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🎰 SLOTS      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       won ? (sameCount === 3 ? "💎 TRIPLE MATCH!" : "🎉 MATCH!") : "❌ NO MATCH", "",
       "┌────────────────────┐", reelText(finalReels), "└────────────────────┘", "",
       `💰 Reward: +${formatNumber(reward.coins)} coins`, `⭐ XP: +${reward.xp}`, balanceText, "",
@@ -1212,7 +1251,7 @@ function blackjackFinalText(event, playerHand, dealerHand, result, reward, balan
   else title = "❌ DEALER WINS";
 
   return [
-    "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+    "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
     title, "", `👤 ${getPlayerName(event)}`, "",
     blackjackStateText(playerHand, dealerHand, true), "",
     `💰 Reward: +${formatNumber(reward.coins)} coins`, `⭐ XP: +${reward.xp}`, balanceText, "",
@@ -1236,13 +1275,13 @@ async function handleBlackjack(api, event) {
     const dealerHand = [deck.pop(), deck.pop()];
 
     const animator = await createAnimator(api, threadID, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, "", "🃏 DEALING", "", "👤 YOU", "│ 🂠  🂠", "",
       "🤖 DEALER", "│ 🂠  🂠", "", "⏳ Dealing cards...",
     ].join("\n"), "blackjack");
 
     await animator.waitAndEdit([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, "", blackjackStateText(playerHand, dealerHand, false), "",
       "🃏 Reading the table...",
     ].join("\n"));
@@ -1266,7 +1305,7 @@ async function handleBlackjack(api, event) {
     });
 
     await animator.final([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, "", blackjackStateText(playerHand, dealerHand, false), "",
       "⚔ YOUR MOVE", "", "➡ !hit", "➡ !stand",
     ].join("\n"));
@@ -1315,7 +1354,7 @@ async function handleBlackjackHit(api, event) {
     }
 
     const animatorText = [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       "🎴 CARD DRAWN", "", `👤 ${getPlayerName(event)}`, "",
       blackjackStateText(session.playerHand, session.dealerHand, false), "",
       "⚔ YOUR MOVE", "", "➡ !hit", "➡ !stand",
@@ -1353,7 +1392,7 @@ async function handleBlackjackStand(api, event) {
 
   try {
     let edited = await editMessageSafe(api, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       "🤖 DEALER REVEALS", "", `👤 ${getPlayerName(event)}`, "",
       blackjackStateText(session.playerHand, session.dealerHand, true), "", "🃏 Dealer is checking...",
     ].join("\n"), session.messageID);
@@ -1361,7 +1400,11 @@ async function handleBlackjackStand(api, event) {
     if (!edited) console.warn("[games] blackjack stand reveal edit failed");
 
     let dealerDraws = 0;
-    while (handValue(session.dealerHand) < 17 && session.deck.length > 0 && dealerDraws < 3) {
+    // Standard blackjack: dealer draws until 17+, no artificial cap.
+    // A hard "< 3" cap here used to make the dealer stand below 17
+    // whenever their starting two cards were low, which silently
+    // skewed the odds in the player's favor.
+    while (handValue(session.dealerHand) < 17 && session.deck.length > 0) {
       await sleep(editDelay());
       const nextCard = session.deck.pop();
       if (!nextCard) break;
@@ -1370,7 +1413,7 @@ async function handleBlackjackStand(api, event) {
       dealerDraws++;
 
       edited = await editMessageSafe(api, [
-        "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+        "╭━━━━━━━━━━━━━━━━━━━━╮", "    🃏 BLACKJACK     ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
         "🤖 DEALER DRAWS", "", blackjackStateText(session.playerHand, session.dealerHand, true), "",
         handValue(session.dealerHand) >= 17 ? "⚡ Dealer is standing..." : "🃏 Another card...",
       ].join("\n"), session.messageID);
@@ -1449,7 +1492,7 @@ async function handleMath(api, event) {
     const difficultyName = q.difficulty === 1 ? "Easy" : q.difficulty === 2 ? "Medium" : "Hard";
 
     const animator = await createAnimator(api, threadID, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🧮 MATH       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🧮 MATH       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, "", `❓ ${q.question}`, "", `📊 Difficulty: ${difficultyName}`, "",
       "⏳ Reply with your answer.",
     ].join("\n"), "math");
@@ -1478,7 +1521,7 @@ async function resolveMath(api, event, answerText) {
     const balanceText = await getFinalBalanceText(threadID, userID);
 
     const finalText = [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🧮 MATH       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "      🧮 MATH       ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       correct ? "🏆 CORRECT!" : "❌ WRONG", "", `👤 ${getPlayerName(event)}`, "",
       `❓ ${session.question}`, `✏ Your answer: ${answerText}`, `✅ Correct answer: ${session.answer}`, "",
       `💰 Reward: +${formatNumber(reward.coins)} coins`, `⭐ XP: +${reward.xp}`, balanceText, "",
@@ -1524,7 +1567,7 @@ async function handleRiddle(api, event) {
     const riddle = RIDDLES[randInt(0, RIDDLES.length - 1)];
 
     const animator = await createAnimator(api, threadID, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🧩 RIDDLE      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🧩 RIDDLE      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, "", `❓ ${riddle.question}`, "", "🧠 Think carefully...", "",
       "✦ Reply with your answer.",
     ].join("\n"), "riddle");
@@ -1555,7 +1598,7 @@ async function resolveRiddle(api, event, answerText) {
     const balanceText = await getFinalBalanceText(threadID, userID);
 
     const finalText = [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🧩 RIDDLE      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🧩 RIDDLE      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       correct ? "🏆 CORRECT!" : "❌ NOT QUITE", "", `👤 ${getPlayerName(event)}`, "",
       `❓ ${session.question}`, `✏ Your answer: ${answerText}`, `✅ Answer: ${session.answers[0]}`, "",
       `💰 Reward: +${formatNumber(reward.coins)} coins`, `⭐ XP: +${reward.xp}`, balanceText, "",
@@ -1586,6 +1629,12 @@ async function handle8Ball(api, event, text) {
     return;
   }
 
+  const cooldown = checkInstantGameCooldown(threadID, userID);
+  if (cooldown > 0) {
+    await safeReply(api, event, `⏳ Slow down! Try again in ${cooldown}s.`);
+    return;
+  }
+
   if (!lockGame(threadID, userID)) {
     await safeReply(api, event, "⏳ Finish your current game first.");
     return;
@@ -1607,20 +1656,20 @@ async function handle8Ball(api, event, text) {
     const reward = await awardPlayer(threadID, userID, "8ball", true);
 
     const animator = await createAnimator(api, threadID, [
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🎱 8-BALL      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🎱 8-BALL      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, "", "🔮 THE QUESTION", "", `"${question}"`, "",
       "        🎱", "", "The 8-ball is thinking...", "⏳ Please wait.",
     ].join("\n"), "8ball");
 
     let success = await animator.waitAndEdit([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🎱 8-BALL      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🎱 8-BALL      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       "🔮 THE QUESTION", "", `"${question}"`, "", "       🎱", "        ↻", "       ↻", "      ↻", "",
       "🔮 Reading the future...",
     ].join("\n"));
 
     if (success) {
       await animator.waitAndEdit([
-        "╭━━━━━━━━━━━━━━━━━━━━╮", "     🎱 8-BALL      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+        "╭━━━━━━━━━━━━━━━━━━━━╮", "     🎱 8-BALL      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
         "🔮 THE QUESTION", "", `"${question}"`, "", "        🎱", "", "████████████████", "",
         "⚡ REVEALING...",
       ].join("\n"));
@@ -1629,7 +1678,7 @@ async function handle8Ball(api, event, text) {
     const balanceText = await getFinalBalanceText(threadID, userID);
 
     await animator.final([
-      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🎱 8-BALL      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "",
+      "╭━━━━━━━━━━━━━━━━━━━━╮", "     🎱 8-BALL      ", "╰━━━━━━━━━━━━━━━━━━━━╯", "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "",
       `👤 ${getPlayerName(event)}`, "", "🔮 THE QUESTION", "", `"${question}"`, "", "🎱 ANSWER", "",
       `「 ${answer} 」`, "", `💰 Reward: +${formatNumber(reward.coins)} coins`, `⭐ XP: +${reward.xp}`,
       balanceText, "", `${reward.rank.emoji} ${reward.rank.name}`,
