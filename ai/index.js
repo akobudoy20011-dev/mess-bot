@@ -55,8 +55,8 @@ async function handleAiMessage(api, event, text, originalText) {
   try {
     const history = await getRecentMessages(session.conversation_id, 12);
     const memories = await getRelevantMemories(character.id, threadID, userID, 12);
-    await saveMessage(session.conversation_id, "user", original);
     const result = await generateReply(buildMessages(character, memories, history, original));
+    await saveMessage(session.conversation_id, "user", original);
     await saveMessage(session.conversation_id, "assistant", result.reply);
     await saveMemories(character.id, threadID, userID, result.memories);
     await send(api, result.reply, threadID);
