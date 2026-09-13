@@ -566,16 +566,23 @@ async function handleMessage(
       return;
     }
 
-    if (
-      await handleGamesCommand(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
+    const gameMatch = text.match(/^!(trivia|rps|roll|guess|coinflip|blackjack|slots|math|riddle|8ball)(?:\s+(.*))?$/i);
+
+if (gameMatch) {
+  const gameCommand = gameMatch[1].toLowerCase();
+  const gameArgs = gameMatch[2] || "";
+
+  if (
+    await handleGamesCommand(
+      api,
+      event,
+      gameCommand,
+      gameArgs
+    )
+  ) {
+    return;
+  }
+}
 
     if (
       await handleEconomyCommand(
