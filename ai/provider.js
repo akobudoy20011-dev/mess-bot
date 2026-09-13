@@ -1,40 +1,116 @@
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
+const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
-function parseProviderContent(content) {
-  const text = String(content || "").trim();
-  if (!text) throw new Error("The AI provider returned an empty response.");
-  try {
-    const parsed = JSON.parse(text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
-    if (typeof parsed.reply === "string" && parsed.reply.trim()) return { reply: parsed.reply.trim(), memories: parsed.memories || [] };
-  } catch (error) {
-    // Compatible providers may ignore response_format; preserve the useful text.
-  }
-  return { reply: text, memories: [] };
-}
+    function contentToText(content) {
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        return typeof part?.text === "string" ? part.text : "";
+      })
+      .join("");
+    }
 
-async function generateReply(messages) {
-  const apiKey = String(process.env.AI_API_KEY || "").trim();
-  if (!apiKey) throw new Error("AI_API_KEY is not configured.");
-  const baseUrl = String(process.env.AI_BASE_URL || DEFAULT_BASE_URL).replace(/\/$/, "");
-  const model = String(process.env.AI_MODEL || "gpt-4o-mini").trim();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45_000);
-  try {
-    const response = await fetch(baseUrl + "/chat/completions", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, temperature: 0.85, response_format: { type: "json_object" } }),
-      signal: controller.signal,
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error("AI provider request failed: " + (data?.error?.message || "HTTP " + response.status));
-    return parseProviderContent(data?.choices?.[0]?.message?.content);
-  } catch (error) {
-    if (error.name === "AbortError") throw new Error("AI provider request timed out.");
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+    function toGeminiRequest(messages) {
+    const systemParts = [];
+    const contents = [];
 
-module.exports = { generateReply };
+    for (const message of Array.isArray(messages) ? messages : []) {
+      const text = contentToText(message?.content).trim();
+      if (!text) continue;
+
+      const role = String(message?.role || "user").toLowerCase();
+      if (role === "system") {
+        systemParts.push(text);
+        continue;
+      }
+
+      contents.push({
+        role: role === "assistant" ? "model" : "user",
+        parts: [{ text }],
+      });
+    }
+
+    if (!contents.some((content) => content.role === "user")) {
+      throw new Error("Gemini request has no user message.");
+    }
+
+    const request = {
+      contents,
+      generationConfig: {
+        temperature: 0.85,
+      },
+    };
+
+    if (systemParts.length) {
+      request.systemInstruction = {
+        parts: [{ text: systemParts.join("\n\n") }],
+      };
+    }
+
+    return request;
+    }
+
+    function getGeneratedText(data) {
+    const parts = data?.candidates?.[0]?.content?.parts;
+    const text = Array.isArray(parts)
+      ? parts.map((part) => (typeof part?.text === "string" ? part.text : "")).join("").trim()
+      : "";
+
+    if (!text) {
+      console.error("[Gemini] Response did not contain generated text.", {
+        finishReason: data?.candidates?.[0]?.finishReason || null,
+      });
+      throw new Error("Gemini returned an empty response.");
+    }
+
+    return text;
+    }
+
+    async function generateReply(messages) {
+    const apiKey = String(process.env.GEMINI_API_KEY || "").trim();
+    if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
+
+    const configuredModel = String(process.env.AI_MODEL || "").trim();
+    if (!configuredModel) throw new Error("AI_MODEL is not configured.");
+    const model = configuredModel.replace(/^models\//, "");
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 45_000);
+    const endpoint = GEMINI_API_BASE_URL + "/models/" + encodeURIComponent(model) + ":generateContent?key=" + encodeURIComponent(apiKey);
+
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(toGeminiRequest(messages)),
+        signal: controller.signal,
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        const providerMessage = data?.error?.message || "HTTP " + response.status;
+        console.error("[Gemini] API request failed:", {
+          status: response.status,
+          message: providerMessage,
+        });
+        throw new Error("Gemini request failed.");
+      }
+
+      return {
+        reply: getGeneratedText(data),
+        memories: [],
+      };
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        console.error("[Gemini] API request timed out.");
+        throw new Error("Gemini request timed out.");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    }
+
+    module.exports = { generateReply };
+    
