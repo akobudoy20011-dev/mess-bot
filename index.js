@@ -11,6 +11,7 @@ const db = require("./db");
 const { handleEconomyCommand } = require("./economy");
 const { handleGamesCommand } = require("./games");
 const { handleRpgCommand } = require("./rpg");
+const { handleRpgCharacterMessage } = require("./rpg/character-ai");
 const { handleAiMessage } = require("./ai");
 
 const {
@@ -542,6 +543,10 @@ async function handleMessage(
   // -------------------------------------------------------------------------
 
   if (await handleAiMessage(api, event, text, originalText)) {
+    return;
+  }
+
+  if (await handleRpgCharacterMessage(api, event, text, originalText)) {
     return;
   }
 
