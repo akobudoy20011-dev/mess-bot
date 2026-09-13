@@ -181,7 +181,6 @@ async function handleProperty(api, event, args) {
   const userID = event.senderID;
   await ensurePlayer(threadID, userID);
   args = Array.isArray(args) ? args : [];
-  const userID = event.senderID;
   const action = normalizeKey(args[0] || "info");
   if (action === "buy") {
     const target = normalizeKey(args[1]);
