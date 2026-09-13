@@ -7,6 +7,22 @@ const {
   stopSession,
 } = require("../ai/history");
 const { CHARACTERS } = require("./characters");
+const lastRequestAt = new Map();
+
+function getCharacterCooldownMs() {
+  const configured = Number(process.env.CHARACTER_COOLDOWN_MS || "5000");
+  return Number.isFinite(configured) && configured >= 0 ? configured : 5000;
+}
+
+function cooldownKey(userID, characterID) {
+  return String(userID) + ":" + String(characterID);
+}
+
+function remainingCooldown(userID, characterID) {
+  const elapsed = Date.now() - (lastRequestAt.get(cooldownKey(userID, characterID)) || 0);
+  return Math.max(0, getCharacterCooldownMs() - elapsed);
+}
+
 
 function send(api, message, threadID) {
   return new Promise((resolve, reject) => {
@@ -88,6 +104,13 @@ async function handleRpgCharacterMessage(api, event, text, originalText) {
       return true;
     }
 
+    const remaining = remainingCooldown(userID, character.id);
+    if (remaining > 0) {
+      await send(api, "Give me a moment.", threadID);
+      return true;
+    }
+
+    lastRequestAt.set(cooldownKey(userID, character.id), Date.now());
     const history = await getRecentMessages(conversation.id, 12);
     const result = await generateReply(buildMessages(character, history, argument));
     await saveMessage(conversation.id, "user", argument);
