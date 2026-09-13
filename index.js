@@ -10,6 +10,7 @@ const db = require("./db");
 
 const { handleEconomyCommand } = require("./economy");
 const { handleGamesCommand } = require("./games");
+const { handleRpgCommand } = require("./rpg");
 
 const {
   searchYouTube,
@@ -26,13 +27,6 @@ const {
   downloadAudioToFile,
 } = require("./jamendo");
 
-const {
-  getRizz,
-  getAura,
-  getIQ,
-  getSimp,
-  getClown,
-} = require("./funcommands");
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -548,6 +542,17 @@ async function handleMessage(
 
   try {
     if (
+      await handleRpgCommand(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
+      return;
+    }
+
+    if (
       await handleGamesCommand(
         api,
         event,
@@ -570,7 +575,7 @@ async function handleMessage(
     }
   } catch (error) {
     console.error(
-      "Economy/games command failed:",
+      "RPG/economy/games command failed:",
       error
     );
 
@@ -615,21 +620,17 @@ async function handleMessage(
         "  Search YouTube and send the audio.",
         "  Example: !play Die With A Smile",
         "",
-        "✨ FUN",
-        "• !rizz <name>",
-        "  Random rizz score.",
-        "",
-        "• !aura <name>",
-        "  Random aura points.",
-        "",
-        "• !iq <name>",
-        "  Random IQ score.",
-        "",
-        "• !simp <name>",
-        "  Random simp percentage.",
-        "",
-        "• !clown <name>",
-        "  Random clown percentage.",
+        "🌑 ECLIPSE RPG",
+        "• !rpg help",
+        "  Open the persistent character, kingdom, and army system.",
+        "• !rpg profile / !rpg kingdom",
+        "  View your ruler and domain.",
+        "• !rpg property buy cottage",
+        "  Start expanding your domain.",
+        "• !rpg train infantry 10",
+        "  Train troops using your wallet.",
+        "• !rpg march ironspine",
+        "  Travel by map distance with no global time cap.",
         "",
         "🔥 BANAT",
         "• !banat on",
@@ -822,116 +823,6 @@ async function handleMessage(
     void sendAudioTrack(
       api,
       requestedSong,
-      threadID
-    );
-
-    return;
-  }
-
-  // -------------------------------------------------------------------------
-  // RIZZ
-  // -------------------------------------------------------------------------
-
-  if (
-    text === "!rizz" ||
-    text.startsWith("!rizz ")
-  ) {
-    const name =
-      originalText
-        .slice("!rizz".length)
-        .trim() || "You";
-
-    sendReplyWithTyping(
-      api,
-      getRizz(name).text,
-      threadID
-    );
-
-    return;
-  }
-
-  // -------------------------------------------------------------------------
-  // AURA
-  // -------------------------------------------------------------------------
-
-  if (
-    text === "!aura" ||
-    text.startsWith("!aura ")
-  ) {
-    const name =
-      originalText
-        .slice("!aura".length)
-        .trim() || "You";
-
-    sendReplyWithTyping(
-      api,
-      getAura(name).text,
-      threadID
-    );
-
-    return;
-  }
-
-  // -------------------------------------------------------------------------
-  // IQ
-  // -------------------------------------------------------------------------
-
-  if (
-    text === "!iq" ||
-    text.startsWith("!iq ")
-  ) {
-    const name =
-      originalText
-        .slice("!iq".length)
-        .trim() || "You";
-
-    sendReplyWithTyping(
-      api,
-      getIQ(name).text,
-      threadID
-    );
-
-    return;
-  }
-
-  // -------------------------------------------------------------------------
-  // SIMP
-  // -------------------------------------------------------------------------
-
-  if (
-    text === "!simp" ||
-    text.startsWith("!simp ")
-  ) {
-    const name =
-      originalText
-        .slice("!simp".length)
-        .trim() || "You";
-
-    sendReplyWithTyping(
-      api,
-      getSimp(name).text,
-      threadID
-    );
-
-    return;
-  }
-
-  // -------------------------------------------------------------------------
-  // CLOWN
-  // -------------------------------------------------------------------------
-
-  if (
-    text === "!clown" ||
-    text.startsWith("!clown ")
-  ) {
-    const name =
-      originalText
-        .slice("!clown".length)
-        .trim() || "You";
-
-    sendReplyWithTyping(
-      api,
-      getClown(name).text,
       threadID
     );
 
