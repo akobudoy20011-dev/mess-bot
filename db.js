@@ -322,7 +322,7 @@ async function connect() {
       walls       INTEGER NOT NULL DEFAULT 0,
       towers      INTEGER NOT NULL DEFAULT 0,
       gates       INTEGER NOT NULL DEFAULT 0,
-      moats      INTEGER NOT NULL DEFAULT 0,
+      moats       INTEGER NOT NULL DEFAULT 0,
       guards      INTEGER NOT NULL DEFAULT 0,
       traps       INTEGER NOT NULL DEFAULT 0,
       barrier     INTEGER NOT NULL DEFAULT 0,
@@ -347,6 +347,43 @@ async function connect() {
       unlocked  BOOLEAN NOT NULL DEFAULT TRUE,
       updated_at BIGINT NOT NULL,
       PRIMARY KEY (thread_id, user_id, spell_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_location_states (
+      thread_id      TEXT NOT NULL,
+      location_id    TEXT NOT NULL,
+      garrison       INTEGER NOT NULL DEFAULT 0,
+      defense        INTEGER NOT NULL DEFAULT 0,
+      prosperity     INTEGER NOT NULL DEFAULT 100,
+      hostility      INTEGER NOT NULL DEFAULT 0,
+      last_raided_at BIGINT,
+      updated_at     BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, location_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_scouting_reports (
+      id                BIGSERIAL PRIMARY KEY,
+      thread_id         TEXT NOT NULL,
+      user_id           TEXT NOT NULL,
+      location_id       TEXT NOT NULL,
+      accuracy          INTEGER NOT NULL,
+      garrison_estimate INTEGER,
+      defense_estimate  INTEGER,
+      created_at        BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_battles (
+      id                BIGSERIAL PRIMARY KEY,
+      thread_id         TEXT NOT NULL,
+      battle_type       TEXT NOT NULL,
+      attacker_user_id  TEXT NOT NULL,
+      defender_user_id  TEXT,
+      location_id       TEXT,
+      result            TEXT NOT NULL,
+      attacker_losses   INTEGER NOT NULL DEFAULT 0,
+      defender_losses   INTEGER NOT NULL DEFAULT 0,
+      loot_gold         INTEGER NOT NULL DEFAULT 0,
+      created_at        BIGINT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS rpg_inventory_items (
