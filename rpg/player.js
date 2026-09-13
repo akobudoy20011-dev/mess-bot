@@ -3,11 +3,14 @@ const { getStartingSpells, grantSpell } = require("./magic");
 const { getClass, getClassKey, getSkillsForClass } = require("./classes");
 const { getItem } = require("./items");
 const { REGIONS, resolveLocation } = require("./world");
+
 async function ensurePlayer(threadID, userID) {
   const threadId = String(threadID);
   const userId = String(userID);
   const now = Date.now();
+
   await db.getUser(threadId, userId);
+
   const existing = await db.query(
     `
     SELECT *
@@ -17,9 +20,11 @@ async function ensurePlayer(threadID, userID) {
     `,
     [threadId, userId]
   );
+
   if (existing.rows.length === 0) {
     const definition = getClass("knight");
     const base = definition.base;
+
     await db.query(
       `
       INSERT INTO rpg_players (
@@ -57,6 +62,7 @@ async function ensurePlayer(threadID, userID) {
       ]
     );
   }
+
   await db.query(
     `
     INSERT INTO rpg_armies (
@@ -67,8 +73,11 @@ async function ensurePlayer(threadID, userID) {
     `,
     [threadId, userId, now]
   );
+
   const player = await getPlayer(threadId, userId);
+
   const skills = getSkillsForClass(player.character_class);
+
   for (const skill of skills) {
     await db.query(
       `
@@ -81,6 +90,14 @@ async function ensurePlayer(threadID, userID) {
       [threadId, userId, skill.id, now]
     );
   }
+
+  // Grant starting spells for the player's class.
+  const startingSpells = getStartingSpells(player.character_class);
+
+  for (const spellId of startingSpells) {
+    await grantSpell(threadId, userId, spellId);
+  }
+
   await db.query(
     `
     INSERT INTO rpg_inventory_items (
@@ -91,8 +108,10 @@ async function ensurePlayer(threadID, userID) {
     `,
     [threadId, userId, now]
   );
+
   return player;
 }
+
 async function getPlayer(threadID, userID) {
   const result = await db.query(
     `
@@ -103,11 +122,14 @@ async function getPlayer(threadID, userID) {
     `,
     [String(threadID), String(userID)]
   );
+
   return result.rows[0] || null;
 }
+
 async function getUserState(threadID, userID) {
   const player = await ensurePlayer(threadID, userID);
   const user = await db.getUser(threadID, userID);
+
   const skills = await db.query(
     `
     SELECT skill_id, level, unlocked
@@ -119,8 +141,10 @@ async function getUserState(threadID, userID) {
     `,
     [String(threadID), String(userID)]
   );
+
   const inventory = await getInventory(threadID, userID);
   const equipment = await getEquipment(threadID, userID);
+
   return {
     player,
     user,
@@ -129,11 +153,14 @@ async function getUserState(threadID, userID) {
     equipment,
   };
 }
+
 async function setClass(threadID, userID, className) {
   const key = getClassKey(className);
   const definition = getClass(key);
   const base = definition.base;
+
   await ensurePlayer(threadID, userID);
+
   await db.query(
     `
     UPDATE rpg_players
@@ -171,7 +198,9 @@ async function setClass(threadID, userID, className) {
       Date.now(),
     ]
   );
+
   const skills = getSkillsForClass(key);
+
   await db.query(
     `
     DELETE FROM rpg_player_skills
@@ -180,6 +209,7 @@ async function setClass(threadID, userID, className) {
     `,
     [String(threadID), String(userID)]
   );
+
   for (const skill of skills) {
     await db.query(
       `
@@ -191,10 +221,20 @@ async function setClass(threadID, userID, className) {
       [String(threadID), String(userID), skill.id, Date.now()]
     );
   }
+
+  // Grant the new class's starting spells.
+  const newSpells = getStartingSpells(key);
+
+  for (const spellId of newSpells) {
+    await grantSpell(threadID, userID, spellId);
+  }
+
   return getPlayer(threadID, userID);
 }
+
 async function addXp(threadID, userID, amount) {
   const result = await db.addXP(threadID, userID, amount);
+
   await db.query(
     `
     UPDATE rpg_players
@@ -203,10 +243,17 @@ async function addXp(threadID, userID, amount) {
     WHERE thread_id = $1
       AND user_id = $2
     `,
-    [String(threadID), String(userID), Math.max(0, Math.floor(Number(amount) / 10)), Date.now()]
+    [
+      String(threadID),
+      String(userID),
+      Math.max(0, Math.floor(Number(amount) / 10)),
+      Date.now(),
+    ]
   );
+
   return result;
 }
+
 async function updateVitals(threadID, userID, fields) {
   const allowed = [
     "hp",
@@ -216,11 +263,19 @@ async function updateVitals(threadID, userID, fields) {
     "location_id",
     "region_id",
   ];
-  const keys = Object.keys(fields).filter((key) => allowed.includes(key));
-  if (keys.length === 0) return getPlayer(threadID, userID);
+
+  const keys = Object.keys(fields).filter((key) =>
+    allowed.includes(key)
+  );
+
+  if (keys.length === 0) {
+    return getPlayer(threadID, userID);
+  }
+
   const assignments = keys
     .map((key, index) => `${key} = $${index + 3}`)
     .join(", ");
+
   await db.query(
     `
     UPDATE rpg_players
@@ -236,8 +291,10 @@ async function updateVitals(threadID, userID, fields) {
       Date.now(),
     ]
   );
+
   return getPlayer(threadID, userID);
 }
+
 async function getInventory(threadID, userID) {
   const result = await db.query(
     `
@@ -250,13 +307,16 @@ async function getInventory(threadID, userID) {
     `,
     [String(threadID), String(userID)]
   );
+
   return result.rows.map((row) => ({
     ...row,
     item: getItem(row.item_id),
   }));
 }
+
 async function addItem(threadID, userID, itemID, quantity = 1) {
   await ensurePlayer(threadID, userID);
+
   await db.query(
     `
     INSERT INTO rpg_inventory_items (
@@ -276,6 +336,7 @@ async function addItem(threadID, userID, itemID, quantity = 1) {
     ]
   );
 }
+
 async function consumeItem(threadID, userID, itemID) {
   const result = await db.query(
     `
@@ -290,11 +351,14 @@ async function consumeItem(threadID, userID, itemID) {
     `,
     [String(threadID), String(userID), String(itemID), Date.now()]
   );
+
   if (result.rows.length === 0) {
     throw new Error("You do not have that item.");
   }
+
   return result.rows[0];
 }
+
 async function getEquipment(threadID, userID) {
   const result = await db.query(
     `
@@ -306,14 +370,22 @@ async function getEquipment(threadID, userID) {
     `,
     [String(threadID), String(userID)]
   );
-  return result.rows.map((row) => ({ ...row, item: getItem(row.item_id) }));
+
+  return result.rows.map((row) => ({
+    ...row,
+    item: getItem(row.item_id),
+  }));
 }
+
 async function equipItem(threadID, userID, slot, itemID) {
   const item = getItem(itemID);
+
   if (!item || !["weapon", "armor"].includes(item.type)) {
     throw new Error("That item cannot be equipped.");
   }
+
   await consumeItem(threadID, userID, itemID);
+
   await db.query(
     `
     INSERT INTO rpg_equipment (
@@ -324,9 +396,16 @@ async function equipItem(threadID, userID, slot, itemID) {
     DO UPDATE SET item_id = EXCLUDED.item_id,
                   updated_at = EXCLUDED.updated_at
     `,
-    [String(threadID), String(userID), String(slot), itemID, Date.now()]
+    [
+      String(threadID),
+      String(userID),
+      String(slot),
+      itemID,
+      Date.now(),
+    ]
   );
 }
+
 module.exports = {
   addItem,
   addXp,
