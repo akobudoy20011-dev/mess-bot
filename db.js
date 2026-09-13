@@ -161,6 +161,23 @@ async function connect() {
 
 
   // ─────────────────────────────────────────────────────────
+  // THREAD SETTINGS MIGRATIONS
+  //
+  // Same reasoning as the `users` migration above: if this
+  // table already existed from an earlier deploy (back when
+  // it only tracked roast_enabled), CREATE TABLE IF NOT EXISTS
+  // is a no-op and fun_enabled would silently never get added.
+  // ─────────────────────────────────────────────────────────
+
+  await pool.query(`
+    ALTER TABLE thread_settings
+
+      ADD COLUMN IF NOT EXISTS
+        fun_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+  `);
+
+
+  // ─────────────────────────────────────────────────────────
   // INVENTORY
   // ─────────────────────────────────────────────────────────
 
@@ -199,6 +216,29 @@ async function connect() {
 
       created_at   BIGINT NOT NULL
     );
+  `);
+
+
+  // ─────────────────────────────────────────────────────────
+  // ECONOMY TRANSACTIONS MIGRATION
+  //
+  // THE BUG FIX: CREATE TABLE IF NOT EXISTS above does nothing
+  // if economy_transactions already existed from an earlier
+  // deploy (before `description` was added to this schema).
+  // Every deposit/withdraw/transfer insert includes a
+  // `description` value, so on any pre-existing table this was
+  // throwing:
+  //   column "description" of relation "economy_transactions"
+  //   does not exist
+  // This ALTER TABLE brings older tables up to date the same
+  // way the `users` migration above already does.
+  // ─────────────────────────────────────────────────────────
+
+  await pool.query(`
+    ALTER TABLE economy_transactions
+
+      ADD COLUMN IF NOT EXISTS
+        description TEXT;
   `);
 
 
