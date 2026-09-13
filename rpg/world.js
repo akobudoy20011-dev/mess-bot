@@ -163,8 +163,9 @@ function marchDurationMs(origin, destination) {
     Number(process.env.RPG_MARCH_MS_PER_DISTANCE || 30_000)
   );
   const distance = distanceBetween(origin, destination);
-  // Intentionally no global maximum: the map and terrain determine duration.
-  return Math.ceil(distance * base * Number(destination.movement || 1));
+  // Marches may be persistent, but never take more than two real minutes.
+  const duration = Math.ceil(distance * base * Number(destination.movement || 1));
+  return Math.min(120_000, duration);
 }
 module.exports = {
   LOCATIONS,
