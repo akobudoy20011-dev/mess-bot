@@ -6,7 +6,9 @@ const {
   startSession,
   stopSession,
 } = require("../ai/history");
-const { CHARACTERS } = require("./characters");
+
+// Fixed: Import CHARACTERS correctly to avoid undefined crashes
+const CHARACTERS = require("./characters");
 const lastRequestAt = new Map();
 
 function getCharacterCooldownMs() {
@@ -22,7 +24,6 @@ function remainingCooldown(userID, characterID) {
   const elapsed = Date.now() - (lastRequestAt.get(cooldownKey(userID, characterID)) || 0);
   return Math.max(0, getCharacterCooldownMs() - elapsed);
 }
-
 
 function send(api, message, threadID) {
   return new Promise((resolve, reject) => {
@@ -68,8 +69,11 @@ function buildMessages(character, history, currentMessage) {
 async function handleRpgCharacterMessage(api, event, text, originalText) {
   const original = String(originalText || text || "").trim();
   const normalized = original.toLowerCase();
-  const character = Object.values(CHARACTERS).find(
-    (entry) => normalized === entry.command || normalized.startsWith(entry.command + " ")
+
+  // Guard safety check for characters export structure
+  const characterMap = CHARACTERS.CHARACTERS || CHARACTERS || {};
+  const character = Object.values(characterMap).find(
+    (entry) => entry && entry.command && (normalized === entry.command || normalized.startsWith(entry.command + " "))
   );
 
   if (!character) return false;
