@@ -157,11 +157,6 @@ async function connect() {
 
   // ─────────────────────────────────────────────────────────
   // THREAD SETTINGS MIGRATIONS
-  //
-  // Same reasoning as the `users` migration above: if this
-  // table already existed from an earlier deploy (back when
-  // it only tracked roast_enabled), CREATE TABLE IF NOT EXISTS
-  // is a no-op and fun_enabled would silently never get added.
   // ─────────────────────────────────────────────────────────
 
   await pool.query(`
@@ -213,17 +208,6 @@ async function connect() {
 
   // ─────────────────────────────────────────────────────────
   // ECONOMY TRANSACTIONS MIGRATION
-  //
-  // THE BUG FIX: CREATE TABLE IF NOT EXISTS above does nothing
-  // if economy_transactions already existed from an earlier
-  // deploy (before `description` was added to this schema).
-  // Every deposit/withdraw/transfer insert includes a
-  // `description` value, so on any pre-existing table this was
-  // throwing:
-  //   column "description" of relation "economy_transactions"
-  //   does not exist
-  // This ALTER TABLE brings older tables up to date the same
-  // way the `users` migration above already does.
   // ─────────────────────────────────────────────────────────
 
   await pool.query(`
@@ -272,10 +256,10 @@ async function connect() {
       assassins          INTEGER NOT NULL DEFAULT 0,
       status             TEXT NOT NULL DEFAULT 'garrison',
       destination_region TEXT,
-      departure_at      BIGINT,
-      arrival_at        BIGINT,
-      created_at        BIGINT NOT NULL,
-      updated_at        BIGINT NOT NULL,
+      departure_at       BIGINT,
+      arrival_at         BIGINT,
+      created_at         BIGINT NOT NULL,
+      updated_at         BIGINT NOT NULL,
       UNIQUE (thread_id, user_id)
     );
   `);
@@ -347,43 +331,6 @@ async function connect() {
       unlocked  BOOLEAN NOT NULL DEFAULT TRUE,
       updated_at BIGINT NOT NULL,
       PRIMARY KEY (thread_id, user_id, spell_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS rpg_location_states (
-      thread_id      TEXT NOT NULL,
-      location_id    TEXT NOT NULL,
-      garrison       INTEGER NOT NULL DEFAULT 0,
-      defense        INTEGER NOT NULL DEFAULT 0,
-      prosperity     INTEGER NOT NULL DEFAULT 100,
-      hostility      INTEGER NOT NULL DEFAULT 0,
-      last_raided_at BIGINT,
-      updated_at     BIGINT NOT NULL,
-      PRIMARY KEY (thread_id, location_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS rpg_scouting_reports (
-      id                BIGSERIAL PRIMARY KEY,
-      thread_id         TEXT NOT NULL,
-      user_id           TEXT NOT NULL,
-      location_id       TEXT NOT NULL,
-      accuracy          INTEGER NOT NULL,
-      garrison_estimate INTEGER,
-      defense_estimate  INTEGER,
-      created_at        BIGINT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS rpg_battles (
-      id                BIGSERIAL PRIMARY KEY,
-      thread_id         TEXT NOT NULL,
-      battle_type       TEXT NOT NULL,
-      attacker_user_id  TEXT NOT NULL,
-      defender_user_id  TEXT,
-      location_id       TEXT,
-      result            TEXT NOT NULL,
-      attacker_losses   INTEGER NOT NULL DEFAULT 0,
-      defender_losses   INTEGER NOT NULL DEFAULT 0,
-      loot_gold         INTEGER NOT NULL DEFAULT 0,
-      created_at        BIGINT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS rpg_inventory_items (
@@ -478,11 +425,80 @@ async function connect() {
       status TEXT NOT NULL DEFAULT 'marching',
       updated_at BIGINT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS rpg_location_states (
+      thread_id      TEXT NOT NULL,
+      location_id    TEXT NOT NULL,
+      garrison       INTEGER NOT NULL DEFAULT 0,
+      defense        INTEGER NOT NULL DEFAULT 0,
+      prosperity     INTEGER NOT NULL DEFAULT 100,
+      hostility      INTEGER NOT NULL DEFAULT 0,
+      last_raided_at BIGINT,
+      updated_at     BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, location_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_scouting_reports (
+      id                BIGSERIAL PRIMARY KEY,
+      thread_id         TEXT NOT NULL,
+      user_id           TEXT NOT NULL,
+      location_id       TEXT NOT NULL,
+      accuracy          INTEGER NOT NULL,
+      garrison_estimate INTEGER,
+      defense_estimate  INTEGER,
+      created_at        BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_battles (
+      id                BIGSERIAL PRIMARY KEY,
+      thread_id         TEXT NOT NULL,
+      battle_type       TEXT NOT NULL,
+      attacker_user_id  TEXT NOT NULL,
+      defender_user_id  TEXT,
+      location_id       TEXT,
+      result            TEXT NOT NULL,
+      attacker_losses   INTEGER NOT NULL DEFAULT 0,
+      defender_losses   INTEGER NOT NULL DEFAULT 0,
+      loot_gold         INTEGER NOT NULL DEFAULT 0,
+      created_at        BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_kingdoms (
+      thread_id            TEXT NOT NULL,
+      kingdom_id           TEXT NOT NULL,
+      name                 TEXT NOT NULL,
+      specialization       TEXT NOT NULL,
+      capital_location_id  TEXT NOT NULL,
+      treasury             INTEGER NOT NULL DEFAULT 0,
+      military             INTEGER NOT NULL DEFAULT 0,
+      magic                INTEGER NOT NULL DEFAULT 0,
+      stability            INTEGER NOT NULL DEFAULT 70,
+      created_at            BIGINT NOT NULL,
+      updated_at            BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, kingdom_id)
+    );
+
+    ALTER TABLE rpg_location_states
+      ADD COLUMN IF NOT EXISTS owner_kingdom_id TEXT;
+
+    ALTER TABLE rpg_players
+      ADD COLUMN IF NOT EXISTS kingdom_id TEXT,
+      ADD COLUMN IF NOT EXISTS kingdom_role TEXT NOT NULL DEFAULT 'unaffiliated';
+
+    CREATE TABLE IF NOT EXISTS rpg_diplomacy (
+      thread_id   TEXT NOT NULL,
+      kingdom_a   TEXT NOT NULL,
+      kingdom_b   TEXT NOT NULL,
+      status      TEXT NOT NULL DEFAULT 'neutral',
+      updated_at  BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, kingdom_a, kingdom_b)
+    );
   `);
 
   // ---------------------------------------------------------------------------
   // CHARACTER AI
   // ---------------------------------------------------------------------------
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ai_conversations (
       id BIGSERIAL PRIMARY KEY,
@@ -604,12 +620,6 @@ function requireConn() {
 // USER MANAGEMENT
 // ═══════════════════════════════════════════════════════════
 
-/**
- * Get an existing user.
- *
- * If the user doesn't exist yet, automatically creates them
- * with the starting balance and credit score.
- */
 async function getUser(threadId, userId) {
   const conn = requireConn();
 
@@ -633,10 +643,6 @@ async function getUser(threadId, userId) {
   if (rows.length > 0) {
     return rows[0];
   }
-
-  // ─────────────────────────────────────────────────────────
-  // CREATE NEW USER
-  // ─────────────────────────────────────────────────────────
 
   await conn.query(
     `
@@ -706,13 +712,11 @@ async function updateUser(
   threadId = String(threadId);
   userId = String(userId);
 
-  // Make sure the user exists first.
   await getUser(
     threadId,
     userId
   );
 
-  // Only these database columns may be modified.
   const allowedFields = [
     "balance",
     "bank_balance",
@@ -846,7 +850,12 @@ async function addBalance(
 // WALLET — SPEND
 // ---------------------------------------------------------------------------
 
-async function spendBalance(threadId, userId, amount, description = "Wallet spending") {
+async function spendBalance(
+  threadId,
+  userId,
+  amount,
+  description = "Wallet spending"
+) {
   amount = Math.floor(Number(amount));
 
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -859,8 +868,17 @@ async function spendBalance(threadId, userId, amount, description = "Wallet spen
     await client.query("BEGIN");
 
     const { rows } = await client.query(
-      `SELECT * FROM users WHERE thread_id = $1 AND user_id = $2 FOR UPDATE`,
-      [String(threadId), String(userId)]
+      `
+      SELECT *
+      FROM users
+      WHERE thread_id = $1
+        AND user_id = $2
+      FOR UPDATE
+      `,
+      [
+        String(threadId),
+        String(userId),
+      ]
     );
 
     const user = rows[0];
@@ -874,13 +892,39 @@ async function spendBalance(threadId, userId, amount, description = "Wallet spen
     }
 
     await client.query(
-      `UPDATE users SET balance = balance - $3 WHERE thread_id = $1 AND user_id = $2`,
-      [String(threadId), String(userId), amount]
+      `
+      UPDATE users
+      SET balance = balance - $3
+      WHERE thread_id = $1
+        AND user_id = $2
+      `,
+      [
+        String(threadId),
+        String(userId),
+        amount,
+      ]
     );
 
     await client.query(
-      `INSERT INTO economy_transactions (thread_id, user_id, type, amount, description, created_at)
-       VALUES ($1, $2, 'rpg_spend', $3, $4, $5)`,
+      `
+      INSERT INTO economy_transactions (
+        thread_id,
+        user_id,
+        type,
+        amount,
+        description,
+        created_at
+      )
+
+      VALUES (
+        $1,
+        $2,
+        'rpg_spend',
+        $3,
+        $4,
+        $5
+      )
+      `,
       [
         String(threadId),
         String(userId),
@@ -1000,9 +1044,6 @@ async function addXP(
   const oldXP =
     Number(user.xp) || 0;
 
-  // Captured BEFORE the update so callers (games.js's
-  // awardPlayer) can detect a rank-up by comparing this
-  // against the post-update rank.
   const previousRank =
     getRank(oldXP);
 
@@ -1079,10 +1120,6 @@ async function getPlayerRanking(
         ).trim()
 
       : `Player ${user.user_id}`;
-
-  // ─────────────────────────────────────────────────────────
-  // RANK PROGRESS
-  // ─────────────────────────────────────────────────────────
 
   let progress = 100;
 
@@ -1382,8 +1419,6 @@ async function deposit(
     );
   }
 
-  // Make sure the user exists BEFORE
-  // checking out the transaction client.
   await getUser(
     threadId,
     userId
@@ -1703,13 +1738,6 @@ async function transfer(
       "BEGIN"
     );
 
-    // ───────────────────────────────────────────────────────
-    // LOCK USERS IN CONSISTENT ORDER
-    //
-    // This reduces the risk of database deadlocks when two
-    // transfers happen at the same time in opposite directions.
-    // ───────────────────────────────────────────────────────
-
     const firstId =
       fromUserId < toUserId
         ? fromUserId
@@ -1767,10 +1795,6 @@ async function transfer(
       );
     }
 
-    // ───────────────────────────────────────────────────────
-    // REMOVE FROM SENDER
-    // ───────────────────────────────────────────────────────
-
     await client.query(
       `
       UPDATE users
@@ -1788,10 +1812,6 @@ async function transfer(
       ]
     );
 
-    // ───────────────────────────────────────────────────────
-    // ADD TO RECEIVER
-    // ───────────────────────────────────────────────────────
-
     await client.query(
       `
       UPDATE users
@@ -1808,10 +1828,6 @@ async function transfer(
         amount,
       ]
     );
-
-    // ───────────────────────────────────────────────────────
-    // SENDER TRANSACTION
-    // ───────────────────────────────────────────────────────
 
     await client.query(
       `
@@ -1841,10 +1857,6 @@ async function transfer(
         Date.now(),
       ]
     );
-
-    // ───────────────────────────────────────────────────────
-    // RECEIVER TRANSACTION
-    // ───────────────────────────────────────────────────────
 
     await client.query(
       `
@@ -1948,7 +1960,6 @@ async function applyLoan(
     );
   }
 
-  // 10% simulated interest.
   const interestRate = 0.10;
 
   const totalDue =
@@ -1957,7 +1968,6 @@ async function applyLoan(
       (1 + interestRate)
     );
 
-  // Seven-day repayment period.
   const dueDate =
     Date.now() +
     7 *
@@ -2056,8 +2066,6 @@ async function payLoan(
     Number(user.credit_score) ||
     STARTING_CREDIT_SCORE;
 
-  // Reward the player for completely
-  // paying off their loan.
   if (
     remaining === 0
   ) {
@@ -2124,9 +2132,6 @@ async function applyBankInterest(
       user.bank_balance
     ) || 0;
 
-  // Once-per-day cooldown so !bank can't be spammed for
-  // unlimited free interest. Mirrors the daily-reward pattern
-  // already used for last_daily.
   const INTEREST_COOLDOWN_MS =
     24 * 60 * 60 * 1000;
 
@@ -2153,9 +2158,6 @@ async function applyBankInterest(
   if (
     bankBalance <= 0
   ) {
-    // Still stamp last_interest_paid so an empty account
-    // doesn't get a free "first call always succeeds" edge case
-    // the moment they deposit something.
     await updateUser(
       threadId,
       userId,
@@ -2171,7 +2173,6 @@ async function applyBankInterest(
     };
   }
 
-  // 1% simulated bank interest.
   const interest =
     Math.floor(
       bankBalance * 0.01
