@@ -11,6 +11,7 @@ const db = require("./db");
 const { handleEconomyCommand } = require("./economy");
 const { handleGamesCommand } = require("./games");
 const { handleRpgCommand } = require("./rpg");
+const { handleAiMessage } = require("./ai");
 
 const {
   searchYouTube,
@@ -537,6 +538,14 @@ async function handleMessage(
     String(senderID || "").trim();
 
   // -------------------------------------------------------------------------
+  // Private AI sessions run before normal commands.
+  // -------------------------------------------------------------------------
+
+  if (await handleAiMessage(api, event, text, originalText)) {
+    return;
+  }
+
+  // -------------------------------------------------------------------------
   // Games FIRST
   // -------------------------------------------------------------------------
 
@@ -631,6 +640,12 @@ async function handleMessage(
         "  Train troops using your wallet.",
         "• !rpg march ironspine",
         "  Travel by map distance with no global time cap.",
+        "",
+        "🎭 LUCIEN AI",
+        "• !lucien",
+        "  Start Lucien for Alaiza only.",
+        "• !lucien reset / !lucien off",
+        "  Reset history or end the private session.",
         "",
         "🔥 BANAT",
         "• !banat on",
