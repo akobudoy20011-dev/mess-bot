@@ -31,14 +31,12 @@
 
 const { Pool } = require("pg");
 
-
 // ═══════════════════════════════════════════════════════════
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════
 
 const STARTING_BALANCE = 100;
 const STARTING_CREDIT_SCORE = 600;
-
 
 // ═══════════════════════════════════════════════════════════
 // RANK SYSTEM
@@ -55,13 +53,11 @@ const RANKS = [
   { name: "Grandmaster", xp: 100_000, emoji: "👑" },
 ];
 
-
 // ═══════════════════════════════════════════════════════════
 // DATABASE CONNECTION
 // ═══════════════════════════════════════════════════════════
 
 let pool = null;
-
 
 /**
  * Connect to Neon PostgreSQL and initialize the database schema.
@@ -84,7 +80,6 @@ async function connect() {
     },
   });
 
-
   // ─────────────────────────────────────────────────────────
   // USERS
   // ─────────────────────────────────────────────────────────
@@ -106,7 +101,6 @@ async function connect() {
       PRIMARY KEY (thread_id, user_id)
     );
   `);
-
 
   // ─────────────────────────────────────────────────────────
   // USER MIGRATIONS
@@ -148,7 +142,6 @@ async function connect() {
         display_name TEXT;
   `);
 
-
   // ─────────────────────────────────────────────────────────
   // THREAD SETTINGS
   // ─────────────────────────────────────────────────────────
@@ -161,7 +154,6 @@ async function connect() {
       fun_enabled    BOOLEAN NOT NULL DEFAULT TRUE
     );
   `);
-
 
   // ─────────────────────────────────────────────────────────
   // THREAD SETTINGS MIGRATIONS
@@ -178,7 +170,6 @@ async function connect() {
       ADD COLUMN IF NOT EXISTS
         fun_enabled BOOLEAN NOT NULL DEFAULT TRUE;
   `);
-
 
   // ─────────────────────────────────────────────────────────
   // INVENTORY
@@ -200,7 +191,6 @@ async function connect() {
     );
   `);
 
-
   // ─────────────────────────────────────────────────────────
   // ECONOMY TRANSACTIONS
   // ─────────────────────────────────────────────────────────
@@ -220,7 +210,6 @@ async function connect() {
       created_at   BIGINT NOT NULL
     );
   `);
-
 
   // ─────────────────────────────────────────────────────────
   // ECONOMY TRANSACTIONS MIGRATION
@@ -243,7 +232,6 @@ async function connect() {
       ADD COLUMN IF NOT EXISTS
         description TEXT;
   `);
-
 
   // ---------------------------------------------------------------------------
   // ECLIPSE RPG
@@ -292,7 +280,6 @@ async function connect() {
     );
   `);
 
-
   // ---------------------------------------------------------------------------
   // RPG MODULAR SCHEMA MIGRATIONS
   // ---------------------------------------------------------------------------
@@ -335,7 +322,7 @@ async function connect() {
       walls       INTEGER NOT NULL DEFAULT 0,
       towers      INTEGER NOT NULL DEFAULT 0,
       gates       INTEGER NOT NULL DEFAULT 0,
-      moats       INTEGER NOT NULL DEFAULT 0,
+      moats      INTEGER NOT NULL DEFAULT 0,
       guards      INTEGER NOT NULL DEFAULT 0,
       traps       INTEGER NOT NULL DEFAULT 0,
       barrier     INTEGER NOT NULL DEFAULT 0,
@@ -351,6 +338,15 @@ async function connect() {
       unlocked  BOOLEAN NOT NULL DEFAULT TRUE,
       updated_at BIGINT NOT NULL,
       PRIMARY KEY (thread_id, user_id, skill_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_player_spells (
+      thread_id TEXT NOT NULL,
+      user_id   TEXT NOT NULL,
+      spell_id  TEXT NOT NULL,
+      unlocked  BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, user_id, spell_id)
     );
 
     CREATE TABLE IF NOT EXISTS rpg_inventory_items (
@@ -460,6 +456,7 @@ async function connect() {
       updated_at BIGINT NOT NULL,
       UNIQUE (character_id, thread_id, user_id)
     );
+
     CREATE TABLE IF NOT EXISTS ai_messages (
       id BIGSERIAL PRIMARY KEY,
       conversation_id BIGINT NOT NULL REFERENCES ai_conversations(id) ON DELETE CASCADE,
@@ -467,6 +464,7 @@ async function connect() {
       content TEXT NOT NULL,
       created_at BIGINT NOT NULL
     );
+
     CREATE TABLE IF NOT EXISTS ai_memories (
       id BIGSERIAL PRIMARY KEY,
       character_id TEXT NOT NULL,
@@ -479,6 +477,7 @@ async function connect() {
       last_used_at BIGINT NOT NULL,
       UNIQUE (character_id, thread_id, user_id, content)
     );
+
     CREATE TABLE IF NOT EXISTS ai_sessions (
       character_id TEXT NOT NULL,
       thread_id TEXT NOT NULL,
@@ -490,11 +489,29 @@ async function connect() {
       PRIMARY KEY (character_id, thread_id, user_id)
     );
   `);
+
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS ai_messages_conversation_created_idx ON ai_messages (conversation_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS ai_memories_lookup_idx ON ai_memories (character_id, thread_id, user_id, importance DESC, created_at DESC);
-    CREATE INDEX IF NOT EXISTS ai_sessions_active_idx ON ai_sessions (character_id, thread_id, user_id, active);
+    CREATE INDEX IF NOT EXISTS ai_messages_conversation_created_idx
+      ON ai_messages (conversation_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS ai_memories_lookup_idx
+      ON ai_memories (
+        character_id,
+        thread_id,
+        user_id,
+        importance DESC,
+        created_at DESC
+      );
+
+    CREATE INDEX IF NOT EXISTS ai_sessions_active_idx
+      ON ai_sessions (
+        character_id,
+        thread_id,
+        user_id,
+        active
+      );
   `);
+
   console.log(
     "╔══════════════════════════════════════════════════════════╗"
   );
@@ -528,7 +545,6 @@ async function connect() {
   );
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // CONNECTION GUARD
 // ═══════════════════════════════════════════════════════════
@@ -536,7 +552,6 @@ async function connect() {
 async function query(text, params = []) {
   return requireConn().query(text, params);
 }
-
 
 function requireConn() {
   if (!pool) {
@@ -547,7 +562,6 @@ function requireConn() {
 
   return pool;
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // USER MANAGEMENT
@@ -565,7 +579,6 @@ async function getUser(threadId, userId) {
   threadId = String(threadId);
   userId = String(userId);
 
-
   const { rows } = await conn.query(
     `
     SELECT *
@@ -580,11 +593,9 @@ async function getUser(threadId, userId) {
     ]
   );
 
-
   if (rows.length > 0) {
     return rows[0];
   }
-
 
   // ─────────────────────────────────────────────────────────
   // CREATE NEW USER
@@ -627,7 +638,6 @@ async function getUser(threadId, userId) {
     ]
   );
 
-
   const created = await conn.query(
     `
     SELECT *
@@ -642,10 +652,8 @@ async function getUser(threadId, userId) {
     ]
   );
 
-
   return created.rows[0];
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // USER UPDATES
@@ -661,13 +669,11 @@ async function updateUser(
   threadId = String(threadId);
   userId = String(userId);
 
-
   // Make sure the user exists first.
   await getUser(
     threadId,
     userId
   );
-
 
   // Only these database columns may be modified.
   const allowedFields = [
@@ -694,18 +700,15 @@ async function updateUser(
     "display_name",
   ];
 
-
   const safeKeys =
     Object.keys(fields).filter(
       (key) =>
         allowedFields.includes(key)
     );
 
-
   if (safeKeys.length === 0) {
     return;
   }
-
 
   const setClause =
     safeKeys
@@ -715,12 +718,10 @@ async function updateUser(
       )
       .join(", ");
 
-
   const values =
     safeKeys.map(
       (key) => fields[key]
     );
-
 
   await conn.query(
     `
@@ -739,7 +740,6 @@ async function updateUser(
   );
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // DISPLAY NAME
 // ═══════════════════════════════════════════════════════════
@@ -754,17 +754,14 @@ async function setUserDisplayName(
     userId
   );
 
-
   const name =
     String(displayName || "")
       .trim()
       .slice(0, 100);
 
-
   if (!name) {
     return;
   }
-
 
   await updateUser(
     threadId,
@@ -774,7 +771,6 @@ async function setUserDisplayName(
     }
   );
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // WALLET
@@ -791,14 +787,12 @@ async function addBalance(
       userId
     );
 
-
   const newBalance =
     Math.max(
       0,
       Number(user.balance) +
         Number(amount)
     );
-
 
   await updateUser(
     threadId,
@@ -808,11 +802,8 @@ async function addBalance(
     }
   );
 
-
   return newBalance;
 }
-
-
 
 // ---------------------------------------------------------------------------
 // WALLET — SPEND
@@ -834,6 +825,7 @@ async function spendBalance(threadId, userId, amount, description = "Wallet spen
       `SELECT * FROM users WHERE thread_id = $1 AND user_id = $2 FOR UPDATE`,
       [String(threadId), String(userId)]
     );
+
     const user = rows[0];
 
     if (!user) {
@@ -852,19 +844,32 @@ async function spendBalance(threadId, userId, amount, description = "Wallet spen
     await client.query(
       `INSERT INTO economy_transactions (thread_id, user_id, type, amount, description, created_at)
        VALUES ($1, $2, 'rpg_spend', $3, $4, $5)`,
-      [String(threadId), String(userId), amount, String(description), Date.now()]
+      [
+        String(threadId),
+        String(userId),
+        amount,
+        String(description),
+        Date.now(),
+      ]
     );
 
     await client.query("COMMIT");
-    return getUser(threadId, userId);
+
+    return getUser(
+      threadId,
+      userId
+    );
+
   } catch (error) {
+
     await client.query("ROLLBACK");
     throw error;
+
   } finally {
+
     client.release();
   }
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // GAME STATISTICS
@@ -881,7 +886,6 @@ async function incrementGameStats(
       userId
     );
 
-
   await updateUser(
     threadId,
     userId,
@@ -896,7 +900,6 @@ async function incrementGameStats(
   );
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // XP / LEVEL SYSTEM
 // ═══════════════════════════════════════════════════════════
@@ -908,7 +911,6 @@ function calculateLevel(xp) {
       Number(xp) || 0
     );
 
-
   return (
     Math.floor(
       Math.sqrt(
@@ -918,15 +920,12 @@ function calculateLevel(xp) {
   );
 }
 
-
 function getRank(xp) {
   xp =
     Number(xp) || 0;
 
-
   let current =
     RANKS[0];
-
 
   for (const rank of RANKS) {
     if (xp >= rank.xp) {
@@ -934,15 +933,12 @@ function getRank(xp) {
     }
   }
 
-
   return current;
 }
-
 
 function getNextRank(xp) {
   xp =
     Number(xp) || 0;
-
 
   for (const rank of RANKS) {
     if (xp < rank.xp) {
@@ -950,10 +946,8 @@ function getNextRank(xp) {
     }
   }
 
-
   return null;
 }
-
 
 async function addXP(
   threadId,
@@ -966,7 +960,6 @@ async function addXP(
       userId
     );
 
-
   const oldXP =
     Number(user.xp) || 0;
 
@@ -976,19 +969,16 @@ async function addXP(
   const previousRank =
     getRank(oldXP);
 
-
   const newXP =
     Math.max(
       0,
       oldXP + Number(amount)
     );
 
-
   const newLevel =
     calculateLevel(
       newXP
     );
-
 
   await updateUser(
     threadId,
@@ -998,7 +988,6 @@ async function addXP(
       level: newLevel,
     }
   );
-
 
   return {
     xp: newXP,
@@ -1015,7 +1004,6 @@ async function addXP(
   };
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // FULL PLAYER RANKING DETAILS
 // ═══════════════════════════════════════════════════════════
@@ -1030,23 +1018,18 @@ async function getPlayerRanking(
       userId
     );
 
-
   const xp =
     Number(user.xp) || 0;
-
 
   const level =
     Number(user.level) ||
     calculateLevel(xp);
 
-
   const currentRank =
     getRank(xp);
 
-
   const nextRank =
     getNextRank(xp);
-
 
   const displayName =
     user.display_name &&
@@ -1060,24 +1043,20 @@ async function getPlayerRanking(
 
       : `Player ${user.user_id}`;
 
-
   // ─────────────────────────────────────────────────────────
   // RANK PROGRESS
   // ─────────────────────────────────────────────────────────
 
   let progress = 100;
 
-
   if (nextRank) {
     const range =
       nextRank.xp -
       currentRank.xp;
 
-
     const earned =
       xp -
       currentRank.xp;
-
 
     progress =
       Math.floor(
@@ -1090,7 +1069,6 @@ async function getPlayerRanking(
         )
       );
   }
-
 
   return {
     userId:
@@ -1152,7 +1130,6 @@ async function getPlayerRanking(
   };
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // WALLET LEADERBOARD
 // ═══════════════════════════════════════════════════════════
@@ -1164,7 +1141,6 @@ async function leaderboard(
   const conn =
     requireConn();
 
-
   const safeLimit =
     Math.min(
       50,
@@ -1173,7 +1149,6 @@ async function leaderboard(
         Number(limit) || 10
       )
     );
-
 
   const { rows } =
     await conn.query(
@@ -1193,10 +1168,8 @@ async function leaderboard(
       ]
     );
 
-
   return rows;
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // TOTAL MONEY LEADERBOARD
@@ -1209,7 +1182,6 @@ async function moneyLeaderboard(
   const conn =
     requireConn();
 
-
   const safeLimit =
     Math.min(
       50,
@@ -1218,7 +1190,6 @@ async function moneyLeaderboard(
         Number(limit) || 10
       )
     );
-
 
   const { rows } =
     await conn.query(
@@ -1244,10 +1215,8 @@ async function moneyLeaderboard(
       ]
     );
 
-
   return rows;
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // XP LEADERBOARD
@@ -1260,7 +1229,6 @@ async function xpLeaderboard(
   const conn =
     requireConn();
 
-
   const safeLimit =
     Math.min(
       50,
@@ -1269,7 +1237,6 @@ async function xpLeaderboard(
         Number(limit) || 10
       )
     );
-
 
   const { rows } =
     await conn.query(
@@ -1304,12 +1271,10 @@ async function xpLeaderboard(
       ]
     );
 
-
   return rows.map(
     (row, index) => {
       const xp =
         Number(row.xp) || 0;
-
 
       return {
         position:
@@ -1357,7 +1322,6 @@ async function xpLeaderboard(
   );
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // BANK — DEPOSIT
 // ═══════════════════════════════════════════════════════════
@@ -1372,7 +1336,6 @@ async function deposit(
       Number(amount)
     );
 
-
   if (
     !Number.isFinite(amount) ||
     amount <= 0
@@ -1382,7 +1345,6 @@ async function deposit(
     );
   }
 
-
   // Make sure the user exists BEFORE
   // checking out the transaction client.
   await getUser(
@@ -1390,16 +1352,13 @@ async function deposit(
     userId
   );
 
-
   const client =
     await requireConn().connect();
-
 
   try {
     await client.query(
       "BEGIN"
     );
-
 
     const { rows } =
       await client.query(
@@ -1418,17 +1377,14 @@ async function deposit(
         ]
       );
 
-
     const user =
       rows[0];
-
 
     if (!user) {
       throw new Error(
         "User not found."
       );
     }
-
 
     if (
       Number(user.balance) <
@@ -1438,7 +1394,6 @@ async function deposit(
         "Not enough wallet coins."
       );
     }
-
 
     await client.query(
       `
@@ -1460,7 +1415,6 @@ async function deposit(
         amount,
       ]
     );
-
 
     await client.query(
       `
@@ -1490,11 +1444,9 @@ async function deposit(
       ]
     );
 
-
     await client.query(
       "COMMIT"
     );
-
 
     return getUser(
       threadId,
@@ -1515,7 +1467,6 @@ async function deposit(
   }
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // BANK — WITHDRAW
 // ═══════════════════════════════════════════════════════════
@@ -1530,7 +1481,6 @@ async function withdraw(
       Number(amount)
     );
 
-
   if (
     !Number.isFinite(amount) ||
     amount <= 0
@@ -1540,22 +1490,18 @@ async function withdraw(
     );
   }
 
-
   await getUser(
     threadId,
     userId
   );
 
-
   const client =
     await requireConn().connect();
-
 
   try {
     await client.query(
       "BEGIN"
     );
-
 
     const { rows } =
       await client.query(
@@ -1574,17 +1520,14 @@ async function withdraw(
         ]
       );
 
-
     const user =
       rows[0];
-
 
     if (!user) {
       throw new Error(
         "User not found."
       );
     }
-
 
     if (
       Number(user.bank_balance) <
@@ -1594,7 +1537,6 @@ async function withdraw(
         "Not enough money in the bank."
       );
     }
-
 
     await client.query(
       `
@@ -1616,7 +1558,6 @@ async function withdraw(
         amount,
       ]
     );
-
 
     await client.query(
       `
@@ -1646,11 +1587,9 @@ async function withdraw(
       ]
     );
 
-
     await client.query(
       "COMMIT"
     );
-
 
     return getUser(
       threadId,
@@ -1671,7 +1610,6 @@ async function withdraw(
   }
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // TRANSFERS
 // ═══════════════════════════════════════════════════════════
@@ -1687,7 +1625,6 @@ async function transfer(
       Number(amount)
     );
 
-
   if (
     !Number.isFinite(amount) ||
     amount <= 0
@@ -1697,13 +1634,11 @@ async function transfer(
     );
   }
 
-
   fromUserId =
     String(fromUserId);
 
   toUserId =
     String(toUserId);
-
 
   if (
     fromUserId === toUserId
@@ -1713,28 +1648,23 @@ async function transfer(
     );
   }
 
-
   await getUser(
     threadId,
     fromUserId
   );
-
 
   await getUser(
     threadId,
     toUserId
   );
 
-
   const client =
     await requireConn().connect();
-
 
   try {
     await client.query(
       "BEGIN"
     );
-
 
     // ───────────────────────────────────────────────────────
     // LOCK USERS IN CONSISTENT ORDER
@@ -1748,12 +1678,10 @@ async function transfer(
         ? fromUserId
         : toUserId;
 
-
     const secondId =
       fromUserId < toUserId
         ? toUserId
         : fromUserId;
-
 
     await client.query(
       `
@@ -1775,7 +1703,6 @@ async function transfer(
       ]
     );
 
-
     const senderResult =
       await client.query(
         `
@@ -1791,10 +1718,8 @@ async function transfer(
         ]
       );
 
-
     const sender =
       senderResult.rows[0];
-
 
     if (
       Number(sender.balance) <
@@ -1804,7 +1729,6 @@ async function transfer(
         "You don't have enough wallet coins."
       );
     }
-
 
     // ───────────────────────────────────────────────────────
     // REMOVE FROM SENDER
@@ -1827,7 +1751,6 @@ async function transfer(
       ]
     );
 
-
     // ───────────────────────────────────────────────────────
     // ADD TO RECEIVER
     // ───────────────────────────────────────────────────────
@@ -1848,7 +1771,6 @@ async function transfer(
         amount,
       ]
     );
-
 
     // ───────────────────────────────────────────────────────
     // SENDER TRANSACTION
@@ -1883,7 +1805,6 @@ async function transfer(
       ]
     );
 
-
     // ───────────────────────────────────────────────────────
     // RECEIVER TRANSACTION
     // ───────────────────────────────────────────────────────
@@ -1917,11 +1838,9 @@ async function transfer(
       ]
     );
 
-
     await client.query(
       "COMMIT"
     );
-
 
     return true;
 
@@ -1939,7 +1858,6 @@ async function transfer(
   }
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // LOANS — APPLY
 // ═══════════════════════════════════════════════════════════
@@ -1954,7 +1872,6 @@ async function applyLoan(
       Number(amount)
     );
 
-
   if (
     !Number.isFinite(amount) ||
     amount <= 0
@@ -1964,13 +1881,11 @@ async function applyLoan(
     );
   }
 
-
   const user =
     await getUser(
       threadId,
       userId
     );
-
 
   if (
     Number(user.loan_remaining) > 0
@@ -1980,7 +1895,6 @@ async function applyLoan(
     );
   }
 
-
   const maxLoan =
     Math.max(
       500,
@@ -1988,7 +1902,6 @@ async function applyLoan(
         Number(user.credit_score) * 10
       )
     );
-
 
   if (
     amount > maxLoan
@@ -1998,17 +1911,14 @@ async function applyLoan(
     );
   }
 
-
   // 10% simulated interest.
   const interestRate = 0.10;
-
 
   const totalDue =
     Math.ceil(
       amount *
       (1 + interestRate)
     );
-
 
   // Seven-day repayment period.
   const dueDate =
@@ -2018,7 +1928,6 @@ async function applyLoan(
       60 *
       60 *
       1000;
-
 
   await updateUser(
     threadId,
@@ -2039,7 +1948,6 @@ async function applyLoan(
     }
   );
 
-
   return {
     principal:
       amount,
@@ -2051,7 +1959,6 @@ async function applyLoan(
     dueDate,
   };
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // LOANS — PAYMENT
@@ -2067,7 +1974,6 @@ async function payLoan(
       Number(amount)
     );
 
-
   if (
     !Number.isFinite(amount) ||
     amount <= 0
@@ -2077,13 +1983,11 @@ async function payLoan(
     );
   }
 
-
   const user =
     await getUser(
       threadId,
       userId
     );
-
 
   if (
     Number(user.loan_remaining) <= 0
@@ -2093,7 +1997,6 @@ async function payLoan(
     );
   }
 
-
   if (
     Number(user.balance) < amount
   ) {
@@ -2102,23 +2005,19 @@ async function payLoan(
     );
   }
 
-
   const payment =
     Math.min(
       amount,
       Number(user.loan_remaining)
     );
 
-
   const remaining =
     Number(user.loan_remaining) -
     payment;
 
-
   let creditScore =
     Number(user.credit_score) ||
     STARTING_CREDIT_SCORE;
-
 
   // Reward the player for completely
   // paying off their loan.
@@ -2131,7 +2030,6 @@ async function payLoan(
         creditScore + 20
       );
   }
-
 
   await updateUser(
     threadId,
@@ -2161,7 +2059,6 @@ async function payLoan(
     }
   );
 
-
   return {
     payment,
 
@@ -2170,7 +2067,6 @@ async function payLoan(
     creditScore,
   };
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // BANK INTEREST
@@ -2186,12 +2082,10 @@ async function applyBankInterest(
       userId
     );
 
-
   const bankBalance =
     Number(
       user.bank_balance
     ) || 0;
-
 
   // Once-per-day cooldown so !bank can't be spammed for
   // unlimited free interest. Mirrors the daily-reward pattern
@@ -2240,13 +2134,11 @@ async function applyBankInterest(
     };
   }
 
-
   // 1% simulated bank interest.
   const interest =
     Math.floor(
       bankBalance * 0.01
     );
-
 
   await updateUser(
     threadId,
@@ -2260,14 +2152,12 @@ async function applyBankInterest(
     }
   );
 
-
   return {
     interest,
     applied: interest > 0,
     onCooldown: false,
   };
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // INVENTORY — ADD ITEM
@@ -2281,7 +2171,6 @@ async function addItem(
 ) {
   const conn =
     requireConn();
-
 
   await conn.query(
     `
@@ -2319,7 +2208,6 @@ async function addItem(
   );
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // INVENTORY — GET
 // ═══════════════════════════════════════════════════════════
@@ -2330,7 +2218,6 @@ async function getInventory(
 ) {
   const conn =
     requireConn();
-
 
   const { rows } =
     await conn.query(
@@ -2351,19 +2238,15 @@ async function getInventory(
       ]
     );
 
-
   const result = {};
-
 
   for (const row of rows) {
     result[row.item_id] =
       Number(row.amount);
   }
 
-
   return result;
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // THREAD SETTINGS
@@ -2375,10 +2258,8 @@ async function getThreadSettings(
   const conn =
     requireConn();
 
-
   const id =
     String(threadId);
-
 
   const { rows } =
     await conn.query(
@@ -2390,7 +2271,6 @@ async function getThreadSettings(
       `,
       [id]
     );
-
 
   if (rows.length === 0) {
 
@@ -2417,7 +2297,6 @@ async function getThreadSettings(
       [id]
     );
 
-
     return {
       thread_id:
         id,
@@ -2430,10 +2309,8 @@ async function getThreadSettings(
     };
   }
 
-
   return rows[0];
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // THREAD SETTINGS — UPDATE
@@ -2446,28 +2323,23 @@ async function setThreadSettings(
   const conn =
     requireConn();
 
-
   const id =
     String(threadId);
-
 
   await getThreadSettings(
     id
   );
-
 
   const allowedFields = [
     "roast_enabled",
     "fun_enabled",
   ];
 
-
   const safeFields =
     Object.keys(fields).filter(
       (key) =>
         allowedFields.includes(key)
     );
-
 
   if (
     safeFields.length === 0
@@ -2477,7 +2349,6 @@ async function setThreadSettings(
     );
   }
 
-
   const setClause =
     safeFields
       .map(
@@ -2486,12 +2357,10 @@ async function setThreadSettings(
       )
       .join(", ");
 
-
   const values =
     safeFields.map(
       (key) => fields[key]
     );
-
 
   await conn.query(
     `
@@ -2507,12 +2376,10 @@ async function setThreadSettings(
     ]
   );
 
-
   return getThreadSettings(
     id
   );
 }
-
 
 // ═══════════════════════════════════════════════════════════
 // ROAST / BANAT SETTINGS
@@ -2526,12 +2393,10 @@ async function isRoastEnabled(
       threadId
     );
 
-
   return (
     settings.roast_enabled === true
   );
 }
-
 
 async function setRoastEnabled(
   threadId,
@@ -2546,7 +2411,6 @@ async function setRoastEnabled(
   );
 }
 
-
 // ═══════════════════════════════════════════════════════════
 // GAME SETTINGS
 // ═══════════════════════════════════════════════════════════
@@ -2559,12 +2423,10 @@ async function isGameEnabled(
       threadId
     );
 
-
   return (
     settings.fun_enabled === true
   );
 }
-
 
 async function setGameEnabled(
   threadId,
@@ -2579,7 +2441,6 @@ async function setGameEnabled(
   );
 }
 
-
 // ╔══════════════════════════════════════════════════════════╗
 // ║                         EXPORTS                          ║
 // ╚══════════════════════════════════════════════════════════╝
@@ -2593,7 +2454,6 @@ module.exports = {
 
   connect,
 
-
   // ─────────────────────────────────────────────────────────
   // USERS
   // ─────────────────────────────────────────────────────────
@@ -2602,7 +2462,6 @@ module.exports = {
   updateUser,
   setUserDisplayName,
 
-
   // ─────────────────────────────────────────────────────────
   // WALLET
   // ─────────────────────────────────────────────────────────
@@ -2610,13 +2469,11 @@ module.exports = {
   addBalance,
   spendBalance,
 
-
   // ─────────────────────────────────────────────────────────
   // GAME STATS
   // ─────────────────────────────────────────────────────────
 
   incrementGameStats,
-
 
   // ─────────────────────────────────────────────────────────
   // XP / RANKS
@@ -2628,7 +2485,6 @@ module.exports = {
   getNextRank,
   getPlayerRanking,
 
-
   // ─────────────────────────────────────────────────────────
   // LEADERBOARDS
   // ─────────────────────────────────────────────────────────
@@ -2636,7 +2492,6 @@ module.exports = {
   leaderboard,
   moneyLeaderboard,
   xpLeaderboard,
-
 
   // ─────────────────────────────────────────────────────────
   // BANK
@@ -2646,13 +2501,11 @@ module.exports = {
   withdraw,
   applyBankInterest,
 
-
   // ─────────────────────────────────────────────────────────
   // TRANSFERS
   // ─────────────────────────────────────────────────────────
 
   transfer,
-
 
   // ─────────────────────────────────────────────────────────
   // LOANS
@@ -2661,14 +2514,12 @@ module.exports = {
   applyLoan,
   payLoan,
 
-
   // ─────────────────────────────────────────────────────────
   // INVENTORY
   // ─────────────────────────────────────────────────────────
 
   addItem,
   getInventory,
-
 
   // ─────────────────────────────────────────────────────────
   // THREAD SETTINGS
@@ -2677,14 +2528,12 @@ module.exports = {
   getThreadSettings,
   setThreadSettings,
 
-
   // ─────────────────────────────────────────────────────────
   // ROAST / BANAT
   // ─────────────────────────────────────────────────────────
 
   isRoastEnabled,
   setRoastEnabled,
-
 
   // ─────────────────────────────────────────────────────────
   // GAMES
