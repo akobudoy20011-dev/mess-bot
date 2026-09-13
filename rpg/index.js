@@ -84,6 +84,25 @@ const {
   learnSpell,
 } = require("./magic");
 
+/* =========================================================
+   KINGDOMS / DIPLOMACY
+========================================================= */
+
+const {
+  KINGDOMS,
+  getKingdom,
+  getKingdomTerritory,
+  kingdomSummary,
+  listKingdoms,
+  pledgeToKingdom,
+} = require("./kingdoms");
+
+const {
+  declareWar,
+  getAllRelations,
+  offerPeace,
+} = require("./diplomacy");
+
 const {
   box,
   errorBox,
@@ -525,7 +544,6 @@ async function handleCast(api, event, args) {
     );
   }
 
-
   /* -------------------------------------------------------
      TELEPORT
   ------------------------------------------------------- */
@@ -564,7 +582,6 @@ async function handleCast(api, event, args) {
 
     return;
   }
-
 
   /* -------------------------------------------------------
      DETECT MAGIC
@@ -1005,6 +1022,241 @@ async function handleProperty(api, event, args) {
       "⬆️ Upgrade property:",
       "!rpg property buy <tier>",
     ])
+  );
+}
+
+
+/* =========================================================
+   KINGDOM INFO
+========================================================= */
+
+async function handleKingdomInfo(api, event, args) {
+  await ensurePlayer(
+    event.threadID,
+    event.senderID
+  );
+
+  if (!args[0]) {
+    const kingdoms =
+      await listKingdoms(
+        event.threadID
+      );
+
+    await send(
+      api,
+      event.threadID,
+      box(
+        "🏰 KINGDOMS OF ECLIPSE",
+        kingdoms
+          .flatMap(
+            (kingdom) => [
+              (
+                KINGDOMS[
+                  kingdom.kingdom_id
+                ]?.emoji ||
+                "🏰"
+              ) +
+                " " +
+                kingdom.name,
+
+              "   Specialization: " +
+                kingdom.specialization,
+
+              "",
+            ]
+          )
+          .concat([
+            "View details: !rpg kingdom <name>",
+            "Pledge allegiance: !rpg kingdom pledge <name>",
+          ])
+      )
+    );
+
+    return;
+  }
+
+  if (
+    normalizeKey(args[0]) ===
+    "pledge"
+  ) {
+    if (!args[1]) {
+      throw new Error(
+        "Choose a kingdom to pledge to. Example: !rpg kingdom pledge ironspine_hold"
+      );
+    }
+
+    const kingdom =
+      await pledgeToKingdom(
+        event.threadID,
+        event.senderID,
+        args.slice(1).join(" ")
+      );
+
+    await send(
+      api,
+      event.threadID,
+      box(
+        "🏰 ALLEGIANCE PLEDGED",
+        [
+          "You have pledged fealty to " +
+            kingdom.name +
+            ".",
+        ]
+      )
+    );
+
+    return;
+  }
+
+  const kingdom =
+    await getKingdom(
+      event.threadID,
+      args.join(" ")
+    );
+
+  if (!kingdom) {
+    throw new Error(
+      "Choose a kingdom: " +
+        Object.keys(KINGDOMS).join(", ") +
+        "."
+    );
+  }
+
+  const territory =
+    await getKingdomTerritory(
+      event.threadID,
+      kingdom.kingdom_id
+    );
+
+  const relations =
+    await getAllRelations(
+      event.threadID,
+      kingdom.kingdom_id
+    );
+
+  await send(
+    api,
+    event.threadID,
+    box(
+      "🏰 " +
+        kingdom.name.toUpperCase(),
+      [
+        ...kingdomSummary(
+          kingdom,
+          territory
+        ),
+
+        "",
+
+        "🤝 RELATIONS",
+
+        ...(
+          relations.length
+            ? relations.map(
+                (r) =>
+                  r.kingdom.name +
+                  ": " +
+                  r.status
+              )
+            : [
+                "No diplomatic relations recorded.",
+              ]
+        ),
+      ]
+    )
+  );
+}
+
+
+/* =========================================================
+   DIPLOMACY
+========================================================= */
+
+async function handleDiplomacy(api, event, args) {
+  const action =
+    normalizeKey(
+      args[0] || ""
+    );
+
+  if (
+    action === "war"
+  ) {
+    if (
+      !args[1] ||
+      !args[2]
+    ) {
+      throw new Error(
+        "Usage: !rpg diplomacy war <kingdomA> <kingdomB>"
+      );
+    }
+
+    const result =
+      await declareWar(
+        event.threadID,
+        args[1],
+        args[2]
+      );
+
+    await send(
+      api,
+      event.threadID,
+      box(
+        "⚔️ WAR DECLARED",
+        [
+          result.attacker.name +
+            " has declared war on " +
+            result.defender.name +
+            ".",
+        ]
+      )
+    );
+
+    return;
+  }
+
+  if (
+    action === "peace"
+  ) {
+    if (
+      !args[1] ||
+      !args[2]
+    ) {
+      throw new Error(
+        "Usage: !rpg diplomacy peace <kingdomA> <kingdomB>"
+      );
+    }
+
+    const result =
+      await offerPeace(
+        event.threadID,
+        args[1],
+        args[2]
+      );
+
+    await send(
+      api,
+      event.threadID,
+      box(
+        result.accepted
+          ? "🕊️ PEACE ACCEPTED"
+          : "🕊️ PEACE REJECTED",
+        [
+          result.accepted
+            ? result.kingdomA.name +
+              " and " +
+              result.kingdomB.name +
+              " are now at peace."
+            : result.kingdomB.name +
+              " rejected the peace offer.",
+        ]
+      )
+    );
+
+    return;
+  }
+
+  throw new Error(
+    "Usage: !rpg diplomacy war <kingdomA> <kingdomB> | !rpg diplomacy peace <kingdomA> <kingdomB>"
   );
 }
 
@@ -1891,6 +2143,9 @@ async function handleHelp(api, event) {
       "▶ !rpg property",
       "View your domain.",
 
+      "▶ !rpg domain",
+      "Alias for !rpg property.",
+
       "▶ !rpg property buy <tier>",
       "Purchase or upgrade property.",
 
@@ -1899,6 +2154,26 @@ async function handleHelp(api, event) {
 
       "▶ !rpg defense <part>",
       "Improve your defenses.",
+
+      "━━━━━━━━━━━━━━━━━━━━━━",
+
+      "🏰 KINGDOMS & DIPLOMACY",
+
+      "▶ !rpg kingdom",
+      "View all kingdoms of Eclipse.",
+
+      "▶ !rpg kingdom <name>",
+      "View a kingdom's strength, territory, and relations.",
+      "Example: !rpg kingdom ironspine_hold",
+
+      "▶ !rpg kingdom pledge <name>",
+      "Pledge allegiance to a kingdom.",
+
+      "▶ !rpg diplomacy war <a> <b>",
+      "Declare war between two kingdoms.",
+
+      "▶ !rpg diplomacy peace <a> <b>",
+      "Offer peace between two warring kingdoms.",
 
       "━━━━━━━━━━━━━━━━━━━━━━",
 
@@ -2011,7 +2286,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        PROFILE
     ===================================================== */
@@ -2027,7 +2301,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        CLASS
     ===================================================== */
@@ -2042,7 +2315,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        SKILLS
     ===================================================== */
@@ -2056,7 +2328,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        MAGIC
     ===================================================== */
@@ -2069,7 +2340,6 @@ async function handleRpgCommand(
         event
       );
     }
-
 
     /* =====================================================
        LEARN SPELL
@@ -2085,7 +2355,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        UTILITY CAST
     ===================================================== */
@@ -2099,7 +2368,6 @@ async function handleRpgCommand(
         args
       );
     }
-
 
     /* =====================================================
        INVENTORY
@@ -2115,7 +2383,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        EQUIPMENT
     ===================================================== */
@@ -2128,7 +2395,6 @@ async function handleRpgCommand(
         event
       );
     }
-
 
     /* =====================================================
        MAP / WORLD
@@ -2149,24 +2415,50 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
-       PROPERTY / KINGDOM
+       PROPERTY / DOMAIN
     ===================================================== */
 
     else if (
       action === "property" ||
-      action === "kingdom"
+      action === "domain"
     ) {
       await handleProperty(
         api,
         event,
-        action === "kingdom"
+        action === "domain"
           ? []
           : args
       );
     }
 
+    /* =====================================================
+       KINGDOM
+    ===================================================== */
+
+    else if (
+      action === "kingdom"
+    ) {
+      await handleKingdomInfo(
+        api,
+        event,
+        args
+      );
+    }
+
+    /* =====================================================
+       DIPLOMACY
+    ===================================================== */
+
+    else if (
+      action === "diplomacy"
+    ) {
+      await handleDiplomacy(
+        api,
+        event,
+        args
+      );
+    }
 
     /* =====================================================
        BUILD
@@ -2182,7 +2474,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        DEFENSE
     ===================================================== */
@@ -2196,7 +2487,6 @@ async function handleRpgCommand(
         ["defense"].concat(args)
       );
     }
-
 
     /* =====================================================
        ARMY
@@ -2218,7 +2508,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        MARCH
     ===================================================== */
@@ -2234,7 +2523,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        SCOUT
     ===================================================== */
@@ -2248,7 +2536,6 @@ async function handleRpgCommand(
         args
       );
     }
-
 
     /* =====================================================
        RAID
@@ -2264,7 +2551,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        AMBUSH
     ===================================================== */
@@ -2278,7 +2564,6 @@ async function handleRpgCommand(
         args
       );
     }
-
 
     /* =====================================================
        COMBAT
@@ -2305,7 +2590,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        QUEST
     ===================================================== */
@@ -2319,7 +2603,6 @@ async function handleRpgCommand(
         args
       );
     }
-
 
     /* =====================================================
        DUNGEON
@@ -2335,7 +2618,6 @@ async function handleRpgCommand(
       );
     }
 
-
     /* =====================================================
        REST
     ===================================================== */
@@ -2348,7 +2630,6 @@ async function handleRpgCommand(
         event
       );
     }
-
 
     /* =====================================================
        UNKNOWN
