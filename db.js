@@ -142,6 +142,9 @@ async function connect() {
         loan_due BIGINT,
 
       ADD COLUMN IF NOT EXISTS
+        last_interest_paid BIGINT,
+
+      ADD COLUMN IF NOT EXISTS
         display_name TEXT;
   `);
 
@@ -431,6 +434,7 @@ async function updateUser(
     "loan_principal",
     "loan_remaining",
     "loan_due",
+    "last_interest_paid",
 
     "display_name",
   ];
@@ -1881,26 +1885,59 @@ async function applyBankInterest(
     ) || 0;
 
 
+  // Once-per-day cooldown so !bank can't be spammed for
+  // unlimited free interest. Mirrors the daily-reward pattern
+  // already used for last_daily.
+  const INTEREST_COOLDOWN_MS =
+    24 * 60 * 60 * 1000;
+
+  const now = Date.now();
+
+  const last =
+    user.last_interest_paid
+      ? Number(user.last_interest_paid)
+      : null;
+
+  if (
+    last !== null &&
+    now - last < INTEREST_COOLDOWN_MS
+  ) {
+    return {
+      interest: 0,
+      applied: false,
+      onCooldown: true,
+      msRemaining:
+        INTEREST_COOLDOWN_MS - (now - last),
+    };
+  }
+
   if (
     bankBalance <= 0
   ) {
-    return 0;
+    // Still stamp last_interest_paid so an empty account
+    // doesn't get a free "first call always succeeds" edge case
+    // the moment they deposit something.
+    await updateUser(
+      threadId,
+      userId,
+      {
+        last_interest_paid: now,
+      }
+    );
+
+    return {
+      interest: 0,
+      applied: false,
+      onCooldown: false,
+    };
   }
 
 
   // 1% simulated bank interest.
-  // Called by the !bank / economy flow.
   const interest =
     Math.floor(
       bankBalance * 0.01
     );
-
-
-  if (
-    interest <= 0
-  ) {
-    return 0;
-  }
 
 
   await updateUser(
@@ -1910,11 +1947,17 @@ async function applyBankInterest(
       bank_balance:
         bankBalance +
         interest,
+
+      last_interest_paid: now,
     }
   );
 
 
-  return interest;
+  return {
+    interest,
+    applied: interest > 0,
+    onCooldown: false,
+  };
 }
 
 
