@@ -4,280 +4,199 @@ const path = require('path');
 const STATE_DIR = path.join(__dirname, 'data');
 const STATE_FILE = path.join(STATE_DIR, 'riddle-state.json');
 
-if (!fs.existsSync(STATE_DIR)) {
-  fs.mkdirSync(STATE_DIR, { recursive: true });
-}
+if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
 
+/**
+ * Load riddles from riddle-questions.js
+ * Supports multiple export formats
+ */
 function loadRiddles() {
-  try {
-    const mod = require('./riddle-questions');
-
-    if (Array.isArray(mod)) {
-      return mod.slice();
-    }
-
-    if (Array.isArray(mod.riddles)) {
-      return mod.riddles.slice();
-    }
-
-    if (Array.isArray(mod.questions)) {
-      return mod.questions.slice();
-    }
-
-    if (Array.isArray(mod.default)) {
-      return mod.default.slice();
-    }
-
-    if (mod && Array.isArray(mod.RIDDLES)) {
-      return mod.RIDDLES.slice();
-    }
-
-    return [];
-  } catch (error) {
-    console.error(
-      '[RiddleManager] Failed to load riddle-questions.js:',
-      error
-    );
-
-    return [];
-  }
+  const mod = require('./riddle-questions');
+  if (Array.isArray(mod)) return mod.slice();
+  if (Array.isArray(mod.default)) return mod.default.slice();
+  if (Array.isArray(mod.questions)) return mod.questions.slice();
+  return [];
 }
 
+/**
+ * Generate a stable ID for each riddle
+ */
+function makeRiddleId(r, idx) {
+  if (r.id) return String(r.id);
+  const text = String(r.question || r.q || '').slice(0, 120);
+  return `r_${idx}_${Buffer.from(text).toString('base64').slice(0, 8)}`;
+}
+
+/**
+ * Load state from disk
+ */
 function loadState() {
   try {
-    const state = JSON.parse(
-      fs.readFileSync(STATE_FILE, 'utf8')
-    );
-
-    if (!state || typeof state !== 'object') {
-      return {
-        used: {},
-        cycles: {}
-      };
+    const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    // Convert used arrays back to Sets
+    if (data.cycles) {
+      for (const key in data.cycles) {
+        if (data.cycles[key].used && Array.isArray(data.cycles[key].used)) {
+          data.cycles[key].used = new Set(data.cycles[key].used);
+        }
+      }
     }
-
-    if (!state.used) state.used = {};
-    if (!state.cycles) state.cycles = {};
-
-    return state;
+    return data;
   } catch {
-    return {
-      used: {},
-      cycles: {}
+    return { cycles: {} };
+  }
+}
+
+/**
+ * Save state to disk
+ */
+function saveState(state) {
+  const toSave = { cycles: {} };
+  for (const key in state.cycles) {
+    const cycle = state.cycles[key];
+    toSave.cycles[key] = {
+      pool: cycle.pool || [],
+      used: Array.from(cycle.used || []),
+      currentIdx: cycle.currentIdx || 0,
     };
   }
+  fs.writeFileSync(STATE_FILE, JSON.stringify(toSave, null, 2), 'utf8');
 }
 
-function saveState(state) {
-  try {
-    fs.writeFileSync(
-      STATE_FILE,
-      JSON.stringify(state, null, 2),
-      'utf8'
-    );
-  } catch (error) {
-    console.error(
-      '[RiddleManager] Failed to save state:',
-      error
-    );
-  }
-}
-
-function makeId(riddle, index) {
-  if (riddle && riddle.id != null) {
-    return String(riddle.id);
-  }
-
-  const text = String(
-    riddle?.question ||
-    riddle?.q ||
-    riddle?.prompt ||
-    riddle?.text ||
-    ''
-  ).trim();
-
-  return `r_${index}_${Buffer
-    .from(text)
-    .toString('base64')
-    .replace(/[^a-zA-Z0-9]/g, '')
-    .slice(0, 12)}`;
-}
-
-function shuffle(array) {
-  const result = array.slice();
-
+/**
+ * Shuffle an array using Fisher-Yates algorithm
+ */
+function shuffle(arr) {
+  const result = arr.slice();
   for (let i = result.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-
-    [result[i], result[j]] = [
-      result[j],
-      result[i]
-    ];
+    [result[i], result[j]] = [result[j], result[i]];
   }
-
   return result;
 }
 
+/**
+ * Normalize riddle answers: trim, lowercase, handle multiple acceptable answers
+ */
+function normalizeRiddle(r) {
+  if (!r) return null;
+  const question = r.question || r.q || '';
+  let answers = r.answers || r.answer || [];
+  
+  // Coerce to array
+  if (!Array.isArray(answers)) {
+    answers = [String(answers)];
+  }
+  
+  // Trim and normalize each answer
+  answers = answers.map((a) => String(a).trim()).filter(Boolean);
+  
+  if (!question || !answers.length) return null;
+  
+  return {
+    question: String(question),
+    answers: answers,
+  };
+}
+
 class RiddleManager {
-  constructor(opts = {}) {
-    this.riddles = loadRiddles().map((r, i) => ({
-      ...r,
-      _id: makeId(r, i)
-    }));
+  constructor() {
+    // Load all riddles once at startup
+    const raw = loadRiddles();
+    this.allRiddles = raw
+      .map((r, idx) => {
+        const normalized = normalizeRiddle(r);
+        if (normalized) {
+          return { ...normalized, _id: makeRiddleId(r, idx) };
+        }
+        return null;
+      })
+      .filter(Boolean);
 
     this.state = loadState();
-
-    this.recentWindowSize =
-      Number(opts.recentWindowSize) || 40;
+    console.log(`[riddle-manager] Loaded ${this.allRiddles.length} riddles`);
   }
 
-  _scopeKey({ threadID = null } = {}) {
+  _scopeKey(threadID) {
     return `thread:${String(threadID || 'global')}`;
   }
 
-  _getUsed(key) {
-    if (!Array.isArray(this.state.used[key])) {
-      this.state.used[key] = [];
-    }
-
-    return this.state.used[key];
-  }
-
-  _getCycle(key) {
-    if (!this.state.cycles[key]) {
-      this.state.cycles[key] = 1;
-    }
-
-    return this.state.cycles[key];
-  }
-
-  _resetCycle(key) {
-    this.state.used[key] = [];
-    this.state.cycles[key] =
-      this._getCycle(key) + 1;
-  }
-
-  async getNextRiddle({
-    threadID = null,
-    userID = null
-  } = {}) {
-    if (
-      !this.riddles ||
-      this.riddles.length === 0
-    ) {
+  /**
+   * Get the next riddle for a thread
+   * TRUE NO-REPEAT: Each riddle used once per full cycle, then restart
+   */
+  async getNextRiddle({ threadID = null } = {}) {
+    if (!this.allRiddles || this.allRiddles.length === 0) {
+      console.error('[riddle-manager] No riddles loaded');
       return null;
     }
 
-    const key = this._scopeKey({
-      threadID,
-      userID
-    });
+    const key = this._scopeKey(threadID);
 
-    const pool = this.riddles.slice();
-
-    let used = this._getUsed(key);
-
-    const poolIds = new Set(
-      pool.map((r) => r._id)
-    );
-
-    // Remove IDs that no longer exist in the
-    // current riddle database.
-    used = used.filter((id) =>
-      poolIds.has(id)
-    );
-
-    this.state.used[key] = used;
-
-    // Get riddles that haven't been used
-    // during this cycle.
-    let available = pool.filter(
-      (r) => !used.includes(r._id)
-    );
-
-    // Every riddle has been used.
-    // Start a fresh cycle.
-    if (available.length === 0) {
-      this._resetCycle(key);
-
-      used = [];
-      available = pool.slice();
+    // Initialize cycle for this thread if not exists
+    if (!this.state.cycles[key]) {
+      const shuffled = shuffle(this.allRiddles.map((r) => r._id));
+      this.state.cycles[key] = {
+        pool: shuffled,
+        used: new Set(),
+        currentIdx: 0,
+      };
+      saveState(this.state);
     }
 
-    // Randomly choose one unused riddle.
-    const shuffled = shuffle(available);
-    const chosen = shuffled[0];
+    const cycle = this.state.cycles[key];
 
-    // Mark it as used.
-    this.state.used[key].push(chosen._id);
-
-    saveState(this.state);
-
-    const question =
-      chosen.question ||
-      chosen.q ||
-      chosen.prompt ||
-      chosen.text ||
-      '';
-
-    let answers = [];
-
-    if (Array.isArray(chosen.answers)) {
-      answers = chosen.answers.map(String);
-    } else if (Array.isArray(chosen.answer)) {
-      answers = chosen.answer.map(String);
-    } else if (
-      chosen.answer !== undefined &&
-      chosen.answer !== null
-    ) {
-      answers = [String(chosen.answer)];
+    // Check if cycle exhausted
+    if (cycle.used.size >= this.allRiddles.length) {
+      console.log(`[riddle-manager] Cycle exhausted for ${key}, resetting`);
+      const shuffled = shuffle(this.allRiddles.map((r) => r._id));
+      cycle.pool = shuffled;
+      cycle.used = new Set();
+      cycle.currentIdx = 0;
+      saveState(this.state);
     }
 
-    return {
-      question: String(question),
-      answers,
-      _raw: chosen,
-      cycle: this._getCycle(key)
-    };
+    // Find next unused riddle in pool
+    let attempts = 0;
+    while (cycle.currentIdx < cycle.pool.length && attempts < cycle.pool.length) {
+      const rid = cycle.pool[cycle.currentIdx];
+      cycle.currentIdx++;
+
+      if (!cycle.used.has(rid)) {
+        cycle.used.add(rid);
+        saveState(this.state);
+
+        // Find and return the riddle object
+        const r = this.allRiddles.find((x) => x._id === rid);
+        if (r) return r;
+      }
+      attempts++;
+    }
+
+    // Should not reach here if pool is correctly shuffled
+    console.error(`[riddle-manager] Failed to find unused riddle for ${key}`);
+    return null;
   }
 
-  async resetUsage() {
-    this.state.used = {};
-    saveState(this.state);
-  }
-
-  async resetRecent() {
-    this.state.used = {};
-    saveState(this.state);
-  }
-
+  /**
+   * Admin: Reset usage for a thread
+   */
   async resetThread(threadID) {
-    const key = this._scopeKey({
-      threadID
-    });
-
-    delete this.state.used[key];
-    delete this.state.cycles[key];
-
-    saveState(this.state);
+    const key = this._scopeKey(threadID);
+    if (this.state.cycles[key]) {
+      delete this.state.cycles[key];
+      saveState(this.state);
+      console.log(`[riddle-manager] Reset cycle for ${key}`);
+    }
   }
 
-  getStats(threadID = null) {
-    const key = this._scopeKey({
-      threadID
-    });
-
-    const used = this._getUsed(key);
-
-    return {
-      totalRiddles: this.riddles.length,
-      usedThisCycle: used.length,
-      remainingThisCycle: Math.max(
-        0,
-        this.riddles.length - used.length
-      ),
-      cycle: this._getCycle(key)
-    };
+  /**
+   * Admin: Reset all threads
+   */
+  async resetAll() {
+    this.state.cycles = {};
+    saveState(this.state);
+    console.log('[riddle-manager] Reset all cycles');
   }
 }
 
