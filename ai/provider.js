@@ -31,9 +31,6 @@ function toGeminiRequest(messages) {
     });
   }
 
-  // Gemini expects a conversation to begin with a user turn. Lucien's
-  // persisted greeting is an assistant turn, so keep it as context instead
-  // of sending a model message before the first user message.
   const openingMessage = rawContents[0]?.role === "model" ? rawContents.shift() : null;
   const contents = [];
   for (const content of rawContents) {
@@ -55,9 +52,7 @@ function toGeminiRequest(messages) {
 
   const request = {
     contents,
-    generationConfig: {
-      temperature: 0.85,
-    },
+    generationConfig: { temperature: 0.85 },
   };
 
   if (systemParts.length) {
@@ -85,17 +80,30 @@ function getGeneratedText(data) {
   return text;
 }
 
-async function generateReply(messages) {
-  const apiKey = String(process.env.GEMINI_API_KEY || "").trim();
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
+function configuredGeminiKeys() {
+  const names = Object.keys(process.env)
+    .filter((name) => /^GEMINI_API_KEY(?:_([2-9]\d*))?$/.test(name))
+    .sort((left, right) => {
+      const slot = (name) => name === "GEMINI_API_KEY" ? 1 : Number(name.slice("GEMINI_API_KEY_".length));
+      return slot(left) - slot(right);
+    });
 
-  const configuredModel = String(process.env.AI_MODEL || "").trim();
-  if (!configuredModel) throw new Error("AI_MODEL is not configured.");
-  const model = configuredModel.replace(/^models\//, "");
+  return names
+    .map((name) => ({ name, value: String(process.env[name] || "").trim() }))
+    .filter((entry) => entry.value);
+}
 
+function providerError(message, status, retryable) {
+  const error = new Error(message);
+  error.status = status;
+  error.retryable = retryable;
+  return error;
+}
+
+async function requestGemini(messages, model, key) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 45_000);
-  const endpoint = GEMINI_API_BASE_URL + "/models/" + encodeURIComponent(model) + ":generateContent?key=" + encodeURIComponent(apiKey);
+  const endpoint = GEMINI_API_BASE_URL + "/models/" + encodeURIComponent(model) + ":generateContent?key=" + encodeURIComponent(key.value);
 
   try {
     const response = await fetch(endpoint, {
@@ -108,11 +116,13 @@ async function generateReply(messages) {
 
     if (!response.ok) {
       const providerMessage = data?.error?.message || "HTTP " + response.status;
+      const retryable = [500, 502, 503, 504].includes(response.status);
       console.error("[Gemini] API request failed:", {
+        keySlot: key.name,
         status: response.status,
         message: providerMessage,
       });
-      throw new Error("Gemini request failed (" + response.status + "): " + providerMessage);
+      throw providerError("Gemini request failed (" + response.status + "): " + providerMessage, response.status, retryable);
     }
 
     return {
@@ -121,13 +131,42 @@ async function generateReply(messages) {
     };
   } catch (error) {
     if (error?.name === "AbortError") {
-      console.error("[Gemini] API request timed out.");
-      throw new Error("Gemini request timed out.");
+      console.error("[Gemini] API request timed out:", { keySlot: key.name });
+      throw providerError("Gemini request timed out.", null, true);
     }
-    throw error;
+    if (error?.status !== undefined) throw error;
+    console.error("[Gemini] Network request failed:", { keySlot: key.name, message: error?.message || "Unknown network error" });
+    throw providerError("Gemini network request failed.", null, true);
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function generateReply(messages) {
+  const keys = configuredGeminiKeys();
+  if (!keys.length) throw new Error("GEMINI_API_KEY is not configured.");
+
+  const configuredModel = String(process.env.AI_MODEL || "").trim();
+  if (!configuredModel) throw new Error("AI_MODEL is not configured.");
+  const model = configuredModel.replace(/^models\//, "");
+
+  let lastError;
+  for (let index = 0; index < keys.length; index += 1) {
+    try {
+      return await requestGemini(messages, model, keys[index]);
+    } catch (error) {
+      lastError = error;
+      const hasNextKey = index < keys.length - 1;
+      if (!error?.retryable || !hasNextKey) throw error;
+      console.error("[Gemini] Trying next configured key after transient failure.", {
+        failedKeySlot: keys[index].name,
+        nextKeySlot: keys[index + 1].name,
+        status: error.status || null,
+      });
+    }
+  }
+
+  throw lastError || new Error("Gemini request failed.");
 }
 
 module.exports = { generateReply };
