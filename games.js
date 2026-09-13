@@ -203,6 +203,14 @@ function coinReward(type) {
   return rewards[type] || 50;
 }
 
+// ------------------------------------------------------------
+// FIX: db.addUserData(userID, {...}) does not exist in db.js.
+// The real wallet/XP API is thread+user scoped: db.addXP and
+// db.addBalance. This is what was causing every game payout to
+// throw silently inside the callers' try/catch blocks, which
+// made the bot appear to "ignore" the final answer on every
+// trivia/guess/math/riddle/blackjack round.
+// ------------------------------------------------------------
 async function awardPlayer(threadID, userID, gameType, won = false) {
   const xp = xpForGame(gameType);
   const baseCoins = coinReward(gameType);
@@ -216,10 +224,8 @@ async function awardPlayer(threadID, userID, gameType, won = false) {
     ? xp
     : Math.floor(xp * 0.5);
 
-  await db.addUserData(userID, {
-    xp: won ? xpAmount : -xpAmount,
-    coins: won ? coins : -coins,
-  });
+  await db.addXP(threadID, userID, won ? xpAmount : -xpAmount);
+  await db.addBalance(threadID, userID, won ? coins : -coins);
 
   return {
     xp: xpAmount,
@@ -228,10 +234,15 @@ async function awardPlayer(threadID, userID, gameType, won = false) {
   };
 }
 
+// ------------------------------------------------------------
+// FIX: db.getUserData(userID) does not exist. Real lookup is
+// db.getUser(threadID, userID), and the wallet field is
+// `balance`, not `coins`.
+// ------------------------------------------------------------
 async function getFinalBalanceText(threadID, userID) {
-  const user = await db.getUserData(userID);
+  const user = await db.getUser(threadID, userID);
 
-  const coins = formatNumber(user?.coins ?? 0);
+  const coins = formatNumber(user?.balance ?? 0);
   const xp = formatNumber(user?.xp ?? 0);
 
   return `💰 ${coins} coins   •   ⭐ ${xp} XP`;
