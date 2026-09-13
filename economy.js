@@ -30,6 +30,7 @@
 
 const db = require("./db");
 const { reply, fmtTime } = require("./util");
+const { getShopLines, resolveRpgItem, buyRpgItem, getRpgInventory, useRpgItem } = require("./rpg/shop");
 
 // ============================================================================
 // ADMIN CONFIGURATION
@@ -706,369 +707,50 @@ async function handleLeaderboard(
 // SHOP
 // ============================================================================
 
-async function handleShop(
-  api,
-  event
-) {
-  const {
-    threadID,
-  } = event;
-
-  const lines = [
-    "🛍️ Spend your coins on collectibles.",
-    "",
-  ];
-
-  Object.entries(
-    SHOP_ITEMS
-  ).forEach(
-    ([id, item], index) => {
-      lines.push(
-        `${index + 1}. ${item.name}`,
-        `   💰 ${formatCoins(item.price)} coins`,
-        `   🛒 !buy ${id}`,
-        ""
-      );
-    }
-  );
-
-  lines.push(
-    "💡 Buy an item with the command shown above."
-  );
-
-  await reply(
-    api,
-    threadID,
-    createBox(
-      "🛒 SHOP",
-      lines
-    )
-  );
+async function handleShop(api, event) {
+  const lines = ["🛡️ ECLIPSE RPG ITEMS", "", ...getShopLines(), "🎁 COLLECTIBLES", "", "These legacy economy collectibles remain available:", ""];
+  Object.entries(SHOP_ITEMS).forEach(([id, item]) => lines.push(item.name + " · " + formatCoins(item.price) + " coins", "   Buy: !buy " + id, ""));
+  await reply(api, event.threadID, createBox("🛒 SHOP", lines));
 }
-
 // ============================================================================
 // BUY
 // ============================================================================
 
-async function handleBuy(
-  api,
-  event,
-  args
-) {
-  const {
-    threadID,
-    senderID,
-  } = event;
-
-  const itemId =
-    String(
-      args[0] || ""
-    )
-      .trim()
-      .toLowerCase();
-
-  // --------------------------------------------------------------------------
-  // INVALID ITEM
-  // --------------------------------------------------------------------------
-
-  if (!itemId) {
-    await reply(
-      api,
-      threadID,
-      createError(
-        "Usage: !buy <item>\n\nUse `!shop` to see available items."
-      )
-    );
-
+async function handleBuy(api, event, args) {
+  const input = String(args[0] || "").trim().toLowerCase();
+  const quantity = Math.max(1, Math.min(99, Math.floor(Number(args[1]) || 1)));
+  if (!input) { await reply(api, event.threadID, createError("Usage: !buy <item number or item id> [quantity]\n\nUse !shop to see available items.")); return; }
+  const rpgItem = resolveRpgItem(input);
+  if (rpgItem || /^\d+$/.test(input)) {
+    try {
+      const result = await buyRpgItem(event.threadID, event.senderID, input, quantity);
+      await reply(api, event.threadID, createBox("🛍️ RPG PURCHASE COMPLETE", ["🎁 " + result.item.name + " ×" + result.quantity, "💰 Cost: " + formatCoins(result.total) + " coins", "💵 Remaining Gold: " + formatCoins(result.balance) + " coins", "✨ Added to your RPG inventory."]));
+    } catch (error) { await reply(api, event.threadID, createError(error.message || "The RPG purchase could not be completed.")); }
     return;
   }
-
-  const item =
-    SHOP_ITEMS[itemId];
-
-  if (!item) {
-    await reply(
-      api,
-      threadID,
-      createError(
-        "That item doesn't exist.\n\nUse `!shop` to view the available items."
-      )
-    );
-
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // USER
-  // --------------------------------------------------------------------------
-
-  const user =
-    await db.getUser(
-      threadID,
-      senderID
-    );
-
-  const balance =
-    Number(user.balance) || 0;
-
-  // --------------------------------------------------------------------------
-  // NOT ENOUGH MONEY
-  // --------------------------------------------------------------------------
-
-  if (
-    balance < item.price
-  ) {
-    const missing =
-      item.price - balance;
-
-    await reply(
-      api,
-      threadID,
-      createBox(
-        "🛒 SHOP",
-        [
-          `You can't afford ${item.name}.`,
-          "",
-          `💰 Price: ${formatCoins(item.price)} coins`,
-          `💵 Balance: ${formatCoins(balance)} coins`,
-          `📉 Missing: ${formatCoins(missing)} coins`,
-        ]
-      )
-    );
-
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // PURCHASE
-  // --------------------------------------------------------------------------
-
-  await db.addBalance(
-    threadID,
-    senderID,
-    -item.price
-  );
-
-  await db.addItem(
-    threadID,
-    senderID,
-    itemId,
-    1
-  );
-
-  const updatedUser =
-    await db.getUser(
-      threadID,
-      senderID
-    );
-
-  const newBalance =
-    Number(
-      updatedUser.balance
-    ) || 0;
-
-  await reply(
-    api,
-    threadID,
-    createBox(
-      "🛍️ PURCHASE COMPLETE",
-      [
-        `👤 ${getDisplayName(updatedUser)}`,
-        "",
-        `🎁 Item: ${item.name}`,
-        `💰 Price: ${formatCoins(item.price)} coins`,
-        "",
-        `💵 Balance: ${formatCoins(newBalance)} coins`,
-        "",
-        "✨ Added to your inventory!",
-      ]
-    )
-  );
+  const item = SHOP_ITEMS[input];
+  if (!item) { await reply(api, event.threadID, createError("That item does not exist. Use !shop to view the available items.")); return; }
+  const user = await db.getUser(event.threadID, event.senderID); const balance = Number(user.balance) || 0;
+  if (balance < item.price) { await reply(api, event.threadID, createBox("🛒 SHOP", ["You cannot afford " + item.name + ".", "", "💰 Price: " + formatCoins(item.price) + " coins", "💵 Balance: " + formatCoins(balance) + " coins", "📉 Missing: " + formatCoins(item.price - balance) + " coins"])); return; }
+  await db.spendBalance(event.threadID, event.senderID, item.price, "Economy shop: " + input);
+  await db.addItem(event.threadID, event.senderID, input, 1);
+  const updatedUser = await db.getUser(event.threadID, event.senderID);
+  await reply(api, event.threadID, createBox("🛍️ PURCHASE COMPLETE", ["🎁 Item: " + item.name, "💰 Price: " + formatCoins(item.price) + " coins", "", "💵 Balance: " + formatCoins(updatedUser.balance) + " coins", "", "✨ Added to your inventory!"]));
 }
-
 // ============================================================================
 // INVENTORY
 // ============================================================================
 
-async function handleInventory(
-  api,
-  event
-) {
-  const {
-    threadID,
-    senderID,
-  } = event;
-
-  const user =
-    await db.getUser(
-      threadID,
-      senderID
-    );
-
-  const items =
-    await db.getInventory(
-      threadID,
-      senderID
-    );
-
-  const entries =
-    Object.entries(items)
-      .filter(
-        ([id]) =>
-          SHOP_ITEMS[id]
-      );
-
-  // --------------------------------------------------------------------------
-  // EMPTY
-  // --------------------------------------------------------------------------
-
-  if (
-    entries.length === 0
-  ) {
-    await reply(
-      api,
-      threadID,
-      createBox(
-        "🎒 INVENTORY",
-        [
-          `👤 ${getDisplayName(user)}`,
-          "",
-          "Your inventory is empty.",
-          "",
-          "Visit `!shop` to buy items.",
-        ]
-      )
-    );
-
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // ITEMS
-  // --------------------------------------------------------------------------
-
-  const lines = [
-    `👤 ${getDisplayName(user)}`,
-    "",
-  ];
-
-  entries.forEach(
-    ([id, amount]) => {
-      lines.push(
-        `${SHOP_ITEMS[id].name} × ${amount}`,
-        ""
-      );
-    }
-  );
-
-  lines.push(
-    `📦 ${entries.length} item type${
-      entries.length !== 1
-        ? "s"
-        : ""
-    } collected`
-  );
-
-  await reply(
-    api,
-    threadID,
-    createBox(
-      "🎒 INVENTORY",
-      lines
-    )
-  );
+async function handleInventory(api, event) {
+  const user = await db.getUser(event.threadID, event.senderID);
+  const economyItems = Object.entries(await db.getInventory(event.threadID, event.senderID)).filter(([id]) => SHOP_ITEMS[id]);
+  const rpgItems = await getRpgInventory(event.threadID, event.senderID);
+  if (!economyItems.length && !rpgItems.length) { await reply(api, event.threadID, createBox("🎒 INVENTORY", ["👤 " + getDisplayName(user), "", "Your inventory is empty.", "", "Visit !shop to buy items."])); return; }
+  const lines = ["👤 " + getDisplayName(user), ""];
+  if (rpgItems.length) { lines.push("🛡️ RPG ITEMS", ""); for (const entry of rpgItems) lines.push((entry.item.emoji || "🎁") + " " + entry.item.name + " ×" + entry.quantity, "   " + entry.item.description, ""); }
+  if (economyItems.length) { lines.push("🎁 COLLECTIBLES", ""); for (const [id, amount] of economyItems) lines.push(SHOP_ITEMS[id].name + " ×" + amount, ""); }
+  await reply(api, event.threadID, createBox("🎒 INVENTORY", lines));
 }
-
-// ============================================================================
-// ADMIN — ADD MONEY
-// !addmoney <amount>
-// ============================================================================
-
-async function handleAddMoney(
-  api,
-  event,
-  args
-) {
-  const {
-    threadID,
-    senderID,
-  } = event;
-
-  // --------------------------------------------------------------------------
-  // ADMIN CHECK
-  // --------------------------------------------------------------------------
-
-  if (
-    !isAdmin(senderID)
-  ) {
-    await reply(
-      api,
-      threadID,
-      createError(
-        "You do not have permission to use this command."
-      )
-    );
-
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // AMOUNT
-  // --------------------------------------------------------------------------
-
-  const amount =
-    parseInt(
-      args[0],
-      10
-    );
-
-  if (
-    !Number.isInteger(amount) ||
-    amount <= 0
-  ) {
-    await reply(
-      api,
-      threadID,
-      createError(
-        "Usage: !addmoney <amount>"
-      )
-    );
-
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-  // ADD
-  // --------------------------------------------------------------------------
-
-  const newBalance =
-    await db.addBalance(
-      threadID,
-      senderID,
-      amount
-    );
-
-  const user =
-    await db.getUser(
-      threadID,
-      senderID
-    );
-
-  await reply(
-    api,
-    threadID,
-    createBox(
-      "👑 ADMIN REWARD",
-      [
-        `👤 ${getDisplayName(user)}`,
-        "",
-        `💰 Added: +${formatCoins(amount)} coins`,
-        `💳 Balance: ${formatCoins(newBalance)} coins`,
-      ]
-    )
-  );
-}
-
 // ============================================================================
 // COMMAND ROUTER
 // ============================================================================
@@ -1251,6 +933,19 @@ async function handleEconomyCommand(
       args
     );
 
+    return true;
+  }
+
+  // ============================================================================
+  // STANDALONE RPG CONSUMABLES
+  // ============================================================================
+  if (text === "!use" || text.startsWith("!use ")) {
+    const args = originalText.slice("!use".length).trim().split(/\s+/).filter(Boolean);
+    try {
+      const result = await useRpgItem(event.threadID, event.senderID, args[0]);
+      const effects = []; if (result.hpRestored) effects.push("❤️ HP +" + result.hpRestored); if (result.mpRestored) effects.push("🔷 MP +" + result.mpRestored);
+      await reply(api, event.threadID, createBox("🧪 ITEM USED", [result.item.emoji + " " + result.item.name, "", effects.join(" · ") || "No effect.", "Remaining: " + result.remaining]));
+    } catch (error) { await reply(api, event.threadID, createError(error.message || "That item could not be used.")); }
     return true;
   }
 
