@@ -245,6 +245,53 @@ async function connect() {
   `);
 
 
+  // ---------------------------------------------------------------------------
+  // ECLIPSE RPG
+  // ---------------------------------------------------------------------------
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS rpg_players (
+      thread_id         TEXT NOT NULL,
+      user_id           TEXT NOT NULL,
+      character_class   TEXT NOT NULL DEFAULT 'knight',
+      region_id         TEXT NOT NULL DEFAULT 'greenvale',
+      property_tier     INTEGER NOT NULL DEFAULT 0,
+      property_name     TEXT,
+      created_at        BIGINT NOT NULL,
+      updated_at        BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_buildings (
+      thread_id    TEXT NOT NULL,
+      user_id      TEXT NOT NULL,
+      building_key TEXT NOT NULL,
+      level        INTEGER NOT NULL DEFAULT 1,
+      updated_at   BIGINT NOT NULL,
+      PRIMARY KEY (thread_id, user_id, building_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_armies (
+      id                 BIGSERIAL PRIMARY KEY,
+      thread_id          TEXT NOT NULL,
+      user_id            TEXT NOT NULL,
+      name               TEXT NOT NULL DEFAULT 'House Guard',
+      region_id          TEXT NOT NULL DEFAULT 'greenvale',
+      infantry           INTEGER NOT NULL DEFAULT 10,
+      archers            INTEGER NOT NULL DEFAULT 0,
+      cavalry            INTEGER NOT NULL DEFAULT 0,
+      mages              INTEGER NOT NULL DEFAULT 0,
+      assassins          INTEGER NOT NULL DEFAULT 0,
+      status             TEXT NOT NULL DEFAULT 'garrison',
+      destination_region TEXT,
+      departure_at      BIGINT,
+      arrival_at        BIGINT,
+      created_at        BIGINT NOT NULL,
+      updated_at        BIGINT NOT NULL,
+      UNIQUE (thread_id, user_id)
+    );
+  `);
+
   console.log(
     "╔══════════════════════════════════════════════════════════╗"
   );
@@ -282,6 +329,11 @@ async function connect() {
 // ═══════════════════════════════════════════════════════════
 // CONNECTION GUARD
 // ═══════════════════════════════════════════════════════════
+
+async function query(text, params = []) {
+  return requireConn().query(text, params);
+}
+
 
 function requireConn() {
   if (!pool) {
@@ -555,6 +607,59 @@ async function addBalance(
 
 
   return newBalance;
+}
+
+
+
+// ---------------------------------------------------------------------------
+// WALLET — SPEND
+// ---------------------------------------------------------------------------
+
+async function spendBalance(threadId, userId, amount, description = "Wallet spending") {
+  amount = Math.floor(Number(amount));
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("Invalid spending amount.");
+  }
+
+  const client = await requireConn().connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const { rows } = await client.query(
+      `SELECT * FROM users WHERE thread_id = $1 AND user_id = $2 FOR UPDATE`,
+      [String(threadId), String(userId)]
+    );
+    const user = rows[0];
+
+    if (!user) {
+      throw new Error("User not found.");
+    }
+
+    if (Number(user.balance) < amount) {
+      throw new Error("Not enough wallet coins.");
+    }
+
+    await client.query(
+      `UPDATE users SET balance = balance - $3 WHERE thread_id = $1 AND user_id = $2`,
+      [String(threadId), String(userId), amount]
+    );
+
+    await client.query(
+      `INSERT INTO economy_transactions (thread_id, user_id, type, amount, description, created_at)
+       VALUES ($1, $2, 'rpg_spend', $3, $4, $5)`,
+      [String(threadId), String(userId), amount, String(description), Date.now()]
+    );
+
+    await client.query("COMMIT");
+    return getUser(threadId, userId);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 
@@ -2277,6 +2382,7 @@ async function setGameEnabled(
 // ╚══════════════════════════════════════════════════════════╝
 
 module.exports = {
+  query,
 
   // ─────────────────────────────────────────────────────────
   // DATABASE
@@ -2299,6 +2405,7 @@ module.exports = {
   // ─────────────────────────────────────────────────────────
 
   addBalance,
+  spendBalance,
 
 
   // ─────────────────────────────────────────────────────────
