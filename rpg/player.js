@@ -1,3 +1,4 @@
+
 const db = require("../db");
 const { getStartingSpells, grantSpell } = require("./magic");
 const { getClass, getClassKey, getSkillsForClass } = require("./classes");
@@ -95,7 +96,7 @@ async function ensurePlayer(threadID, userID) {
   const startingSpells = getStartingSpells(player.character_class);
 
   for (const spellId of startingSpells) {
-    await grantSpell(threadId, userId, spellId);
+    await grantSpell(threadID, userID, spellId);
   }
 
   await db.query(
@@ -254,6 +255,26 @@ async function addXp(threadID, userID, amount) {
   return result;
 }
 
+async function addReputation(threadID, userID, amount) {
+  await db.query(
+    `
+    UPDATE rpg_players
+    SET reputation = reputation + $3,
+        updated_at = $4
+    WHERE thread_id = $1
+      AND user_id = $2
+    `,
+    [
+      String(threadID),
+      String(userID),
+      Math.trunc(Number(amount)),
+      Date.now(),
+    ]
+  );
+
+  return getPlayer(threadID, userID);
+}
+
 async function updateVitals(threadID, userID, fields) {
   const allowed = [
     "hp",
@@ -409,6 +430,7 @@ async function equipItem(threadID, userID, slot, itemID) {
 module.exports = {
   addItem,
   addXp,
+  addReputation,
   consumeItem,
   ensurePlayer,
   equipItem,
