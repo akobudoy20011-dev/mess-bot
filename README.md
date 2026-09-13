@@ -80,3 +80,18 @@ Add your own logic inside `handleMessage()` in `index.js`.
 YouTube may block downloads from cloud-hosted server IPs with a bot check. If `!play` reports `Sign in to confirm you’re not a bot` or `Failed to extract any player response`, export a fresh **Netscape-format** cookie file for `youtube.com` and add its contents as the `YOUTUBE_COOKIES` environment variable.
 
 Do not commit YouTube cookies to GitHub. The bot writes this secret to a temporary file only while downloading and deletes it afterward. After adding the variable in Render, redeploy the service.
+
+
+## Eclipse RPG
+
+The bot now includes a persistent RPG foundation under the !rpg command. Character profiles, domains, buildings, armies, and marches are stored in Neon. RPG purchases use the existing wallet and banking system; use !withdraw <amount> to move banked coins into the wallet before spending.
+
+- !rpg help — show RPG commands
+- !rpg profile — view character and balances
+- !rpg class knight — choose a class
+- !rpg property buy cottage — start a domain
+- !rpg build farm — develop a building
+- !rpg train infantry 10 — train troops
+- !rpg march ironspine — travel by map distance
+
+Marches persist across restarts and are not limited by a global two-minute cap.
