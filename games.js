@@ -1069,7 +1069,7 @@ async function handleRoll(
     await sleep(editDelay());
 
     const result = randInt(1, sides);
-    const highThreshold = Math.ceil(sides * 0.55);
+    const highThreshold = Math.floor(sides * 0.55);
     const won = result >= highThreshold;
     const payout = won ? bet * 2 : 0;
 
