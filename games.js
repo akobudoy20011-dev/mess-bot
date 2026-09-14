@@ -140,16 +140,16 @@ function playerLine(event) {
 }
 
 function rewardLine(reward, balanceText, won = true) {
-  const coinSign = won ? "+" : "-";
   const xpSign = won ? "+" : "-";
+  const coinText = won ? "+" + formatNumber(reward.coins) : "0";
 
   return [
     divider(),
-    `⭐ XP   ${xpSign}${formatNumber(reward.xp)}`,
-    `💰 Coins ${coinSign}${formatNumber(reward.coins)}`,
+    "⭐ XP   " + xpSign + formatNumber(reward.xp),
+    "💰 Coins " + coinText,
     "",
     balanceText,
-  ].join("\n");
+  ].join("\\n");
 }
 
 function resultBadge(type) {
@@ -210,9 +210,7 @@ async function awardPlayer(threadID, userID, gameType, won = false) {
   const xp = xpForGame(gameType);
   const baseCoins = coinReward(gameType);
 
-  const coins = won
-    ? baseCoins
-    : Math.floor(baseCoins * 0.25);
+  const coins = baseCoins;
 
   const xpAmount = won
     ? xp
@@ -224,15 +222,13 @@ async function awardPlayer(threadID, userID, gameType, won = false) {
     won ? xpAmount : -xpAmount
   );
 
-  await db.addBalance(
-    threadID,
-    userID,
-    won ? coins : -coins
-  );
+  if (won) {
+    await db.addBalance(threadID, userID, coins);
+  }
 
   return {
     xp: xpAmount,
-    coins,
+    coins: won ? coins : 0,
     won,
   };
 }
