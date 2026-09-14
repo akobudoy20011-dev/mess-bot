@@ -21,6 +21,9 @@
  *   !addmoney <amount>
  *   !removemoney <amount>
  *   !setmoney <amount>
+ *   !resetmoney
+ *   !resetmoney confirm
+ *   !resetmoney bank confirm
  *   !addbank <amount>
  *   !removebank <amount>
  *   !setbank <amount>
@@ -42,6 +45,7 @@
 
 const db = require("./db");
 const { reply, fmtTime } = require("./util");
+
 const {
   getShopLines,
   resolveRpgItem,
@@ -1340,6 +1344,202 @@ function parseAdminAmount(
 }
 
 // ============================================================================
+// !resetmoney
+// ============================================================================
+
+async function handleResetMoney(
+  api,
+  event,
+  args
+) {
+  const {
+    threadID,
+    senderID,
+  } = event;
+
+  // --------------------------------------------------------------------------
+  // ADMIN CHECK
+  // --------------------------------------------------------------------------
+
+  if (!isAdmin(senderID)) {
+    await reply(
+      api,
+      threadID,
+      createError(
+        "Only the bot admin can use this command."
+      )
+    );
+
+    return;
+  }
+
+  const action =
+    String(args[0] || "")
+      .trim()
+      .toLowerCase();
+
+  const secondAction =
+    String(args[1] || "")
+      .trim()
+      .toLowerCase();
+
+  // --------------------------------------------------------------------------
+  // !resetmoney
+  // --------------------------------------------------------------------------
+
+  if (
+    action === ""
+  ) {
+    await reply(
+      api,
+      threadID,
+      createBox(
+        "⚠️ ECONOMY RESET",
+        [
+          "This will reset ALL members' wallet money in this GC to 0 coins.",
+          "",
+          "🏦 Bank balances will NOT be changed.",
+          "",
+          "Nothing has been reset yet.",
+          "",
+          "To confirm:",
+          "!resetmoney confirm",
+          "",
+          "For wallet + bank:",
+          "!resetmoney bank confirm",
+        ]
+      )
+    );
+
+    return;
+  }
+
+  // --------------------------------------------------------------------------
+  // !resetmoney bank confirm
+  // --------------------------------------------------------------------------
+
+  if (
+    action === "bank" &&
+    secondAction === "confirm"
+  ) {
+    try {
+      const result =
+        await db.query(
+          `
+          UPDATE users
+          SET balance = 0,
+              bank_balance = 0
+          WHERE thread_id = $1
+          `,
+          [threadID]
+        );
+
+      await reply(
+        api,
+        threadID,
+        createBox(
+          "💥 ECONOMY RESET COMPLETE",
+          [
+            "All members' money has been reset.",
+            "",
+            `👥 Members affected: ${result.rowCount}`,
+            "💵 Wallet: 0 coins",
+            "🏦 Bank: 0 coins",
+            "",
+            "⚠️ This action cannot be undone unless you restore a database backup.",
+          ]
+        )
+      );
+    } catch (error) {
+      console.error(
+        "[admin resetmoney bank]",
+        error
+      );
+
+      await reply(
+        api,
+        threadID,
+        createError(
+          error.message ||
+            "Failed to reset the economy."
+        )
+      );
+    }
+
+    return;
+  }
+
+  // --------------------------------------------------------------------------
+  // !resetmoney confirm
+  // --------------------------------------------------------------------------
+
+  if (
+    action === "confirm"
+  ) {
+    try {
+      const result =
+        await db.query(
+          `
+          UPDATE users
+          SET balance = 0
+          WHERE thread_id = $1
+          `,
+          [threadID]
+        );
+
+      await reply(
+        api,
+        threadID,
+        createBox(
+          "💥 ECONOMY RESET COMPLETE",
+          [
+            "All members' wallet money has been reset.",
+            "",
+            `👥 Members affected: ${result.rowCount}`,
+            "💵 Wallet: 0 coins",
+            "🏦 Bank balances were left unchanged.",
+            "",
+            "⚠️ This action cannot be undone unless you restore a database backup.",
+          ]
+        )
+      );
+    } catch (error) {
+      console.error(
+        "[admin resetmoney]",
+        error
+      );
+
+      await reply(
+        api,
+        threadID,
+        createError(
+          error.message ||
+            "Failed to reset the economy."
+        )
+      );
+    }
+
+    return;
+  }
+
+  // --------------------------------------------------------------------------
+  // INVALID COMMAND
+  // --------------------------------------------------------------------------
+
+  await reply(
+    api,
+    threadID,
+    createError(
+      "Invalid reset command.\n\n" +
+      "Wallet reset:\n" +
+      "!resetmoney confirm\n\n" +
+      "Wallet + bank reset:\n" +
+      "!resetmoney bank confirm"
+    )
+  );
+}
+
+// ============================================================================
 // !addmoney
 // ============================================================================
 
@@ -1973,6 +2173,23 @@ async function handleEconomyCommand(
     "!setmoney"
   ) {
     await handleSetMoney(
+      api,
+      event,
+      economyArgs
+    );
+
+    return true;
+  }
+
+  // ==========================================================================
+  // !resetmoney
+  // ==========================================================================
+
+  if (
+    economyCommand ===
+    "!resetmoney"
+  ) {
+    await handleResetMoney(
       api,
       event,
       economyArgs
