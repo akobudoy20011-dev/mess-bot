@@ -390,17 +390,15 @@ async function handleMessage(api, event) {
   const text = originalText.toLowerCase();
   const senderId = String(senderID || "").trim();
 
-    // -------------------------------------------------------------------------
-  // GLOBAL BOT SHUTDOWN / STARTUP — ADMIN ONLY
+  // -------------------------------------------------------------------------
+  // GLOBAL BOT CONTROL — !shutdown / !startup
   // -------------------------------------------------------------------------
 
-  if (
-    /^!(shutdown|startup)$/i.test(originalText)
-  ) {
+  if (/^!(shutdown|startup)$/i.test(originalText)) {
     if (!ADMIN_IDS.includes(senderId)) {
       sendReplyWithTyping(
         api,
-        "❌ Admin only.",
+        "❌ Only the bot admin can use this command.",
         threadID
       );
       return;
@@ -409,70 +407,40 @@ async function handleMessage(api, event) {
     const controlCommand =
       originalText.slice(1).toLowerCase();
 
-    // -------------------------------------------------------
-    // SHUTDOWN
-    // -------------------------------------------------------
-
     if (controlCommand === "shutdown") {
       global.botDisabled = true;
 
       sendReplyWithTyping(
         api,
-        [
-          "🔴 BOT SHUTDOWN",
-          "",
-          "The bot has been disabled globally.",
-          "All commands and automatic responses",
-          "are now suspended.",
-          "",
-          "Use !startup to enable the bot again.",
-        ].join("\n"),
+        "🛑 Bot shutdown enabled. The bot is now OFF in all groups.",
         threadID
       );
-
       return;
     }
-
-    // -------------------------------------------------------
-    // STARTUP
-    // -------------------------------------------------------
 
     if (controlCommand === "startup") {
       global.botDisabled = false;
 
       sendReplyWithTyping(
         api,
-        [
-          "🟢 BOT STARTED",
-          "",
-          "The bot has been enabled globally.",
-          "All commands and automatic responses",
-          "are active again.",
-        ].join("\n"),
+        "🟢 Bot startup enabled. The bot is now ON.",
         threadID
       );
-
       return;
     }
   }
-
-  // -------------------------------------------------------------------------
-  // GLOBAL BOT DISABLED GATE
-  // -------------------------------------------------------------------------
-  //
-  // When the bot is shut down, EVERYTHING below this point
-  // is ignored.
-  //
-  // !shutdown and !startup are handled above this gate so
-  // the admin can always control the bot.
-  // -------------------------------------------------------------------------
 
   if (global.botDisabled === true) {
     return;
   }
 
+
   // -------------------------------------------------------------------------
   // SIMPLE DIRECT COMMANDS
+  //
+  // These are intentionally FIRST.
+  // This prevents AI/RPG/game/economy handlers from swallowing !ping,
+  // !help, !play, or !broadcast when one of those handlers errors.
   // -------------------------------------------------------------------------
 
   if (text === "!ping") {
@@ -608,6 +576,7 @@ async function handleMessage(api, event) {
 
   if (text === "!play" || text.startsWith("!play ")) {
     const requestedSong = originalText.slice("!play".length).trim();
+
     void sendAudioTrack(api, requestedSong, threadID);
     return;
   }
@@ -638,165 +607,6 @@ async function handleMessage(api, event) {
     return;
   }
 
-    // -------------------------------------------------------------------------
-  // ADMIN CHEAT COMMANDS
-  // -------------------------------------------------------------------------
-
-  if (/^!(addxp|addmoney|setlevel|setbalance)(?:\s+.+)?$/i.test(originalText)) {
-    if (!ADMIN_IDS.includes(senderId)) {
-      sendReplyWithTyping(api, "❌ Admin only.", threadID);
-      return;
-    }
-
-    const cheatMatch = originalText.match(
-      /^!(addxp|addmoney|setlevel|setbalance)\s+([0-9]+)$/i
-    );
-
-    if (!cheatMatch) {
-      sendReplyWithTyping(
-        api,
-        [
-          "🛠️ ADMIN CHEATS",
-          "",
-          "!addxp <amount>",
-          "!addmoney <amount>",
-          "!setlevel <level>",
-          "!setbalance <amount>",
-        ].join("\n"),
-        threadID
-      );
-      return;
-    }
-
-    const cheatCommand = cheatMatch[1].toLowerCase();
-    const amount = Number(cheatMatch[2]);
-
-    if (!Number.isSafeInteger(amount) || amount < 0) {
-      sendReplyWithTyping(
-        api,
-        "❌ Invalid amount.",
-        threadID
-      );
-      return;
-    }
-
-    try {
-      // -------------------------------------------------------
-      // ADD XP
-      // -------------------------------------------------------
-      if (cheatCommand === "addxp") {
-        const result = await db.addXP(
-          threadId,
-          senderId,
-          amount
-        );
-
-        sendReplyWithTyping(
-          api,
-          [
-            "⚡ ADMIN XP",
-            "",
-            `Added: +${amount.toLocaleString()} XP`,
-            `Level: ${result.level}`,
-            `Total XP: ${result.xp.toLocaleString()}`,
-          ].join("\n"),
-          threadID
-        );
-
-        return;
-      }
-
-      // -------------------------------------------------------
-      // ADD MONEY
-      // -------------------------------------------------------
-      if (cheatCommand === "addmoney") {
-        const user = await db.addBalance(
-          threadId,
-          senderId,
-          amount
-        );
-
-        sendReplyWithTyping(
-          api,
-          [
-            "💰 ADMIN MONEY",
-            "",
-            `Added: +${amount.toLocaleString()} coins`,
-            `Balance: ${user.balance.toLocaleString()} coins`,
-          ].join("\n"),
-          threadID
-        );
-
-        return;
-      }
-
-      // -------------------------------------------------------
-      // SET LEVEL
-      // -------------------------------------------------------
-      if (cheatCommand === "setlevel") {
-        const user = await db.getUser(
-          threadId,
-          senderId
-        );
-
-        await db.updateUser(
-          threadId,
-          senderId,
-          {
-            level: amount,
-          }
-        );
-
-        sendReplyWithTyping(
-          api,
-          [
-            "👑 ADMIN LEVEL",
-            "",
-            `Previous: Level ${user.level}`,
-            `New: Level ${amount}`,
-          ].join("\n"),
-          threadID
-        );
-
-        return;
-      }
-
-      // -------------------------------------------------------
-      // SET BALANCE
-      // -------------------------------------------------------
-      if (cheatCommand === "setbalance") {
-        await db.updateUser(
-          threadId,
-          senderId,
-          {
-            balance: amount,
-          }
-        );
-
-        sendReplyWithTyping(
-          api,
-          [
-            "💰 ADMIN BALANCE",
-            "",
-            `Balance set to: ${amount.toLocaleString()} coins`,
-          ].join("\n"),
-          threadID
-        );
-
-        return;
-      }
-    } catch (error) {
-      console.error("Admin cheat command failed:", error);
-
-      sendReplyWithTyping(
-        api,
-        "❌ Admin command failed.",
-        threadID
-      );
-
-      return;
-    }
-  }
 
   // -------------------------------------------------------------------------
   // AI / RPG CHARACTER SESSIONS
@@ -827,25 +637,120 @@ async function handleMessage(api, event) {
 
 
   // -------------------------------------------------------------------------
+  // ACTIVE GAME RESPONSES
+  // -------------------------------------------------------------------------
+
+  try {
+    if (
+      await handleGameResponse(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
+      return;
+    }
+  } catch (error) {
+    console.error("Game response failed:", error);
+  }
+
+
+  // -------------------------------------------------------------------------
   // RPG / GAMES / ECONOMY COMMANDS
   // -------------------------------------------------------------------------
 
   try {
-    // Supports both standalone actions ("hit", "stand") and prefixed commands ("!hit", "!blackjack")
+    if (text.startsWith("!rpg")) {
+      const rpgArgs = originalText
+        .replace(/^!rpg\s*/i, "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+
+      if (await handleRpgCommand(api, event, rpgArgs)) {
+        return;
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // GAME TOGGLE — !game on / !game off
+    // -----------------------------------------------------------------------
+
+    const gameToggleMatch = text.match(
+      /^!game\s+(on|off)$/i
+    );
+
+    if (gameToggleMatch) {
+      if (!ADMIN_IDS.includes(senderId)) {
+        sendReplyWithTyping(
+          api,
+          "❌ Only the bot admin can turn games on or off.",
+          threadID
+        );
+        return;
+      }
+
+      const enabled =
+        gameToggleMatch[1].toLowerCase() === "on";
+
+      try {
+        await db.setGameEnabled(
+          threadID,
+          enabled
+        );
+
+        sendReplyWithTyping(
+          api,
+          enabled
+            ? "🎮 Games are now ON in this group."
+            : "🎮 Games are now OFF in this group.",
+          threadID
+        );
+      } catch (error) {
+        console.error(
+          "[game toggle] Error:",
+          error
+        );
+
+        sendReplyWithTyping(
+          api,
+          "❌ Failed to change the game setting.",
+          threadID
+        );
+      }
+
+      return;
+    }
+
     const gameMatch = text.match(
-      /^(?:!?(hit|stand|double|split|surrender)|!(trivia|rps|roll|guess|coinflip|blackjack|slots|math|riddle|8ball|game|games))(?:\s+(.*))?$/i
+      /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
     );
 
     if (gameMatch) {
-      const gameCommand = (gameMatch[1] || gameMatch[2]).toLowerCase();
+      const gameCommand = gameMatch[1].toLowerCase();
 
+      // !games is handled here so it cannot become "Unknown game".
       if (gameCommand === "games") {
         sendGameCenter(api, threadID);
         return;
       }
 
-      const gameArgs = gameMatch[3]
-        ? gameMatch[3].trim().split(/\s+/)
+      // All actual games respect the persistent per-group game switch.
+      const gamesEnabled =
+        await db.isGameEnabled(threadID);
+
+      if (!gamesEnabled) {
+        sendReplyWithTyping(
+          api,
+          "🎮 Games are currently OFF in this group.\n\nAn admin can enable them with !game on.",
+          threadID
+        );
+        return;
+      }
+
+      const gameArgs = gameMatch[2]
+        ? gameMatch[2].trim().split(/\s+/)
         : [];
 
       if (
@@ -875,11 +780,15 @@ async function handleMessage(api, event) {
       "RPG/economy/games command failed:",
       error
     );
+
+    // Do NOT return here.
+    // A failed optional handler must not prevent the fallback systems
+    // below from running.
   }
 
 
   // -------------------------------------------------------------------------
-  // BANAT ON / OFF
+  // BANAT ON
   // -------------------------------------------------------------------------
 
   if (text === "!banat on") {
@@ -913,9 +822,15 @@ async function handleMessage(api, event) {
     return;
   }
 
+
+  // -------------------------------------------------------------------------
+  // BANAT OFF
+  // -------------------------------------------------------------------------
+
   if (text === "!banat off") {
     try {
       await db.setRoastEnabled(threadId, false);
+
       lastRandomRoastByThread.delete(threadId);
 
       sendReplyWithTyping(
@@ -1077,7 +992,9 @@ function sendGameCenter(api, threadID) {
 
 function canRandomRoastThread(threadID) {
   const now = Date.now();
-  const lastRoastAt = lastRandomRoastByThread.get(threadID) || 0;
+
+  const lastRoastAt =
+    lastRandomRoastByThread.get(threadID) || 0;
 
   if (now - lastRoastAt < RANDOM_ROAST_COOLDOWN_MS) {
     return false;
@@ -1089,7 +1006,9 @@ function canRandomRoastThread(threadID) {
       60_000
     );
 
-    for (const [knownThreadID, roastAt] of lastRandomRoastByThread.entries()) {
+    for (
+      const [knownThreadID, roastAt] of lastRandomRoastByThread.entries()
+    ) {
       if (now - roastAt > expiry) {
         lastRandomRoastByThread.delete(knownThreadID);
       }
