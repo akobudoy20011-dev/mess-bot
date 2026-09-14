@@ -21,8 +21,8 @@ function questionText(raw) {
     .normalize('NFKC')
     .trim()
     .toLowerCase()
-    .replace(/[^\\p{L}\\p{N}]+/gu, ' ')
-    .replace(/\\s+/g, ' ');
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ');
 }
 
 function makeQuestionId(raw) {
