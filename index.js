@@ -655,24 +655,24 @@ async function handleMessage(api, event) {
     console.error("Game response failed:", error);
   }
 }
-
   // -------------------------------------------------------------------------
   // RPG / GAMES / ECONOMY COMMANDS
   // -------------------------------------------------------------------------
 
-  if (/^!rpg(?:\s|$)/i.test(originalText)) {
-  if (
-    await handleRpgCommand(
-      api,
-      event,
-      text,
-      originalText
-    )
-  ) {
-    return;
-  }
-}
-  
+  try {
+    if (/^!rpg(?:\s|$)/i.test(originalText)) {
+      if (
+        await handleRpgCommand(
+          api,
+          event,
+          text,
+          originalText
+        )
+      ) {
+        return;
+      }
+    }
+    
     // -----------------------------------------------------------------------
     // GAME TOGGLE — !game on / !game off
     // -----------------------------------------------------------------------
