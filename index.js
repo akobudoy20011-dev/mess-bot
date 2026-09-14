@@ -660,19 +660,19 @@ async function handleMessage(api, event) {
   // RPG / GAMES / ECONOMY COMMANDS
   // -------------------------------------------------------------------------
 
-  try {
-    if (text.startsWith("!rpg")) {
-      const rpgArgs = originalText
-        .replace(/^!rpg\s*/i, "")
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean);
-
-      if (await handleRpgCommand(api, event, rpgArgs)) {
-        return;
-      }
-    }
-
+  if (/^!rpg(?:\s|$)/i.test(originalText)) {
+  if (
+    await handleRpgCommand(
+      api,
+      event,
+      text,
+      originalText
+    )
+  ) {
+    return;
+  }
+}
+  
     // -----------------------------------------------------------------------
     // GAME TOGGLE — !game on / !game off
     // -----------------------------------------------------------------------
