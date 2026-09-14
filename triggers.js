@@ -247,14 +247,14 @@ const groups = [
   },
 
   {
-    name: "aselm",
-    triggers: ["aselm"],
+    name: "cleydo",
+    triggers: ["cleydo"],
     index: 0,
     replies: [
-      "aselm na naman",
-      "ayan na si aselm",
-      "aselm, kalma muna",
-      "e.d nga tayo, aselm",
+      "pst, cleydo na naman",
+      "ayan na si cleydogs",
+      "kalma muna",
+      "e.d nga tayo, cleydo",
       "tatagos ka ba sa boss oma mo?",
       "hula mo sino ope sa ruby",
       "aning na sa ope",
@@ -263,9 +263,9 @@ const groups = [
       "party acc to, wag ka maktol",
       "diko sinabi mag dabog ka",
       "copy paste ko na lang 'to",
-      "may sinabi ba si aselm?",
-      "aselm kailangan mo pa ba ng tutorial?",
-      "tahimik ka muna, aselm",
+      "may sinabi ba si cleydo?",
+      "cleydo kailangan mo pa ba ng tutorial?",
+      "tahimik ka muna, cleydo",
     ],
   },
 ];
