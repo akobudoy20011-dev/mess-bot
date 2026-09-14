@@ -565,6 +565,28 @@ async function handleMessage(api, event) {
 
 
   // -------------------------------------------------------------------------
+  // ACTIVE GAME RESPONSES
+  // -------------------------------------------------------------------------
+
+  try {
+    if (
+      await handleGameResponse(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
+      return;
+    }
+  } catch (error) {
+    console.error("Game response failed:", error);
+  }
+
+
+
+
+  // -------------------------------------------------------------------------
   // AI / RPG CHARACTER SESSIONS
   // -------------------------------------------------------------------------
 
@@ -589,26 +611,6 @@ async function handleMessage(api, event) {
     }
   } catch (error) {
     console.error("RPG character handler failed:", error);
-  }
-
-
-  // -------------------------------------------------------------------------
-  // ACTIVE GAME RESPONSES
-  // -------------------------------------------------------------------------
-
-  try {
-    if (
-      await handleGameResponse(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error("Game response failed:", error);
   }
 
 
