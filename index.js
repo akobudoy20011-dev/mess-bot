@@ -634,7 +634,7 @@ async function handleMessage(api, event) {
   } catch (error) {
     console.error("RPG character handler failed:", error);
   }
-
+}
 
   // -------------------------------------------------------------------------
   // ACTIVE GAME RESPONSES
@@ -654,7 +654,8 @@ async function handleMessage(api, event) {
   } catch (error) {
     console.error("Game response failed:", error);
   }
-}
+
+
   // -------------------------------------------------------------------------
   // RPG / GAMES / ECONOMY COMMANDS
   // -------------------------------------------------------------------------
@@ -672,7 +673,7 @@ async function handleMessage(api, event) {
         return;
       }
     }
-    
+
     // -----------------------------------------------------------------------
     // GAME TOGGLE — !game on / !game off
     // -----------------------------------------------------------------------
@@ -730,13 +731,11 @@ async function handleMessage(api, event) {
     if (gameMatch) {
       const gameCommand = gameMatch[1].toLowerCase();
 
-      // !games is handled here so it cannot become "Unknown game".
       if (gameCommand === "games") {
         sendGameCenter(api, threadID);
         return;
       }
 
-      // All actual games respect the persistent per-group game switch.
       const gamesEnabled =
         await db.isGameEnabled(threadID);
 
@@ -785,8 +784,7 @@ async function handleMessage(api, event) {
     // A failed optional handler must not prevent the fallback systems
     // below from running.
   }
-
-
+  
   // -------------------------------------------------------------------------
   // BANAT ON
   // -------------------------------------------------------------------------
