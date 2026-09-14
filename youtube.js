@@ -2,22 +2,14 @@
 
 const fs = require("fs/promises");
 const path = require("path");
-const { spawn } = require("child_process");
 
 const ytSearch = require("yt-search");
+const ytdlp = require("youtube-dl-exec");
 const ffmpegPath = require("ffmpeg-static");
 
 // -----------------------------------------------------------------------------
-// CONFIGURATION
+// CONFIG
 // -----------------------------------------------------------------------------
-
-const YT_DLP_PATH = path.join(
-  __dirname,
-  "node_modules",
-  "youtube-dl-exec",
-  "bin",
-  process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"
-);
 
 const YOUTUBE_COOKIES =
   typeof process.env.YOUTUBE_COOKIES === "string" &&
@@ -26,7 +18,7 @@ const YOUTUBE_COOKIES =
     : null;
 
 // -----------------------------------------------------------------------------
-// YOUTUBE SEARCH
+// SEARCH
 // -----------------------------------------------------------------------------
 
 async function searchYouTube(query) {
@@ -36,7 +28,7 @@ async function searchYouTube(query) {
 
   const cleanQuery = query.trim();
 
-  console.log(`[YouTube] Searching for: ${cleanQuery}`);
+  console.log(`[YouTube] Searching: ${cleanQuery}`);
 
   try {
     const result = await ytSearch(cleanQuery);
@@ -53,7 +45,7 @@ async function searchYouTube(query) {
     );
 
     if (!video) {
-      console.log(`[YouTube] No result found for: ${cleanQuery}`);
+      console.log("[YouTube] No result found.");
       return null;
     }
 
@@ -85,168 +77,14 @@ async function searchYouTube(query) {
 
     throw new Error(
       `YouTube search failed: ${
-        error?.message || "Unknown search error"
+        error?.message || "Unknown error"
       }`
     );
   }
 }
 
 // -----------------------------------------------------------------------------
-// YT-DLP RUNTIME
-// -----------------------------------------------------------------------------
-
-const ytDlpRuntimeArgs = [
-  "--js-runtimes",
-  `node:${process.execPath}`,
-];
-
-// Try several extractor configurations because YouTube can behave
-// differently depending on the server/IP and available player clients.
-const extractorProfiles = [
-  {
-    name: "default",
-    args: null,
-  },
-  {
-    name: "android",
-    args: "youtube:player_client=android",
-  },
-  {
-    name: "ios",
-    args: "youtube:player_client=ios",
-  },
-  {
-    name: "web_safari",
-    args: "youtube:player_client=web_safari",
-  },
-  {
-    name: "tv",
-    args: "youtube:player_client=tv",
-  },
-];
-
-// -----------------------------------------------------------------------------
-// RUN YT-DLP
-// -----------------------------------------------------------------------------
-
-function runYtDlp(videoUrl, outputPath, profile, cookieFilePath) {
-  return new Promise((resolve, reject) => {
-    const args = [
-      videoUrl,
-
-      // Output
-      "--output",
-      outputPath,
-
-      // Audio
-      "--format",
-      "bestaudio/best",
-
-      "--extract-audio",
-      "--audio-format",
-      "mp3",
-      "--audio-quality",
-      "0",
-
-      // Do not download playlists.
-      "--no-playlist",
-
-      // Reliability
-      "--retries",
-      "3",
-      "--fragment-retries",
-      "3",
-      "--retry-sleep",
-      "1",
-
-      // Avoid unnecessary output.
-      "--no-warnings",
-
-      // FFmpeg
-      "--ffmpeg-location",
-      ffmpegPath,
-
-      // YouTube player challenge support.
-      ...ytDlpRuntimeArgs,
-    ];
-
-    // Optional YouTube cookies.
-    if (cookieFilePath) {
-      args.push(
-        "--cookies",
-        cookieFilePath
-      );
-    }
-
-    // Optional extractor profile.
-    if (profile?.args) {
-      args.push(
-        "--extractor-args",
-        profile.args
-      );
-    }
-
-    console.log(
-      `[YouTube] yt-dlp profile: ${profile.name}`
-    );
-
-    const child = spawn(
-      YT_DLP_PATH,
-      args,
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-      }
-    );
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    child.on("error", (error) => {
-      if (error?.code === "ENOENT") {
-        reject(
-          new Error(
-            "yt-dlp was not found. Run `npm install` and make sure youtube-dl-exec is installed."
-          )
-        );
-        return;
-      }
-
-      reject(error);
-    });
-
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve({
-          stdout,
-          stderr,
-        });
-        return;
-      }
-
-      const details =
-        stderr.trim() ||
-        stdout.trim() ||
-        `yt-dlp exited with code ${code}`;
-
-      reject(
-        new Error(
-          `yt-dlp exited with code ${code}: ${details}`
-        )
-      );
-    });
-  });
-}
-
-// -----------------------------------------------------------------------------
-// DOWNLOAD YOUTUBE AUDIO
+// DOWNLOAD
 // -----------------------------------------------------------------------------
 
 async function downloadYouTubeAudio(videoUrl, outputPath) {
@@ -256,45 +94,40 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
 
   if (!ffmpegPath) {
     throw new Error(
-      "FFmpeg was not found. Make sure ffmpeg-static is installed."
+      "FFmpeg is unavailable. Make sure ffmpeg-static is installed."
     );
   }
 
-  if (!outputPath || typeof outputPath !== "string") {
-    throw new Error("A valid output path is required.");
+  if (
+    typeof outputPath !== "string" ||
+    !outputPath.trim()
+  ) {
+    throw new Error("Invalid output path.");
   }
 
-  // Make sure the output directory exists.
   await fs.mkdir(
     path.dirname(outputPath),
-    {
-      recursive: true,
-    }
+    { recursive: true }
   );
 
-  // Remove an old file if one exists.
   await fs.rm(
     outputPath,
-    {
-      force: true,
-    }
+    { force: true }
   );
 
-  const failures = [];
-
-  let cookieFilePath = null;
+  let cookieFile = null;
 
   try {
-    // -------------------------------------------------------------------------
-    // CREATE TEMPORARY COOKIE FILE
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------
+    // COOKIES
+    // ---------------------------------------------------------
 
     if (YOUTUBE_COOKIES) {
-      cookieFilePath =
+      cookieFile =
         `${outputPath}.youtube-cookies.txt`;
 
       await fs.writeFile(
-        cookieFilePath,
+        cookieFile,
         `${YOUTUBE_COOKIES}\n`,
         {
           mode: 0o600,
@@ -306,132 +139,147 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
       );
     }
 
-    // -------------------------------------------------------------------------
-    // TRY EACH EXTRACTION PROFILE
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------
+    // YT-DLP OPTIONS
+    // ---------------------------------------------------------
 
-    for (const profile of extractorProfiles) {
-      await fs.rm(
-        outputPath,
-        {
-          force: true,
-        }
-      );
+    const options = {
+      output: outputPath,
 
-      try {
-        console.log(
-          `[YouTube] Trying profile: ${profile.name}`
-        );
+      format:
+        "bestaudio[ext=m4a]/bestaudio/best",
 
-        await runYtDlp(
-          videoUrl,
-          outputPath,
-          profile,
-          cookieFilePath
-        );
+      extractAudio: true,
+      audioFormat: "mp3",
+      audioQuality: "0",
 
-        // Verify that the file actually exists.
-        const fileInfo =
-          await fs.stat(outputPath).catch(
-            () => null
-          );
+      noPlaylist: true,
 
-        if (
-          fileInfo &&
-          fileInfo.isFile() &&
-          fileInfo.size > 0
-        ) {
-          console.log(
-            `[YouTube] Download succeeded: ${profile.name}`
-          );
+      retries: 5,
+      fragmentRetries: 5,
 
-          return outputPath;
-        }
+      ffmpegLocation: ffmpegPath,
 
-        failures.push(
-          `${profile.name}: yt-dlp completed but no audio file was created`
-        );
-      } catch (error) {
-        const message =
-          error?.message ||
-          String(error);
+      // Current yt-dlp requires an external JS runtime
+      // for full YouTube extraction.
+      jsRuntimes: `node:${process.execPath}`,
 
-        failures.push(
-          `${profile.name}: ${message}`
-        );
+      noWarnings: false,
+    };
 
-        console.error(
-          `[YouTube] ${profile.name} failed:`,
-          message
-        );
-      }
+    if (cookieFile) {
+      options.cookies = cookieFile;
     }
 
-    // -------------------------------------------------------------------------
-    // DETECT COMMON YOUTUBE BLOCKING ERRORS
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------
+    // EJS CHALLENGE SOLVER
+    // ---------------------------------------------------------
 
-    const combinedFailures =
-      failures.join("\n");
+    // Allow yt-dlp to obtain its current EJS components.
+    options.remoteComponents = "ejs:github";
 
-    let hint = "";
+    console.log(
+      "[YouTube] Starting yt-dlp..."
+    );
+
+    console.log(
+      `[YouTube] URL: ${videoUrl}`
+    );
+
+    // ---------------------------------------------------------
+    // EXECUTE
+    // ---------------------------------------------------------
+
+    await ytdlp(
+      videoUrl,
+      options,
+      {
+        timeout: 180000,
+      }
+    );
+
+    // ---------------------------------------------------------
+    // VERIFY
+    // ---------------------------------------------------------
+
+    const fileInfo =
+      await fs.stat(outputPath).catch(
+        () => null
+      );
+
+    if (
+      !fileInfo ||
+      !fileInfo.isFile() ||
+      fileInfo.size <= 0
+    ) {
+      throw new Error(
+        "yt-dlp finished but no audio file was produced."
+      );
+    }
+
+    console.log(
+      `[YouTube] Audio ready: ${fileInfo.size} bytes`
+    );
+
+    return outputPath;
+  } catch (error) {
+    const message =
+      error?.stderr ||
+      error?.message ||
+      String(error);
+
+    console.error(
+      "[YouTube] Download failed:",
+      message
+    );
 
     if (
       /sign in to confirm|not a bot|confirm you're not a bot|bot detection/i.test(
-        combinedFailures
+        message
       )
     ) {
-      hint +=
-        "\n\nYouTube is blocking the server's requests. " +
-        "Set a fresh YOUTUBE_COOKIES environment secret using Netscape-format YouTube cookies.";
+      throw new Error(
+        "YouTube is blocking Render's server request. " +
+        "A fresh YOUTUBE_COOKIES secret may be required."
+      );
     }
 
     if (
       /javascript|js runtime|ejs|challenge/i.test(
-        combinedFailures
+        message
       )
     ) {
-      hint +=
-        "\n\nYouTube's player challenge could not be solved. " +
-        "Make sure the Node.js runtime and yt-dlp installation are current.";
+      throw new Error(
+        "YouTube's JavaScript challenge could not be solved. " +
+        "Make sure Render is using Node.js 22+ and the latest yt-dlp."
+      );
     }
 
     if (
-      /ffmpeg|postprocessing/i.test(
-        combinedFailures
+      /ffmpeg|postprocess|conversion/i.test(
+        message
       )
     ) {
-      hint +=
-        "\n\nFFmpeg/audio conversion failed. " +
-        "Make sure ffmpeg-static is installed correctly.";
+      throw new Error(
+        "FFmpeg audio conversion failed."
+      );
     }
 
     throw new Error(
-      [
-        "All YouTube audio download methods failed.",
-        "",
-        combinedFailures,
-        hint,
-      ].join("\n")
+      `YouTube download failed: ${message}`
     );
   } finally {
-    // -------------------------------------------------------------------------
-    // CLEAN UP COOKIE FILE
-    // -------------------------------------------------------------------------
-
-    if (cookieFilePath) {
+    if (cookieFile) {
       await fs.rm(
-        cookieFilePath,
-        {
-          force: true,
-        }
+        cookieFile,
+        { force: true }
       );
     }
   }
 }
 
 // -----------------------------------------------------------------------------
-// YOUTUBE URL VALIDATION
+// URL VALIDATION
 // -----------------------------------------------------------------------------
 
 function isYouTubeUrl(value) {
@@ -449,26 +297,23 @@ function isYouTubeUrl(value) {
       return false;
     }
 
-    const hostname =
-      url.hostname.toLowerCase();
-
-    const allowedHosts = new Set([
+    return [
       "youtube.com",
       "www.youtube.com",
       "m.youtube.com",
       "music.youtube.com",
       "youtu.be",
       "www.youtu.be",
-    ]);
-
-    return allowedHosts.has(hostname);
+    ].includes(
+      url.hostname.toLowerCase()
+    );
   } catch {
     return false;
   }
 }
 
 // -----------------------------------------------------------------------------
-// FORMAT DURATION
+// DURATION
 // -----------------------------------------------------------------------------
 
 function formatDuration(seconds) {
@@ -479,33 +324,34 @@ function formatDuration(seconds) {
     return "Unknown duration";
   }
 
-  const totalSeconds =
+  const total =
     Math.floor(seconds);
 
   const hours =
-    Math.floor(totalSeconds / 3600);
+    Math.floor(total / 3600);
 
   const minutes =
     Math.floor(
-      (totalSeconds % 3600) / 60
+      (total % 3600) / 60
     );
 
-  const remainingSeconds =
-    totalSeconds % 60;
+  const secs =
+    total % 60;
 
   if (hours > 0) {
     return `${hours}:${String(minutes).padStart(
       2,
       "0"
-    )}:${String(remainingSeconds).padStart(
+    )}:${String(secs).padStart(
       2,
       "0"
     )}`;
   }
 
-  return `${minutes}:${String(
-    remainingSeconds
-  ).padStart(2, "0")}`;
+  return `${minutes}:${String(secs).padStart(
+    2,
+    "0"
+  )}`;
 }
 
 // -----------------------------------------------------------------------------
