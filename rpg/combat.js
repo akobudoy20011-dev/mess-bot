@@ -71,8 +71,72 @@ const ENEMIES = [
   },
 ];
 
-function pickEnemy() {
-  return ENEMIES[randomInt(0, ENEMIES.length - 1)];
+/*
+ * ELITE ENEMIES
+ *
+ * Stronger variants used for "elite" encounters (e.g. from
+ * !rpg explore). Roughly 1.6-1.8x the stats of their base
+ * counterpart and better rewards. Reuses the same loot IDs
+ * as the base roster so no changes are needed in items.js.
+ */
+const ELITE_ENEMIES = [
+  {
+    id: "elite_shadow_beast",
+    name: "Elite Shadow Beast",
+    emoji: "👹",
+    hp: 320,
+    attack: 30,
+    defense: 14,
+    reward: 340,
+    xp: 260,
+    loot: "moonleaf",
+  },
+  {
+    id: "elite_ironfang_wolf",
+    name: "Alpha Ironfang Wolf",
+    emoji: "🐺",
+    hp: 240,
+    attack: 36,
+    defense: 10,
+    reward: 260,
+    xp: 210,
+    loot: "iron",
+  },
+  {
+    id: "elite_hollow_knight",
+    name: "Corrupted Hollow Knight",
+    emoji: "💀",
+    hp: 460,
+    attack: 44,
+    defense: 30,
+    reward: 560,
+    xp: 470,
+    loot: "void_crystal",
+  },
+  {
+    id: "elite_ash_drake",
+    name: "Elder Ash Drake",
+    emoji: "🐉",
+    hp: 720,
+    attack: 62,
+    defense: 38,
+    reward: 1100,
+    xp: 950,
+    loot: "ember_core",
+  },
+];
+
+/*
+ * Combined roster used only for post-fight lookups (loot,
+ * rewards) so a finished elite fight can resolve correctly
+ * regardless of which pool the enemy came from.
+ */
+const ALL_ENEMIES = [...ENEMIES, ...ELITE_ENEMIES];
+
+function pickEnemy(elite = false) {
+  const pool = elite ? ELITE_ENEMIES : ENEMIES;
+
+  return pool[randomInt(0, pool.length - 1)];
 }
 
 async function getCombat(threadID, userID) {
@@ -90,7 +154,7 @@ async function getCombat(threadID, userID) {
   return result.rows[0] || null;
 }
 
-async function createHunt(threadID, userID) {
+async function createHunt(threadID, userID, options = {}) {
   const existing = await getCombat(threadID, userID);
 
   if (existing) {
@@ -107,7 +171,8 @@ async function createHunt(threadID, userID) {
     );
   }
 
-  const enemy = pickEnemy();
+  const elite = Boolean(options && options.elite);
+  const enemy = pickEnemy(elite);
   const now = Date.now();
 
   await db.query(
@@ -180,7 +245,7 @@ async function finishCombat(threadID, userID, session, result) {
 
   if (result === "victory") {
     const enemy =
-      ENEMIES.find((item) => item.id === session.enemy_id) ||
+      ALL_ENEMIES.find((item) => item.id === session.enemy_id) ||
       ENEMIES[0];
 
     await db.addBalance(threadID, userID, enemy.reward);
@@ -598,6 +663,8 @@ function renderCombat(
 
 module.exports = {
   ENEMIES,
+  ELITE_ENEMIES,
+  ALL_ENEMIES,
   combatAction,
   createHunt,
   getCombat,
