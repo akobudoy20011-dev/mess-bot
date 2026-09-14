@@ -19,6 +19,8 @@ const EDIT_RETRY_DELAY_MS = 400;
 const DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const WORK_COOLDOWN_MS = 60 * 60 * 1000;
 
+const MAX_BET = 1_000_000;
+
 // ============================================================
 // STATE
 // ============================================================
@@ -49,6 +51,41 @@ function formatNumber(value) {
 
 function sessionKey(threadID, userID) {
   return `${threadID}:${userID}`;
+}
+
+function normalizeArgs(args) {
+  if (Array.isArray(args)) {
+    return args
+      .map((x) => String(x))
+      .filter(Boolean);
+  }
+
+  return String(args || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function parseBet(value) {
+  const bet = Number(
+    String(value || "")
+      .replace(/,/g, "")
+      .trim()
+  );
+
+  if (!Number.isInteger(bet)) {
+    return NaN;
+  }
+
+  return bet;
+}
+
+function validBet(bet) {
+  return (
+    Number.isInteger(bet) &&
+    bet >= 1 &&
+    bet <= MAX_BET
+  );
 }
 
 // ============================================================
@@ -115,6 +152,18 @@ const GAME_STYLE = {
     name: "8-BALL",
     accent: "✦",
   },
+
+  daily: {
+    icon: "🎁",
+    name: "DAILY REWARD",
+    accent: "✦",
+  },
+
+  work: {
+    icon: "💼",
+    name: "WORK",
+    accent: "✦",
+  },
 };
 
 function gameHeader(type, subtitle = "") {
@@ -139,33 +188,35 @@ function playerLine(event) {
   return `♙ ${getPlayerName(event)}`;
 }
 
-function rewardLine(reward, balanceText, won = true) {
+function rewardLine(
+  reward,
+  balanceText,
+  won = true
+) {
   const xpSign = won ? "+" : "-";
-  const coinText = won ? "+" + formatNumber(reward.coins) : "0";
+
+  const xpValue = Math.abs(
+    Number(reward?.xp || 0)
+  );
+
+  const coinValue = Number(
+    reward?.coins || 0
+  );
+
+  const coinText =
+    won && coinValue > 0
+      ? "+" + formatNumber(coinValue)
+      : "0";
 
   return [
     divider(),
-    "⭐ XP   " + xpSign + formatNumber(reward.xp),
+    "⭐ XP   " +
+      xpSign +
+      formatNumber(xpValue),
     "💰 Coins " + coinText,
     "",
     balanceText,
-  ].join("\\n");
-}
-
-function resultBadge(type) {
-  if (type === "win") {
-    return "╭────── 🏆 VICTORY ──────╮";
-  }
-
-  if (type === "loss") {
-    return "╭────── ❌ DEFEAT ───────╮";
-  }
-
-  return "╭────── 🤝 DRAW ─────────╮";
-}
-
-function resultBadgeBottom() {
-  return "╰─────────────────────────╯";
+  ].join("\n");
 }
 
 // ============================================================
@@ -206,11 +257,14 @@ function coinReward(type) {
   return rewards[type] || 50;
 }
 
-async function awardPlayer(threadID, userID, gameType, won = false) {
+async function awardPlayer(
+  threadID,
+  userID,
+  gameType,
+  won = false
+) {
   const xp = xpForGame(gameType);
   const baseCoins = coinReward(gameType);
-
-  const coins = baseCoins;
 
   const xpAmount = won
     ? xp
@@ -223,17 +277,24 @@ async function awardPlayer(threadID, userID, gameType, won = false) {
   );
 
   if (won) {
-    await db.addBalance(threadID, userID, coins);
+    await db.addBalance(
+      threadID,
+      userID,
+      baseCoins
+    );
   }
 
   return {
     xp: xpAmount,
-    coins: won ? coins : 0,
+    coins: won ? baseCoins : 0,
     won,
   };
 }
 
-async function getFinalBalanceText(threadID, userID) {
+async function getFinalBalanceText(
+  threadID,
+  userID
+) {
   const user = await db.getUser(
     threadID,
     userID
@@ -275,81 +336,103 @@ function getPlayerName(event) {
 // MESSAGE HELPERS
 // ============================================================
 
-function sendMessageAsync(api, threadID, text) {
-  return new Promise((resolve, reject) => {
-    let finished = false;
+function sendMessageAsync(
+  api,
+  threadID,
+  text
+) {
+  return new Promise(
+    (resolve, reject) => {
+      let finished = false;
 
-    const finish = (error, messageInfo) => {
-      if (finished) return;
+      const finish = (
+        error,
+        messageInfo
+      ) => {
+        if (finished) return;
 
-      finished = true;
+        finished = true;
 
-      if (error) {
-        reject(error);
-        return;
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve(
+          messageInfo || null
+        );
+      };
+
+      try {
+        api.sendMessage(
+          text,
+          threadID,
+          (error, messageInfo) =>
+            finish(
+              error,
+              messageInfo
+            )
+        );
+      } catch (error) {
+        finish(error);
       }
-
-      resolve(messageInfo || null);
-    };
-
-    try {
-      api.sendMessage(
-        text,
-        threadID,
-        (error, messageInfo) =>
-          finish(error, messageInfo)
-      );
-    } catch (error) {
-      finish(error);
     }
-  });
+  );
 }
 
 async function editMessageSafe(
   api,
   newText,
-  messageID,
-  threadID
+  messageID
 ) {
-  if (!messageID || !api || !api.editMessage) {
+  if (
+    !messageID ||
+    !api ||
+    typeof api.editMessage !==
+      "function"
+  ) {
     return false;
   }
 
-  return new Promise((resolve) => {
-    let finished = false;
+  return new Promise(
+    (resolve) => {
+      let finished = false;
 
-    const finish = (error) => {
-      if (finished) return;
+      const finish = (error) => {
+        if (finished) return;
 
-      finished = true;
-      resolve(!error);
-    };
+        finished = true;
+        resolve(!error);
+      };
 
-    const timeout = setTimeout(() => {
-      finish(new Error("timeout"));
-    }, EDIT_TIMEOUT_MS);
+      const timeout =
+        setTimeout(() => {
+          finish(
+            new Error("timeout")
+          );
+        }, EDIT_TIMEOUT_MS);
 
-    try {
-      api.editMessage(
-        newText,
-        messageID,
-        (error) => {
-          clearTimeout(timeout);
-          finish(error);
-        }
-      );
-    } catch (error) {
-      clearTimeout(timeout);
-      finish(error);
+      try {
+        api.editMessage(
+          newText,
+          messageID,
+          (error) => {
+            clearTimeout(timeout);
+            finish(error);
+          }
+        );
+      } catch (error) {
+        clearTimeout(timeout);
+        finish(error);
+      }
     }
-  });
+  );
 }
 
 async function editMessageWithRetry(
   api,
   newText,
-  messageID,
-  threadID
+  messageID
 ) {
   let lastError = null;
 
@@ -358,12 +441,12 @@ async function editMessageWithRetry(
     attempt <= EDIT_MAX_RETRIES;
     attempt++
   ) {
-    const success = await editMessageSafe(
-      api,
-      newText,
-      messageID,
-      threadID
-    );
+    const success =
+      await editMessageSafe(
+        api,
+        newText,
+        messageID
+      );
 
     if (success) {
       return true;
@@ -372,7 +455,9 @@ async function editMessageWithRetry(
     lastError =
       `attempt ${attempt + 1} failed`;
 
-    if (attempt < EDIT_MAX_RETRIES) {
+    if (
+      attempt < EDIT_MAX_RETRIES
+    ) {
       await sleep(
         EDIT_RETRY_DELAY_MS
       );
@@ -386,41 +471,59 @@ async function editMessageWithRetry(
   return false;
 }
 
+// ============================================================
+// IMPORTANT DUPLICATE FIX
+// ============================================================
+//
+// If editing fails, DO NOT send another message.
+//
+// Previously:
+//
+//   edit failed
+//       ↓
+//   send new message
+//
+// That created duplicate game messages.
+//
+// Now:
+//
+//   edit failed
+//       ↓
+//   log warning
+//       ↓
+//   no duplicate
+//
+// ============================================================
+
 async function updateGameMessage(
   api,
   threadID,
   messageID,
   text
 ) {
+  if (!messageID) {
+    console.warn(
+      "[games] Cannot edit game message: missing messageID"
+    );
+
+    return false;
+  }
+
   const edited =
     await editMessageWithRetry(
       api,
       text,
-      messageID,
-      threadID
+      messageID
     );
 
   if (!edited) {
-    try {
-      await sendMessageAsync(
-        api,
-        threadID,
-        text
-      );
-    } catch (error) {
-      console.error(
-        "[games] fallback send failed:",
-        error
-      );
-    }
+    console.warn(
+      `[games] Could not edit message ${messageID}. No duplicate message will be sent.`
+    );
   }
 
   return edited;
 }
-
-// ============================================================
-// ANIMATION
-// ============================================================
 
 async function createAnimator(
   api,
@@ -442,7 +545,10 @@ async function createAnimator(
         initialText
       );
 
-    if (!msgInfo || !msgInfo.messageID) {
+    if (
+      !msgInfo ||
+      !msgInfo.messageID
+    ) {
       console.error(
         `[games] failed to send initial ${gameType} message`
       );
@@ -494,10 +600,8 @@ function setSession(
       sessions.delete(key);
       sessionTimers.delete(key);
 
-      // IMPORTANT:
-      // A timed-out session must also release
-      // the active-game lock. Otherwise the player
-      // can become permanently locked out of games.
+      // Release game lock when
+      // the session expires.
       activeGames.delete(key);
     }, SESSION_TIMEOUT_MS)
   );
@@ -546,7 +650,9 @@ function lockGame(
   const key =
     `${threadID}:${userID}`;
 
-  if (activeGames.has(key)) {
+  if (
+    activeGames.has(key)
+  ) {
     return false;
   }
 
@@ -562,6 +668,360 @@ function unlockGame(
   activeGames.delete(
     `${threadID}:${userID}`
   );
+}
+
+// ============================================================
+// DAILY
+// ============================================================
+
+async function handleDaily(
+  api,
+  event
+) {
+  const threadID =
+    String(event.threadID);
+
+  const userID =
+    String(event.senderID);
+
+  try {
+    const user =
+      await db.getUser(
+        threadID,
+        userID
+      );
+
+    const now = Date.now();
+
+    const lastDaily =
+      Number(
+        user?.last_daily || 0
+      );
+
+    const elapsed =
+      now - lastDaily;
+
+    if (
+      elapsed <
+      DAILY_COOLDOWN_MS
+    ) {
+      const remaining =
+        DAILY_COOLDOWN_MS -
+        elapsed;
+
+      const hours =
+        Math.floor(
+          remaining /
+            (60 * 60 * 1000)
+        );
+
+      const minutes =
+        Math.floor(
+          (remaining %
+            (60 * 60 * 1000)) /
+            (60 * 1000)
+        );
+
+      await safeReply(
+        api,
+        event,
+        [
+          "🎁 DAILY REWARD",
+          "",
+          `⏳ You already claimed today's reward.`,
+          `Come back in ${hours}h ${minutes}m.`,
+        ].join("\n")
+      );
+
+      return true;
+    }
+
+    const previousStreak =
+      Number(
+        user?.daily_streak || 0
+      );
+
+    const withinGrace =
+      elapsed <=
+      48 * 60 * 60 * 1000;
+
+    const streak =
+      withinGrace
+        ? previousStreak + 1
+        : 1;
+
+    const baseReward = 200;
+
+    const streakBonus =
+      Math.min(
+        streak * 25,
+        500
+      );
+
+    const totalReward =
+      baseReward +
+      streakBonus;
+
+    await db.addBalance(
+      threadID,
+      userID,
+      totalReward
+    );
+
+    await db.addXP(
+      threadID,
+      userID,
+      50
+    );
+
+    await db.updateUser(
+      threadID,
+      userID,
+      {
+        last_daily: now,
+        daily_streak: streak,
+      }
+    );
+
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
+      );
+
+    await sendMessageAsync(
+      api,
+      threadID,
+      [
+        gameHeader(
+          "daily",
+          playerLine(event)
+        ),
+        "",
+        "╭──────── 🏆 CLAIMED ────────╮",
+        "│  Your daily reward is ready!",
+        "╰────────────────────────────╯",
+        "",
+        `💰 Base reward  +${formatNumber(baseReward)}`,
+        `🔥 Streak bonus +${formatNumber(streakBonus)}`,
+        `💎 Total        +${formatNumber(totalReward)}`,
+        `⭐ XP           +50`,
+        "",
+        `🔥 Daily streak: ${streak}`,
+        "",
+        balanceText,
+      ].join("\n")
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      "[games] daily:",
+      error
+    );
+
+    await safeReply(
+      api,
+      event,
+      "❌ Daily reward failed."
+    );
+
+    return true;
+  }
+}
+
+// ============================================================
+// WORK
+// ============================================================
+
+const WORK_JOBS = [
+  {
+    job: "Software Developer",
+    min: 100,
+    max: 300,
+    xp: 25,
+  },
+  {
+    job: "Graphic Designer",
+    min: 90,
+    max: 260,
+    xp: 22,
+  },
+  {
+    job: "Bartender",
+    min: 70,
+    max: 220,
+    xp: 18,
+  },
+  {
+    job: "Freelancer",
+    min: 120,
+    max: 350,
+    xp: 30,
+  },
+  {
+    job: "Delivery Rider",
+    min: 60,
+    max: 180,
+    xp: 15,
+  },
+  {
+    job: "Musician",
+    min: 80,
+    max: 280,
+    xp: 20,
+  },
+  {
+    job: "Detective",
+    min: 110,
+    max: 320,
+    xp: 27,
+  },
+  {
+    job: "Chef",
+    min: 90,
+    max: 250,
+    xp: 21,
+  },
+];
+
+async function handleWork(
+  api,
+  event
+) {
+  const threadID =
+    String(event.threadID);
+
+  const userID =
+    String(event.senderID);
+
+  try {
+    const user =
+      await db.getUser(
+        threadID,
+        userID
+      );
+
+    const now = Date.now();
+
+    const lastWork =
+      Number(
+        user?.last_work || 0
+      );
+
+    const elapsed =
+      now - lastWork;
+
+    if (
+      elapsed <
+      WORK_COOLDOWN_MS
+    ) {
+      const remaining =
+        WORK_COOLDOWN_MS -
+        elapsed;
+
+      const minutes =
+        Math.floor(
+          remaining /
+            (60 * 1000)
+        );
+
+      const seconds =
+        Math.floor(
+          (remaining %
+            (60 * 1000)) /
+            1000
+        );
+
+      await safeReply(
+        api,
+        event,
+        [
+          "💼 WORK",
+          "",
+          "⏳ You're still on cooldown.",
+          `Come back in ${minutes}m ${seconds}s.`,
+        ].join("\n")
+      );
+
+      return true;
+    }
+
+    const job =
+      WORK_JOBS[
+        randInt(
+          0,
+          WORK_JOBS.length - 1
+        )
+      ];
+
+    const earned =
+      randInt(
+        job.min,
+        job.max
+      );
+
+    await db.addBalance(
+      threadID,
+      userID,
+      earned
+    );
+
+    await db.addXP(
+      threadID,
+      userID,
+      job.xp
+    );
+
+    await db.updateUser(
+      threadID,
+      userID,
+      {
+        last_work: now,
+      }
+    );
+
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
+      );
+
+    await sendMessageAsync(
+      api,
+      threadID,
+      [
+        gameHeader(
+          "work",
+          playerLine(event)
+        ),
+        "",
+        "╭──────── 💼 SHIFT COMPLETE ────────╮",
+        `│  Job: ${job.job}`,
+        "╰────────────────────────────────────╯",
+        "",
+        `💰 Earned: +${formatNumber(earned)} coins`,
+        `⭐ XP: +${formatNumber(job.xp)}`,
+        "",
+        balanceText,
+      ].join("\n")
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      "[games] work:",
+      error
+    );
+
+    await safeReply(
+      api,
+      event,
+      "❌ Work failed."
+    );
+
+    return true;
+  }
 }
 
 // ============================================================
@@ -672,28 +1132,72 @@ async function handleTrivia(
   }
 }
 
-function normalizeAnswerText(value) {
+function normalizeAnswerText(
+  value
+) {
   return String(value || "")
     .normalize("NFKC")
     .trim()
     .toLowerCase()
-    .replace(/^(?:the\s+)?answer\s*(?:is|:)?\s*/i, "")
-    .replace(/[.!?,;:]+$/g, "")
-    .replace(/\s+/g, " ");
+    .replace(
+      /^(?:the\s+)?answer\s*(?:is|:)?\s*/i,
+      ""
+    )
+    .replace(
+      /[.!?,;:]+$/g,
+      ""
+    )
+    .replace(
+      /\s+/g,
+      " "
+    );
 }
 
-function parseNumericAnswer(value) {
-  const match = String(value || "").match(/[-+]?\d+(?:\.\d+)?/);
-  return match ? Number(match[0]) : NaN;
+function parseNumericAnswer(
+  value
+) {
+  const match =
+    String(value || "").match(
+      /[-+]?\d+(?:\.\d+)?/
+    );
+
+  return match
+    ? Number(match[0])
+    : NaN;
 }
 
-function getTriviaAnswerIndex(answer, qdata) {
-  const normalized = normalizeAnswerText(answer);
-  const letter = normalized.match(/^(?:option|choice)?\s*([abcd])(?:[).]\s*)?$/i);
-  if (letter) return ["a", "b", "c", "d"].indexOf(letter[1].toLowerCase());
+function getTriviaAnswerIndex(
+  answer,
+  qdata
+) {
+  const normalized =
+    normalizeAnswerText(
+      answer
+    );
 
-  return (qdata.options || []).findIndex(
-    (option) => normalizeAnswerText(option) === normalized
+  const letter =
+    normalized.match(
+      /^(?:option|choice)?\s*([abcd])(?:[).]\s*)?$/i
+    );
+
+  if (letter) {
+    return [
+      "a",
+      "b",
+      "c",
+      "d",
+    ].indexOf(
+      letter[1].toLowerCase()
+    );
+  }
+
+  return (
+    qdata.options || []
+  ).findIndex(
+    (option) =>
+      normalizeAnswerText(
+        option
+      ) === normalized
   );
 }
 
@@ -733,13 +1237,18 @@ async function resolveTrivia(
     "D",
   ];
 
-  const chosenIndex = getTriviaAnswerIndex(answer, session.qdata);
+  const chosenIndex =
+    getTriviaAnswerIndex(
+      answer,
+      session.qdata
+    );
 
   const correctIndex =
     session.qdata.answer;
 
   const correct =
-    chosenIndex === correctIndex;
+    chosenIndex ===
+    correctIndex;
 
   const correctLetter =
     letters[correctIndex] || "?";
@@ -836,12 +1345,24 @@ async function handleRPS(
         args?.[0] || ""
       ).toLowerCase();
 
+    const aliases = {
+      r: "rock",
+      p: "paper",
+      s: "scissors",
+    };
+
+    const normalizedChoice =
+      aliases[playerChoice] ||
+      playerChoice;
+
     if (
       ![
         "rock",
         "paper",
         "scissors",
-      ].includes(playerChoice)
+      ].includes(
+        normalizedChoice
+      )
     ) {
       unlockGame(
         threadID,
@@ -872,21 +1393,22 @@ async function handleRPS(
 
     if (
       (
-        playerChoice === "rock" &&
+        normalizedChoice === "rock" &&
         botChoice === "scissors"
       ) ||
       (
-        playerChoice === "scissors" &&
+        normalizedChoice === "scissors" &&
         botChoice === "paper"
       ) ||
       (
-        playerChoice === "paper" &&
+        normalizedChoice === "paper" &&
         botChoice === "rock"
       )
     ) {
       result = "win";
     } else if (
-      playerChoice !== botChoice
+      normalizedChoice !==
+      botChoice
     ) {
       result = "loss";
     }
@@ -951,7 +1473,7 @@ async function handleRPS(
       "",
       divider(),
       "",
-      `♙ YOU      ${playerChoice.toUpperCase()}`,
+      `♙ YOU      ${normalizedChoice.toUpperCase()}`,
       `♟ OPPONENT ${botChoice.toUpperCase()}`,
       "",
       rewardLine(
@@ -978,12 +1500,12 @@ async function handleRPS(
       event,
       "❌ RPS failed."
     );
+  } finally {
+    unlockGame(
+      threadID,
+      userID
+    );
   }
-
-  unlockGame(
-    threadID,
-    userID
-  );
 }
 
 // ============================================================
@@ -995,57 +1517,103 @@ async function handleRoll(
   event,
   args
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
-    await safeReply(api, event, "⏳ You already have a game in progress.");
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
+    await safeReply(
+      api,
+      event,
+      "⏳ You already have a game in progress."
+    );
+
     return;
   }
 
   let betCharged = false;
-  let payoutPaid = false;
+  let settled = false;
 
   try {
-    const bet = Number(String(args?.[0] || "").replace(/,/g, ""));
-    const sides = parseInt(args?.[1], 10) || 100;
+    const bet =
+      parseBet(args?.[0]);
 
-    if (!Number.isInteger(bet) || bet < 1 || bet > 1_000_000) {
-      unlockGame(threadID, userID);
+    const sides =
+      parseInt(
+        args?.[1],
+        10
+      ) || 100;
+
+    if (!validBet(bet)) {
+      unlockGame(
+        threadID,
+        userID
+      );
+
       await safeReply(
         api,
         event,
-        "❌ Your roll bet must be between 1 and 1,000,000 coins."
+        `❌ Your roll bet must be between 1 and ${formatNumber(MAX_BET)} coins.`
       );
+
       return;
     }
 
-    if (sides < 2 || sides > 1000) {
-      unlockGame(threadID, userID);
-      await safeReply(api, event, "❌ Die sides must be between 2 and 1000.");
+    if (
+      sides < 2 ||
+      sides > 1000
+    ) {
+      unlockGame(
+        threadID,
+        userID
+      );
+
+      await safeReply(
+        api,
+        event,
+        "❌ Die sides must be between 2 and 1000."
+      );
+
       return;
     }
 
-    const animator = await createAnimator(
-      api,
-      threadID,
-      [
-        gameHeader("roll", playerLine(event)),
-        "",
-        divider(),
-        "",
-        `🎲 Rolling a ${sides}-sided die...`,
-        `💰 Bet: ${formatNumber(bet)} coins`,
-        "",
-        "       ⚄",
-        "",
-        "       ROLLING...",
-      ].join("\n"),
-      "roll"
-    );
+    const animator =
+      await createAnimator(
+        api,
+        threadID,
+        [
+          gameHeader(
+            "roll",
+            playerLine(event)
+          ),
+          "",
+          divider(),
+          "",
+          `🎲 Rolling a ${sides}-sided die...`,
+          `💰 Bet: ${formatNumber(bet)} coins`,
+          "",
+          "       ⚄",
+          "",
+          "       ROLLING...",
+        ].join("\n"),
+        "roll"
+      );
 
     try {
-      await db.spendBalance(threadID, userID, bet, `Roll bet: ${bet}`);
+      await db.spendBalance(
+        threadID,
+        userID,
+        bet,
+        `Roll bet: ${bet}`
+      );
+
       betCharged = true;
     } catch (error) {
       await updateGameMessage(
@@ -1056,31 +1624,62 @@ async function handleRoll(
           gameHeader("roll"),
           "",
           "❌ Roll cancelled.",
-          error.message || "Not enough wallet coins.",
+          error.message ||
+            "Not enough wallet coins.",
         ].join("\n")
       );
+
       return;
     }
 
-    await sleep(editDelay());
+    await sleep(
+      editDelay()
+    );
 
-    const result = randInt(1, sides);
-    const highThreshold = Math.floor(sides * 0.55);
-    const won = result >= highThreshold;
-    const payout = won ? bet * 2 : 0;
+    const result =
+      randInt(
+        1,
+        sides
+      );
+
+    const highThreshold =
+      Math.floor(
+        sides * 0.55
+      );
+
+    const won =
+      result >=
+      highThreshold;
+
+    const payout =
+      won
+        ? bet * 2
+        : 0;
 
     if (payout > 0) {
-      await db.addBalance(threadID, userID, payout);
-      payoutPaid = true;
+      await db.addBalance(
+        threadID,
+        userID,
+        payout
+      );
     }
 
-    const balanceText = await getFinalBalanceText(threadID, userID);
+    settled = true;
+
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
+      );
+
     const finalText = [
       gameHeader("roll"),
       "",
-      won ? "╭──────── 🏆 HIGH HIT ────────╮" : "╭──────── ❌ LOW ROLL ─────────╮",
+      won
+        ? "╭──────── 🏆 HIGH HIT ────────╮"
+        : "╭──────── ❌ LOW ROLL ─────────╮",
       `│        🎲 ${result} / ${sides}`,
-      won ? "╰──────────────────────────────╯" : "╰──────────────────────────────╯",
+      "╰──────────────────────────────╯",
       "",
       `High starts at ${highThreshold}+`,
       won
@@ -1090,18 +1689,47 @@ async function handleRoll(
       balanceText,
     ].join("\n");
 
-    await updateGameMessage(api, threadID, animator.messageID, finalText);
+    await updateGameMessage(
+      api,
+      threadID,
+      animator.messageID,
+      finalText
+    );
   } catch (error) {
-    console.error("[games] roll:", error);
+    console.error(
+      "[games] roll:",
+      error
+    );
 
-    if (betCharged && !payoutPaid) {
-      await db.addBalance(threadID, userID, Number(String(args?.[0] || "").replace(/,/g, ""))).catch(() => {});
+    if (
+      betCharged &&
+      !settled
+    ) {
+      const bet =
+        parseBet(args?.[0]);
+
+      if (validBet(bet)) {
+        await db
+          .addBalance(
+            threadID,
+            userID,
+            bet
+          )
+          .catch(() => {});
+      }
     }
 
-    await safeReply(api, event, "❌ Roll failed.");
+    await safeReply(
+      api,
+      event,
+      "❌ Roll failed."
+    );
+  } finally {
+    unlockGame(
+      threadID,
+      userID
+    );
   }
-
-  unlockGame(threadID, userID);
 }
 
 // ============================================================
@@ -1147,7 +1775,9 @@ async function handleGuess(
         10
       ) || 100;
 
-    if (min >= max) {
+    if (
+      min >= max
+    ) {
       unlockGame(
         threadID,
         userID
@@ -1246,7 +1876,10 @@ async function resolveGuess(
     return false;
   }
 
-  const guess = parseNumericAnswer(guessText);
+  const guess =
+    parseNumericAnswer(
+      guessText
+    );
 
   if (
     Number.isNaN(guess)
@@ -1343,13 +1976,11 @@ async function resolveGuess(
         error
       );
 
-      try {
-        await safeReply(
-          api,
-          event,
-          "❌ Guess ended, but the final reward update failed."
-        );
-      } catch (_) {}
+      await safeReply(
+        api,
+        event,
+        "❌ Guess ended, but the final reward update failed."
+      );
     } finally {
       unlockGame(
         threadID,
@@ -1376,19 +2007,12 @@ async function resolveGuess(
       "↳ Try again.",
     ].join("\n");
 
-    try {
-      await updateGameMessage(
-        api,
-        threadID,
-        session.messageID,
-        text
-      );
-    } catch (error) {
-      console.error(
-        "[games] guess update:",
-        error
-      );
-    }
+    await updateGameMessage(
+      api,
+      threadID,
+      session.messageID,
+      text
+    );
   }
 
   return true;
@@ -1403,11 +2027,24 @@ async function handleCoinFlip(
   event,
   args
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
-    await safeReply(api, event, "⏳ You already have a game in progress.");
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
+    await safeReply(
+      api,
+      event,
+      "⏳ You already have a game in progress."
+    );
+
     return;
   }
 
@@ -1415,38 +2052,101 @@ async function handleCoinFlip(
   let settled = false;
 
   try {
-    const first = String(args?.[0] || "").trim().toLowerCase();
-    const second = String(args?.[1] || "").trim().toLowerCase();
-    const choice = ["heads", "tails"].includes(first) ? first : second;
-    const betText = ["heads", "tails"].includes(first) ? second : first;
-    const bet = Number(betText.replace(/,/g, ""));
+    const first =
+      String(
+        args?.[0] || ""
+      )
+        .trim()
+        .toLowerCase();
 
-    if (!Number.isInteger(bet) || bet < 1 || bet > 1_000_000 || !["heads", "tails"].includes(choice)) {
-      unlockGame(threadID, userID);
-      await safeReply(api, event, "❌ Usage: !coinflip <bet> <heads|tails>");
+    const second =
+      String(
+        args?.[1] || ""
+      )
+        .trim()
+        .toLowerCase();
+
+    const aliases = {
+      h: "heads",
+      t: "tails",
+    };
+
+    const firstChoice =
+      aliases[first] ||
+      first;
+
+    const secondChoice =
+      aliases[second] ||
+      second;
+
+    let choice;
+    let betText;
+
+    if (
+      ["heads", "tails"].includes(
+        firstChoice
+      )
+    ) {
+      choice = firstChoice;
+      betText = second;
+    } else {
+      choice = secondChoice;
+      betText = first;
+    }
+
+    const bet =
+      parseBet(betText);
+
+    if (
+      !validBet(bet) ||
+      !["heads", "tails"].includes(
+        choice
+      )
+    ) {
+      unlockGame(
+        threadID,
+        userID
+      );
+
+      await safeReply(
+        api,
+        event,
+        `❌ Usage: !coinflip <bet> <heads|tails>\nExample: !coinflip 100 heads`
+      );
+
       return;
     }
 
-    const animator = await createAnimator(
-      api,
-      threadID,
-      [
-        gameHeader("coinflip", playerLine(event)),
-        "",
-        divider(),
-        "",
-        `🪙 Your call: ${choice.toUpperCase()}`,
-        `💰 Bet: ${formatNumber(bet)} coins`,
-        "",
-        "       ◉",
-        "",
-        "       FLIPPING...",
-      ].join("\n"),
-      "coinflip"
-    );
+    const animator =
+      await createAnimator(
+        api,
+        threadID,
+        [
+          gameHeader(
+            "coinflip",
+            playerLine(event)
+          ),
+          "",
+          divider(),
+          "",
+          `🪙 Your call: ${choice.toUpperCase()}`,
+          `💰 Bet: ${formatNumber(bet)} coins`,
+          "",
+          "       ◉",
+          "",
+          "       FLIPPING...",
+        ].join("\n"),
+        "coinflip"
+      );
 
     try {
-      await db.spendBalance(threadID, userID, bet, `Coinflip bet: ${bet}`);
+      await db.spendBalance(
+        threadID,
+        userID,
+        bet,
+        `Coinflip bet: ${bet}`
+      );
+
       betCharged = true;
     } catch (error) {
       await updateGameMessage(
@@ -1454,29 +2154,56 @@ async function handleCoinFlip(
         threadID,
         animator.messageID,
         [
-          gameHeader("coinflip"),
+          gameHeader(
+            "coinflip"
+          ),
           "",
           "❌ Coinflip cancelled.",
-          error.message || "Not enough wallet coins.",
+          error.message ||
+            "Not enough wallet coins.",
         ].join("\n")
       );
+
       return;
     }
 
-    await sleep(editDelay());
+    await sleep(
+      editDelay()
+    );
 
-    const result = randInt(0, 1) === 0 ? "heads" : "tails";
-    const won = choice === result;
-    const payout = won ? bet * 2 : 0;
+    const result =
+      randInt(0, 1) === 0
+        ? "heads"
+        : "tails";
+
+    const won =
+      choice === result;
+
+    const payout =
+      won
+        ? bet * 2
+        : 0;
 
     if (won) {
-      await db.addBalance(threadID, userID, payout);
+      await db.addBalance(
+        threadID,
+        userID,
+        payout
+      );
     }
+
     settled = true;
 
-    const balanceText = await getFinalBalanceText(threadID, userID);
+    const balanceText =
+      await getFinalBalanceText(
+        threadID,
+        userID
+      );
+
     const finalText = [
-      gameHeader("coinflip"),
+      gameHeader(
+        "coinflip"
+      ),
       "",
       `🪙 ${result.toUpperCase()}`,
       "",
@@ -1491,24 +2218,62 @@ async function handleCoinFlip(
       balanceText,
     ].join("\n");
 
-    await updateGameMessage(api, threadID, animator.messageID, finalText);
+    await updateGameMessage(
+      api,
+      threadID,
+      animator.messageID,
+      finalText
+    );
   } catch (error) {
-    console.error("[games] coinflip:", error);
+    console.error(
+      "[games] coinflip:",
+      error
+    );
 
-    if (betCharged && !settled) {
-      const betText = [String(args?.[0] || ""), String(args?.[1] || "")]
-        .find((value) => /\d/.test(value));
-      const bet = Number(String(betText || "").replace(/,/g, ""));
-      if (Number.isInteger(bet) && bet > 0) {
-        await db.addBalance(threadID, userID, bet).catch(() => {});
+    if (
+      betCharged &&
+      !settled
+    ) {
+      const argsArray =
+        normalizeArgs(args);
+
+      const numericArg =
+        argsArray.find(
+          (value) =>
+            /^\d[\d,]*$/.test(
+              value
+            )
+        );
+
+      const bet =
+        parseBet(
+          numericArg
+        );
+
+      if (validBet(bet)) {
+        await db
+          .addBalance(
+            threadID,
+            userID,
+            bet
+          )
+          .catch(() => {});
       }
     }
 
-    await safeReply(api, event, "❌ Coinflip failed.");
+    await safeReply(
+      api,
+      event,
+      "❌ Coinflip failed."
+    );
   } finally {
-    unlockGame(threadID, userID);
+    unlockGame(
+      threadID,
+      userID
+    );
   }
 }
+
 // ============================================================
 // BLACKJACK
 // ============================================================
@@ -1539,7 +2304,9 @@ const SUITS = [
 function createDeck() {
   const deck = [];
 
-  for (const suit of SUITS) {
+  for (
+    const suit of SUITS
+  ) {
     for (
       const value of Object.keys(
         CARD_VALUES
@@ -1555,7 +2322,9 @@ function createDeck() {
 }
 
 function drawCard(deck) {
-  if (deck.length === 0) {
+  if (
+    deck.length === 0
+  ) {
     deck.push(
       ...createDeck()
     );
@@ -1580,7 +2349,11 @@ function drawCard(deck) {
 
 function getCardValue(card) {
   const value =
-    card.slice(0, -1);
+    String(card)
+      .replace(
+        /[♠️♥️♦️♣️]+$/u,
+        ""
+      );
 
   return (
     CARD_VALUES[value] ||
@@ -1600,7 +2373,9 @@ function calcHandValue(hand) {
   let aces =
     hand.filter(
       (card) =>
-        card.startsWith("A")
+        String(card).startsWith(
+          "A"
+        )
     ).length;
 
   while (
@@ -1734,21 +2509,20 @@ async function resolveBlackjack(
 
   if (
     !session ||
-    session.type !== "blackjack"
+    session.type !==
+      "blackjack"
   ) {
     return false;
   }
 
-  // Supports both:
-  // hit
-  // !hit
-  // stand
-  // !stand
   const cmd =
     String(action)
       .trim()
       .toLowerCase()
-      .replace(/^!/, "");
+      .replace(
+        /^!/,
+        ""
+      );
 
   if (
     cmd !== "hit" &&
@@ -1783,8 +2557,9 @@ async function resolveBlackjack(
           session.playerHand
         );
 
-      // Player busts.
-      if (playerValue > 21) {
+      if (
+        playerValue > 21
+      ) {
         clearSession(
           threadID,
           userID
@@ -1840,9 +2615,6 @@ async function resolveBlackjack(
         return true;
       }
 
-      // Player is still in the game.
-      // Refresh the session timeout and KEEP
-      // the active-game lock.
       setSession(
         threadID,
         userID,
@@ -1929,7 +2701,8 @@ async function resolveBlackjack(
       resultText =
         "You win!";
     } else if (
-      playerValue === botValue
+      playerValue ===
+      botValue
     ) {
       result = "draw";
       resultText =
@@ -1986,9 +2759,6 @@ async function resolveBlackjack(
         finalText
       );
     } finally {
-      // Critical:
-      // even if DB reward or message edit fails,
-      // the player must not remain permanently locked.
       unlockGame(
         threadID,
         userID
@@ -2012,13 +2782,11 @@ async function resolveBlackjack(
       userID
     );
 
-    try {
-      await safeReply(
-        api,
-        event,
-        "❌ Blackjack ended because something went wrong."
-      );
-    } catch (_) {}
+    await safeReply(
+      api,
+      event,
+      "❌ Blackjack ended because something went wrong."
+    );
 
     return true;
   }
@@ -2027,10 +2795,69 @@ async function resolveBlackjack(
 // ============================================================
 // SLOTS
 // ============================================================
+//
+// Payout system:
+//
+// 🍒🍒🍒 = 10×
+// ⭐⭐⭐ = 15×
+// 💎💎💎 = 20×
+// Any pair = 2×
+//
+// The bet is charged FIRST.
+// The payout includes the original bet.
+//
+// Example:
+//
+// Bet = 100
+// Triple ⭐ = 1500 returned
+// Net profit = +1400
+//
+// ============================================================
+
+const SLOT_SYMBOLS = [
+  "🍒",
+  "🍋",
+  "🍊",
+  "🍉",
+  "⭐",
+  "💎",
+];
+
+function slotMultiplier(
+  reels
+) {
+  const [a, b, c] = reels;
+
+  if (
+    a === b &&
+    b === c
+  ) {
+    if (a === "💎") {
+      return 20;
+    }
+
+    if (a === "⭐") {
+      return 15;
+    }
+
+    return 10;
+  }
+
+  if (
+    a === b ||
+    b === c ||
+    a === c
+  ) {
+    return 2;
+  }
+
+  return 0;
+}
 
 async function handleSlots(
   api,
-  event
+  event,
+  args
 ) {
   const threadID =
     String(event.threadID);
@@ -2053,14 +2880,29 @@ async function handleSlots(
     return;
   }
 
+  let betCharged = false;
+  let settled = false;
+
   try {
-    const symbols = [
-      "🍎",
-      "🍊",
-      "🍋",
-      "🍌",
-      "🍉",
-    ];
+    const bet =
+      parseBet(args?.[0]);
+
+    if (
+      !validBet(bet)
+    ) {
+      unlockGame(
+        threadID,
+        userID
+      );
+
+      await safeReply(
+        api,
+        event,
+        `❌ Usage: !slots <bet>\nBet must be between 1 and ${formatNumber(MAX_BET)} coins.`
+      );
+
+      return;
+    }
 
     const animator =
       await createAnimator(
@@ -2074,42 +2916,78 @@ async function handleSlots(
           "",
           divider(),
           "",
-          "│     🍎   │   🍊   │   🍋     │",
+          "│     🍒   │   🍋   │   ⭐     │",
+          "",
+          `💰 Bet: ${formatNumber(bet)} coins`,
           "",
           "             SPINNING",
         ].join("\n"),
         "slots"
       );
 
-    await sleep(700);
+    try {
+      await db.spendBalance(
+        threadID,
+        userID,
+        bet,
+        `Slots bet: ${bet}`
+      );
+
+      betCharged = true;
+    } catch (error) {
+      await updateGameMessage(
+        api,
+        threadID,
+        animator.messageID,
+        [
+          gameHeader(
+            "slots"
+          ),
+          "",
+          "❌ Slots cancelled.",
+          error.message ||
+            "Not enough wallet coins.",
+        ].join("\n")
+      );
+
+      return;
+    }
 
     const randomReels =
       () => [
-        symbols[
+        SLOT_SYMBOLS[
           randInt(
             0,
-            symbols.length - 1
+            SLOT_SYMBOLS.length - 1
           )
         ],
-        symbols[
+        SLOT_SYMBOLS[
           randInt(
             0,
-            symbols.length - 1
+            SLOT_SYMBOLS.length - 1
           )
         ],
-        symbols[
+        SLOT_SYMBOLS[
           randInt(
             0,
-            symbols.length - 1
+            SLOT_SYMBOLS.length - 1
           )
         ],
       ];
 
     const reelText =
       (reels) =>
-        `│     ${reels.join("   │   ")}     │`;
+        `│     ${reels.join(
+          "   │   "
+        )}     │`;
 
-    for (let i = 0; i < 2; i++) {
+    await sleep(700);
+
+    for (
+      let i = 0;
+      i < 2;
+      i++
+    ) {
       const rolling =
         randomReels();
 
@@ -2118,11 +2996,15 @@ async function handleSlots(
         threadID,
         animator.messageID,
         [
-          gameHeader("slots"),
+          gameHeader(
+            "slots"
+          ),
           "",
           divider(),
           "",
-          reelText(rolling),
+          reelText(
+            rolling
+          ),
           "",
           "             SPINNING...",
         ].join("\n")
@@ -2136,17 +3018,31 @@ async function handleSlots(
     const reels =
       randomReels();
 
-    const isWinner =
-      reels[0] === reels[1] &&
-      reels[1] === reels[2];
+    const multiplier =
+      slotMultiplier(
+        reels
+      );
 
-    const reward =
-      await awardPlayer(
+    const won =
+      multiplier > 0;
+
+    const payout =
+      won
+        ? bet * multiplier
+        : 0;
+
+    if (payout > 0) {
+      await db.addBalance(
         threadID,
         userID,
-        "slots",
-        isWinner
+        payout
       );
+    }
+
+    settled = true;
+
+    const net =
+      payout - bet;
 
     const balanceText =
       await getFinalBalanceText(
@@ -2161,15 +3057,18 @@ async function handleSlots(
       "",
       reelText(reels),
       "",
-      isWinner
-        ? "🏆 JACKPOT — THREE OF A KIND!"
-        : "❌ No match this time.",
+      won
+        ? `🏆 ${multiplier}× MATCH!`
+        : "❌ NO MATCH",
       "",
-      rewardLine(
-        reward,
-        balanceText,
-        isWinner
-      ),
+      won
+        ? `💰 Payout: +${formatNumber(payout)} coins`
+        : `💸 Lost bet: -${formatNumber(bet)} coins`,
+      won
+        ? `📈 Net profit: +${formatNumber(net)} coins`
+        : "",
+      "",
+      balanceText,
     ].join("\n");
 
     await updateGameMessage(
@@ -2184,17 +3083,35 @@ async function handleSlots(
       error
     );
 
+    if (
+      betCharged &&
+      !settled
+    ) {
+      const bet =
+        parseBet(args?.[0]);
+
+      if (validBet(bet)) {
+        await db
+          .addBalance(
+            threadID,
+            userID,
+            bet
+          )
+          .catch(() => {});
+      }
+    }
+
     await safeReply(
       api,
       event,
       "❌ Slots failed."
     );
+  } finally {
+    unlockGame(
+      threadID,
+      userID
+    );
   }
-
-  unlockGame(
-    threadID,
-    userID
-  );
 }
 
 // ============================================================
@@ -2246,10 +3163,14 @@ async function handleMath(
 
     let correctAnswer;
 
-    if (op === "+") {
+    if (
+      op === "+"
+    ) {
       correctAnswer =
         a + b;
-    } else if (op === "-") {
+    } else if (
+      op === "-"
+    ) {
       correctAnswer =
         a - b;
     } else {
@@ -2338,7 +3259,10 @@ async function resolveMath(
     userID
   );
 
-  const userAnswer = parseNumericAnswer(answerText);
+  const userAnswer =
+    parseNumericAnswer(
+      answerText
+    );
 
   const correct =
     !Number.isNaN(
@@ -2537,11 +3461,17 @@ async function resolveRiddle(
     userID
   );
 
-  const normalized = normalizeAnswerText(answerText);
+  const normalized =
+    normalizeAnswerText(
+      answerText
+    );
 
   const correct =
     session.answers.some(
-      (answer) => normalizeAnswerText(answer) === normalized
+      (answer) =>
+        normalizeAnswerText(
+          answer
+        ) === normalized
     );
 
   try {
@@ -2659,7 +3589,9 @@ async function handleEightBall(
         ? args.join(" ")
         : String(args || "");
 
-    if (!question.trim()) {
+    if (
+      !question.trim()
+    ) {
       unlockGame(
         threadID,
         userID
@@ -2754,12 +3686,12 @@ async function handleEightBall(
       event,
       "❌ 8Ball failed."
     );
+  } finally {
+    unlockGame(
+      threadID,
+      userID
+    );
   }
-
-  unlockGame(
-    threadID,
-    userID
-  );
 }
 
 // ============================================================
@@ -2822,74 +3754,106 @@ async function handleGameCommand(
       .trim()
       .toLowerCase();
 
-  // ----------------------------------------------------------
-  // IMPORTANT FIX:
-  // index.js currently passes gameArgs as a string.
-  //
-  // Games such as RPS, roll, guess, and coinflip
-  // expect args[0], args[1], etc.
-  //
-  // Normalize both formats so either works.
-  // ----------------------------------------------------------
-
   const normalizedArgs =
-    Array.isArray(args)
-      ? args
-      : String(args || "")
-          .trim()
-          .split(/\s+/)
-          .filter(Boolean);
+    normalizeArgs(args);
 
-  if (cmd === "trivia") {
+  if (
+    cmd === "daily"
+  ) {
+    await handleDaily(
+      api,
+      event
+    );
+
+    return true;
+  }
+
+  if (
+    cmd === "work"
+  ) {
+    await handleWork(
+      api,
+      event
+    );
+
+    return true;
+  }
+
+  if (
+    cmd === "trivia"
+  ) {
     await handleTrivia(
       api,
       event
     );
-  } else if (cmd === "rps") {
+  } else if (
+    cmd === "rps"
+  ) {
     await handleRPS(
       api,
       event,
       normalizedArgs
     );
-  } else if (cmd === "roll") {
+  } else if (
+    cmd === "roll"
+  ) {
     await handleRoll(
       api,
       event,
       normalizedArgs
     );
-  } else if (cmd === "guess") {
+  } else if (
+    cmd === "guess"
+  ) {
     await handleGuess(
       api,
       event,
       normalizedArgs
     );
-  } else if (cmd === "coinflip") {
+  } else if (
+    cmd === "coinflip" ||
+    cmd === "flip"
+  ) {
     await handleCoinFlip(
       api,
       event,
       normalizedArgs
     );
-  } else if (cmd === "blackjack") {
+  } else if (
+    cmd === "blackjack" ||
+    cmd === "bj"
+  ) {
     await handleBlackjack(
       api,
       event
     );
-  } else if (cmd === "slots") {
+  } else if (
+    cmd === "slots" ||
+    cmd === "slot"
+  ) {
     await handleSlots(
       api,
-      event
+      event,
+      normalizedArgs
     );
-  } else if (cmd === "math") {
+  } else if (
+    cmd === "math"
+  ) {
     await handleMath(
       api,
       event
     );
-  } else if (cmd === "riddle") {
+  } else if (
+    cmd === "riddle"
+  ) {
     await handleRiddle(
       api,
       event
     );
-  } else if (cmd === "8ball") {
+  } else if (
+    cmd === "8ball" ||
+    cmd === "8-ball"
+  ) {
     await handleEightBall(
       api,
       event,
@@ -2905,14 +3869,6 @@ async function handleGameCommand(
     return false;
   }
 
-  // IMPORTANT:
-  // index.js uses:
-  //
-  // if (await handleGamesCommand(...)) {
-  //   return;
-  // }
-  //
-  // Therefore recognized commands MUST return true.
   return true;
 }
 
@@ -2926,7 +3882,13 @@ async function handleGameResponse(
   responseText,
   originalText
 ) {
-  const answerText = String(originalText || responseText || "").trim();
+  const answerText =
+    String(
+      originalText ||
+        responseText ||
+        ""
+    ).trim();
+
   const threadID =
     String(event.threadID);
 
@@ -3001,15 +3963,32 @@ async function handleGameResponse(
 // ============================================================
 
 module.exports = {
+  // Main dispatcher expected by index.js
   handleGameCommand,
 
-  // Backwards compatibility:
-  // index.js may still import/use handleGamesCommand.
+  // Compatibility with index.js that uses
+  // handleGamesCommand
   handleGamesCommand:
     handleGameCommand,
 
+  // Session response handler
   handleGameResponse,
 
+  // Individual game handlers
+  handleDaily,
+  handleWork,
+  handleTrivia,
+  handleRPS,
+  handleRoll,
+  handleGuess,
+  handleCoinFlip,
+  handleBlackjack,
+  handleSlots,
+  handleMath,
+  handleRiddle,
+  handleEightBall,
+
+  // Lock helpers
   lockGame,
   unlockGame,
 };
