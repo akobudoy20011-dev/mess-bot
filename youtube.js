@@ -11,7 +11,7 @@ const SEARCH_TIMEOUT = 30_000;
 const DOWNLOAD_TIMEOUT = 180_000;
 
 /* =========================================================
-   TIMEOUT
+   TIMEOUT HELPER
 ========================================================= */
 
 function withTimeout(task, timeout, message) {
@@ -57,7 +57,7 @@ async function exists(filePath) {
   }
 }
 
-async function removeFile(filePath) {
+async function safeUnlink(filePath) {
   try {
     await fsp.unlink(filePath);
   } catch {
@@ -118,6 +118,63 @@ async function searchYouTube(query) {
 }
 
 /* =========================================================
+   COOKIE CONFIGURATION
+========================================================= */
+
+/*
+ * Render environment variable:
+ *
+ * YOUTUBE_COOKIES=/opt/render/project/src/cookies.txt
+ *
+ * The file MUST be a valid Netscape-format cookies.txt file.
+ *
+ * Do NOT put the cookie contents directly into an environment
+ * variable.
+ */
+
+async function getCookiePath() {
+  const configuredPath = String(
+    process.env.YOUTUBE_COOKIES || ""
+  ).trim();
+
+  if (!configuredPath) {
+    console.log(
+      "[YouTube] No YOUTUBE_COOKIES configured."
+    );
+
+    return null;
+  }
+
+  const cookiePath = path.resolve(configuredPath);
+
+  if (!(await exists(cookiePath))) {
+    throw new Error(
+      `YOUTUBE_COOKIES is configured, but the cookie file was not found at: ${cookiePath}`
+    );
+  }
+
+  const stats = await fsp.stat(cookiePath);
+
+  if (!stats.isFile()) {
+    throw new Error(
+      `YOUTUBE_COOKIES does not point to a file: ${cookiePath}`
+    );
+  }
+
+  if (stats.size <= 0) {
+    throw new Error(
+      "The YouTube cookies file is empty."
+    );
+  }
+
+  console.log(
+    `[YouTube] Using cookies file: ${cookiePath}`
+  );
+
+  return cookiePath;
+}
+
+/* =========================================================
    DOWNLOAD YOUTUBE AUDIO
 ========================================================= */
 
@@ -143,10 +200,11 @@ async function downloadYouTubeAudio(
   const id = crypto.randomUUID();
 
   /*
-   * Use a unique temporary filename.
+   * Unique temporary output.
    *
-   * We intentionally use %(id)s and %(ext)s so yt-dlp
-   * tells us exactly what it created.
+   * yt-dlp will eventually create:
+   *
+   * yt-audio-UUID.mp3
    */
   const temporaryTemplate = path.join(
     outputDirectory,
@@ -161,33 +219,51 @@ async function downloadYouTubeAudio(
     `[YouTube] Temporary output: ${temporaryTemplate}`
   );
 
-  let temporaryFiles = [];
-
   try {
     /*
-     * Keep the yt-dlp options minimal.
+     * Load cookies if configured.
+     */
+    const cookiesPath =
+      await getCookiePath();
+
+    /*
+     * Keep the yt-dlp options intentionally small.
      *
      * IMPORTANT:
-     * There is deliberately NO:
      *
-     * noWarnings
-     * printAfterMove
-     * noWriteThumbnail
-     * noWriteSubs
+     * Do NOT add:
      *
-     * Those caused invalid --no-* arguments before.
+     * noWarnings: false
+     * printAfterMove: false
+     * noWriteThumbnail: true
+     * noWriteSubs: true
+     *
+     * youtube-dl-exec can translate those into invalid
+     * --no-* options.
      */
+
     const options = {
+      /*
+       * Output.
+       */
       output: temporaryTemplate,
 
+      /*
+       * Best available audio.
+       */
       format: "bestaudio/best",
 
+      /*
+       * Convert to MP3 using FFmpeg.
+       */
       extractAudio: true,
       audioFormat: "mp3",
       audioQuality: "0",
 
       /*
-       * YouTube JS challenge support.
+       * YouTube JavaScript challenge support.
+       *
+       * Render should use Node 22.
        */
       jsRuntimes: `node:${process.execPath}`,
       remoteComponents: "ejs:github",
@@ -203,38 +279,61 @@ async function downloadYouTubeAudio(
       retries: 3,
       fragmentRetries: 3,
       socketTimeout: 30,
+
+      /*
+       * Prefer IPv4.
+       */
       forceIpv4: true,
 
       /*
-       * Ask yt-dlp to print the final prepared filename.
+       * Don't process playlists.
+       */
+      noPlaylist: true,
+
+      /*
+       * Ask yt-dlp to print the final filename.
        */
       print: "after_move:filepath",
+
+      /*
+       * Add cookies ONLY when the environment variable
+       * points to a valid cookies.txt file.
+       */
+      ...(cookiesPath
+        ? {
+            cookies: cookiesPath,
+          }
+        : {}),
     };
 
     console.log(
       "[YouTube] Starting yt-dlp..."
     );
 
-    const result = await withTimeout(
-      () =>
-        youtubedl(videoUrl, options, {
-          stdio: [
-            "ignore",
-            "pipe",
-            "pipe",
-          ],
-        }),
-      DOWNLOAD_TIMEOUT,
-      "YouTube download timed out after 3 minutes. Please try again."
-    );
+    const result =
+      await withTimeout(
+        () =>
+          youtubedl(
+            videoUrl,
+            options,
+            {
+              stdio: [
+                "ignore",
+                "pipe",
+                "pipe",
+              ],
+            }
+          ),
+        DOWNLOAD_TIMEOUT,
+        "YouTube download timed out after 3 minutes. Please try again."
+      );
 
     console.log(
       "[YouTube] yt-dlp finished."
     );
 
     /*
-     * youtube-dl-exec normally returns stdout as a string
-     * when stdio is piped.
+     * youtube-dl-exec may return stdout as a string.
      */
     let stdout = "";
 
@@ -247,39 +346,31 @@ async function downloadYouTubeAudio(
       stdout = result.stdout;
     }
 
-    console.log(
-      "[YouTube] yt-dlp stdout:",
-      stdout
-    );
+    if (stdout) {
+      console.log(
+        "[YouTube] yt-dlp stdout:"
+      );
+
+      console.log(stdout);
+    }
 
     /*
-     * Extract possible filepath printed by yt-dlp.
-     */
-    const printedPaths = stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .filter((line) => {
-        return (
-          line.includes("/") ||
-          line.includes("\\")
-        );
-      });
-
-    /*
-     * Look for the actual generated files in the
-     * output directory as a second source of truth.
+     * Find all temporary files produced by yt-dlp.
      */
     const directoryFiles =
-      await fsp.readdir(outputDirectory);
+      await fsp.readdir(
+        outputDirectory
+      );
 
     const temporaryPrefix =
       `yt-audio-${id}.`;
 
-    temporaryFiles =
+    const temporaryFiles =
       directoryFiles
         .filter((file) =>
-          file.startsWith(temporaryPrefix)
+          file.startsWith(
+            temporaryPrefix
+          )
         )
         .map((file) =>
           path.join(
@@ -293,50 +384,27 @@ async function downloadYouTubeAudio(
       temporaryFiles
     );
 
-    /*
-     * First preference:
-     * the exact filepath reported by yt-dlp.
-     */
     let sourceFile = null;
 
-    for (const printedPath of printedPaths) {
-      let candidate = printedPath;
+    /* =====================================================
+       METHOD 1 — FIND MP3
+    ===================================================== */
 
-      /*
-       * yt-dlp may return a relative path.
-       */
-      if (!path.isAbsolute(candidate)) {
-        candidate = path.resolve(
-          outputDirectory,
-          candidate
-        );
-      }
+    const mp3File =
+      temporaryFiles.find((file) =>
+        file
+          .toLowerCase()
+          .endsWith(".mp3")
+      );
 
-      if (await exists(candidate)) {
-        sourceFile = candidate;
-        break;
-      }
+    if (mp3File) {
+      sourceFile = mp3File;
     }
 
-    /*
-     * Second preference:
-     * actual MP3 generated in the directory.
-     */
-    if (!sourceFile) {
-      const mp3File =
-        temporaryFiles.find((file) =>
-          file.toLowerCase().endsWith(".mp3")
-        );
+    /* =====================================================
+       METHOD 2 — FIND OTHER AUDIO
+    ===================================================== */
 
-      if (mp3File) {
-        sourceFile = mp3File;
-      }
-    }
-
-    /*
-     * Third preference:
-     * any audio file generated.
-     */
     if (!sourceFile) {
       const audioExtensions = [
         ".m4a",
@@ -345,13 +413,15 @@ async function downloadYouTubeAudio(
         ".aac",
         ".wav",
         ".flac",
-        ".mp3",
       ];
 
       const audioFile =
         temporaryFiles.find((file) =>
-          audioExtensions.some((extension) =>
-            file.toLowerCase().endsWith(extension)
+          audioExtensions.some(
+            (extension) =>
+              file
+                .toLowerCase()
+                .endsWith(extension)
           )
         );
 
@@ -360,9 +430,70 @@ async function downloadYouTubeAudio(
       }
     }
 
-    /*
-     * Nothing was created.
-     */
+    /* =====================================================
+       METHOD 3 — READ PATH PRINTED BY YT-DLP
+    ===================================================== */
+
+    if (!sourceFile && stdout) {
+      const lines =
+        stdout
+          .split(/\r?\n/)
+          .map((line) =>
+            line.trim()
+          )
+          .filter(Boolean);
+
+      for (const line of lines) {
+        let candidate = line;
+
+        /*
+         * Strip surrounding quotes.
+         */
+        candidate =
+          candidate.replace(
+            /^["']|["']$/g,
+            ""
+          );
+
+        /*
+         * Ignore ordinary informational lines.
+         */
+        if (
+          !candidate.includes("/") &&
+          !candidate.includes("\\")
+        ) {
+          continue;
+        }
+
+        if (
+          await exists(candidate)
+        ) {
+          sourceFile = candidate;
+          break;
+        }
+
+        const relativeCandidate =
+          path.resolve(
+            outputDirectory,
+            candidate
+          );
+
+        if (
+          await exists(
+            relativeCandidate
+          )
+        ) {
+          sourceFile =
+            relativeCandidate;
+          break;
+        }
+      }
+    }
+
+    /* =====================================================
+       NO FILE
+    ===================================================== */
+
     if (!sourceFile) {
       throw new Error(
         "yt-dlp finished but no audio file was produced."
@@ -373,9 +504,10 @@ async function downloadYouTubeAudio(
       `[YouTube] Source audio: ${sourceFile}`
     );
 
-    /*
-     * Verify source.
-     */
+    /* =====================================================
+       VERIFY SOURCE
+    ===================================================== */
+
     if (!(await exists(sourceFile))) {
       throw new Error(
         "The downloaded audio file could not be found."
@@ -383,7 +515,9 @@ async function downloadYouTubeAudio(
     }
 
     const sourceStats =
-      await fsp.stat(sourceFile);
+      await fsp.stat(
+        sourceFile
+      );
 
     if (!sourceStats.isFile()) {
       throw new Error(
@@ -401,23 +535,23 @@ async function downloadYouTubeAudio(
       `[YouTube] Source size: ${sourceStats.size} bytes`
     );
 
-    /*
-     * Remove an old destination if it exists.
-     */
-    await removeFile(finalPath);
+    /* =====================================================
+       MOVE TO FINAL DESTINATION
+    ===================================================== */
 
-    /*
-     * Move the finished audio into the exact path
-     * expected by index.js.
-     */
+    await safeUnlink(
+      finalPath
+    );
+
     await fsp.rename(
       sourceFile,
       finalPath
     );
 
-    /*
-     * Verify final output.
-     */
+    /* =====================================================
+       VERIFY FINAL FILE
+    ===================================================== */
+
     if (!(await exists(finalPath))) {
       throw new Error(
         "The final audio file could not be created."
@@ -425,7 +559,9 @@ async function downloadYouTubeAudio(
     }
 
     const finalStats =
-      await fsp.stat(finalPath);
+      await fsp.stat(
+        finalPath
+      );
 
     if (!finalStats.isFile()) {
       throw new Error(
@@ -468,7 +604,7 @@ async function downloadYouTubeAudio(
 
       for (const file of files) {
         if (file.startsWith(prefix)) {
-          await removeFile(
+          await safeUnlink(
             path.join(
               outputDirectory,
               file
@@ -485,14 +621,16 @@ async function downloadYouTubeAudio(
       error?.message ||
       String(error);
 
-    if (typeof message !== "string") {
+    if (
+      typeof message !== "string"
+    ) {
       message = String(message);
     }
 
     message = message.trim();
 
     /*
-     * Keep the Messenger error reasonable.
+     * Make the error Messenger-friendly.
      */
     if (message.length > 3000) {
       message =
