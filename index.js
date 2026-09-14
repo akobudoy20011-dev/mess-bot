@@ -586,6 +586,23 @@ async function handleMessage(api, event) {
 
 
 
+  // RPG commands must be handled before AI and character sessions.
+  // Otherwise a broad conversational handler can consume !rpg messages
+  // before the RPG dispatcher gets a chance to respond.
+  if (/^!rpg(?:\s|$)/i.test(originalText)) {
+    try {
+      await handleRpgCommand(api, event, text, originalText);
+    } catch (error) {
+      console.error("RPG command failed:", error);
+      sendReplyWithTyping(
+        api,
+        "❌ The RPG command could not be completed right now.",
+        threadID
+      );
+    }
+    return;
+  }
+
   // -------------------------------------------------------------------------
   // AI / RPG CHARACTER SESSIONS
   // -------------------------------------------------------------------------
@@ -617,19 +634,6 @@ async function handleMessage(api, event) {
   // -------------------------------------------------------------------------
   // RPG / GAMES / ECONOMY COMMANDS
   // -------------------------------------------------------------------------
-
-  try {
-    if (text.startsWith("!rpg")) {
-      const rpgArgs = originalText
-        .replace(/^!rpg\s*/i, "")
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean);
-
-      if (await handleRpgCommand(api, event, text, originalText)) {
-        return;
-      }
-    }
 
     const gameMatch = text.match(
       /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|game|games)(?:\s+(.*))?$/i
