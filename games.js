@@ -7,7 +7,7 @@ const riddleManager = require("./riddle-manager");
 // CONFIG
 // ============================================================
 
-const SESSION_TIMEOUT_MS = 30_000;
+const SESSION_TIMEOUT_MS = 5 * 60 * 1000;
 
 const EDIT_MIN_MS = 900;
 const EDIT_MAX_MS = 1400;
@@ -142,13 +142,10 @@ function playerLine(event) {
 function rewardLine(reward, balanceText, won = true) {
   const coinSign = won ? "+" : "-";
   const xpSign = won ? "+" : "-";
-  const xpAmount = won
-    ? reward.xp
-    : Math.floor(reward.xp * 0.5);
 
   return [
     divider(),
-    `⭐ XP   ${xpSign}${formatNumber(xpAmount)}`,
+    `⭐ XP   ${xpSign}${formatNumber(reward.xp)}`,
     `💰 Coins ${coinSign}${formatNumber(reward.coins)}`,
     "",
     balanceText,
@@ -156,8 +153,14 @@ function rewardLine(reward, balanceText, won = true) {
 }
 
 function resultBadge(type) {
-  if (type === "win") return "╭────── 🏆 VICTORY ──────╮";
-  if (type === "loss") return "╭────── ❌ DEFEAT ───────╮";
+  if (type === "win") {
+    return "╭────── 🏆 VICTORY ──────╮";
+  }
+
+  if (type === "loss") {
+    return "╭────── ❌ DEFEAT ───────╮";
+  }
+
   return "╭────── 🤝 DRAW ─────────╮";
 }
 
@@ -203,19 +206,10 @@ function coinReward(type) {
   return rewards[type] || 50;
 }
 
-// ------------------------------------------------------------
-// FIX: db.addUserData(userID, {...}) does not exist in db.js.
-// The real wallet/XP API is thread+user scoped: db.addXP and
-// db.addBalance. This is what was causing every game payout to
-// throw silently inside the callers' try/catch blocks, which
-// made the bot appear to "ignore" the final answer on every
-// trivia/guess/math/riddle/blackjack round.
-// ------------------------------------------------------------
 async function awardPlayer(threadID, userID, gameType, won = false) {
   const xp = xpForGame(gameType);
   const baseCoins = coinReward(gameType);
 
-  // Losing no longer accidentally adds coins.
   const coins = won
     ? baseCoins
     : Math.floor(baseCoins * 0.25);
@@ -224,8 +218,17 @@ async function awardPlayer(threadID, userID, gameType, won = false) {
     ? xp
     : Math.floor(xp * 0.5);
 
-  await db.addXP(threadID, userID, won ? xpAmount : -xpAmount);
-  await db.addBalance(threadID, userID, won ? coins : -coins);
+  await db.addXP(
+    threadID,
+    userID,
+    won ? xpAmount : -xpAmount
+  );
+
+  await db.addBalance(
+    threadID,
+    userID,
+    won ? coins : -coins
+  );
 
   return {
     xp: xpAmount,
@@ -234,16 +237,19 @@ async function awardPlayer(threadID, userID, gameType, won = false) {
   };
 }
 
-// ------------------------------------------------------------
-// FIX: db.getUserData(userID) does not exist. Real lookup is
-// db.getUser(threadID, userID), and the wallet field is
-// `balance`, not `coins`.
-// ------------------------------------------------------------
 async function getFinalBalanceText(threadID, userID) {
-  const user = await db.getUser(threadID, userID);
+  const user = await db.getUser(
+    threadID,
+    userID
+  );
 
-  const coins = formatNumber(user?.balance ?? 0);
-  const xp = formatNumber(user?.xp ?? 0);
+  const coins = formatNumber(
+    user?.balance ?? 0
+  );
+
+  const xp = formatNumber(
+    user?.xp ?? 0
+  );
 
   return `💰 ${coins} coins   •   ⭐ ${xp} XP`;
 }
@@ -294,7 +300,8 @@ function sendMessageAsync(api, threadID, text) {
       api.sendMessage(
         text,
         threadID,
-        (error, messageInfo) => finish(error, messageInfo)
+        (error, messageInfo) =>
+          finish(error, messageInfo)
       );
     } catch (error) {
       finish(error);
@@ -366,10 +373,13 @@ async function editMessageWithRetry(
       return true;
     }
 
-    lastError = `attempt ${attempt + 1} failed`;
+    lastError =
+      `attempt ${attempt + 1} failed`;
 
     if (attempt < EDIT_MAX_RETRIES) {
-      await sleep(EDIT_RETRY_DELAY_MS);
+      await sleep(
+        EDIT_RETRY_DELAY_MS
+      );
     }
   }
 
@@ -386,16 +396,21 @@ async function updateGameMessage(
   messageID,
   text
 ) {
-  const edited = await editMessageWithRetry(
-    api,
-    text,
-    messageID,
-    threadID
-  );
+  const edited =
+    await editMessageWithRetry(
+      api,
+      text,
+      messageID,
+      threadID
+    );
 
   if (!edited) {
     try {
-      await sendMessageAsync(api, threadID, text);
+      await sendMessageAsync(
+        api,
+        threadID,
+        text
+      );
     } catch (error) {
       console.error(
         "[games] fallback send failed:",
@@ -424,11 +439,12 @@ async function createAnimator(
   };
 
   try {
-    const msgInfo = await sendMessageAsync(
-      api,
-      threadID,
-      initialText
-    );
+    const msgInfo =
+      await sendMessageAsync(
+        api,
+        threadID,
+        initialText
+      );
 
     if (!msgInfo || !msgInfo.messageID) {
       console.error(
@@ -438,7 +454,8 @@ async function createAnimator(
       return result;
     }
 
-    result.messageID = msgInfo.messageID;
+    result.messageID =
+      msgInfo.messageID;
 
     result.stopEdit = () => {};
   } catch (error) {
@@ -455,34 +472,68 @@ async function createAnimator(
 // SESSION MANAGEMENT
 // ============================================================
 
-function setSession(threadID, userID, data) {
-  const key = sessionKey(threadID, userID);
+function setSession(
+  threadID,
+  userID,
+  data
+) {
+  const key =
+    sessionKey(
+      threadID,
+      userID
+    );
 
-  sessions.set(key, data);
+  sessions.set(
+    key,
+    data
+  );
 
-  clearTimeout(sessionTimers.get(key));
+  clearTimeout(
+    sessionTimers.get(key)
+  );
 
   sessionTimers.set(
     key,
     setTimeout(() => {
       sessions.delete(key);
       sessionTimers.delete(key);
+
+      // IMPORTANT:
+      // A timed-out session must also release
+      // the active-game lock. Otherwise the player
+      // can become permanently locked out of games.
+      activeGames.delete(key);
     }, SESSION_TIMEOUT_MS)
   );
 }
 
-function getSession(threadID, userID) {
+function getSession(
+  threadID,
+  userID
+) {
   return (
     sessions.get(
-      sessionKey(threadID, userID)
+      sessionKey(
+        threadID,
+        userID
+      )
     ) || null
   );
 }
 
-function clearSession(threadID, userID) {
-  const key = sessionKey(threadID, userID);
+function clearSession(
+  threadID,
+  userID
+) {
+  const key =
+    sessionKey(
+      threadID,
+      userID
+    );
 
-  clearTimeout(sessionTimers.get(key));
+  clearTimeout(
+    sessionTimers.get(key)
+  );
 
   sessions.delete(key);
   sessionTimers.delete(key);
@@ -492,8 +543,12 @@ function clearSession(threadID, userID) {
 // GAME LOCK
 // ============================================================
 
-function lockGame(threadID, userID) {
-  const key = `${threadID}:${userID}`;
+function lockGame(
+  threadID,
+  userID
+) {
+  const key =
+    `${threadID}:${userID}`;
 
   if (activeGames.has(key)) {
     return false;
@@ -504,7 +559,10 @@ function lockGame(threadID, userID) {
   return true;
 }
 
-function unlockGame(threadID, userID) {
+function unlockGame(
+  threadID,
+  userID
+) {
   activeGames.delete(
     `${threadID}:${userID}`
   );
@@ -514,16 +572,28 @@ function unlockGame(threadID, userID) {
 // TRIVIA
 // ============================================================
 
-async function handleTrivia(api, event) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+async function handleTrivia(
+  api,
+  event
+) {
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
     await safeReply(
       api,
       event,
       "⏳ You already have a game in progress."
     );
+
     return;
   }
 
@@ -534,7 +604,10 @@ async function handleTrivia(api, event) {
       });
 
     if (!q) {
-      unlockGame(threadID, userID);
+      unlockGame(
+        threadID,
+        userID
+      );
 
       await safeReply(
         api,
@@ -580,11 +653,15 @@ async function handleTrivia(api, event) {
       {
         type: "trivia",
         qdata: q,
-        messageID: animator.messageID,
+        messageID:
+          animator.messageID,
       }
     );
   } catch (error) {
-    unlockGame(threadID, userID);
+    unlockGame(
+      threadID,
+      userID
+    );
 
     console.error(
       "[games] trivia:",
@@ -604,11 +681,17 @@ async function resolveTrivia(
   event,
   answer
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
+
+  const userID =
+    String(event.senderID);
 
   const session =
-    getSession(threadID, userID);
+    getSession(
+      threadID,
+      userID
+    );
 
   if (
     !session ||
@@ -617,7 +700,10 @@ async function resolveTrivia(
     return false;
   }
 
-  clearSession(threadID, userID);
+  clearSession(
+    threadID,
+    userID
+  );
 
   const letters = [
     "A",
@@ -632,7 +718,9 @@ async function resolveTrivia(
       .toUpperCase();
 
   const chosenIndex =
-    letters.indexOf(normalizedAnswer);
+    letters.indexOf(
+      normalizedAnswer
+    );
 
   const correctIndex =
     session.qdata.answer;
@@ -667,9 +755,7 @@ async function resolveTrivia(
       correct
         ? "│  Excellent answer!"
         : "│  Better luck next time.",
-      correct
-        ? "╰────────────────────╯"
-        : "╰────────────────────╯",
+      "╰────────────────────╯",
       "",
       `✓ Correct answer: ${correctLetter}`,
       "",
@@ -693,7 +779,10 @@ async function resolveTrivia(
     );
   }
 
-  unlockGame(threadID, userID);
+  unlockGame(
+    threadID,
+    userID
+  );
 
   return true;
 }
@@ -707,21 +796,32 @@ async function handleRPS(
   event,
   args
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
     await safeReply(
       api,
       event,
       "⏳ You already have a game in progress."
     );
+
     return;
   }
 
   try {
     const playerChoice =
-      (args[0] || "").toLowerCase();
+      String(
+        args?.[0] || ""
+      ).toLowerCase();
 
     if (
       ![
@@ -751,17 +851,25 @@ async function handleRPS(
     ];
 
     const botChoice =
-      choices[randInt(0, 2)];
+      choices[
+        randInt(0, 2)
+      ];
 
     let result = "draw";
 
     if (
-      (playerChoice === "rock" &&
-        botChoice === "scissors") ||
-      (playerChoice === "scissors" &&
-        botChoice === "paper") ||
-      (playerChoice === "paper" &&
-        botChoice === "rock")
+      (
+        playerChoice === "rock" &&
+        botChoice === "scissors"
+      ) ||
+      (
+        playerChoice === "scissors" &&
+        botChoice === "paper"
+      ) ||
+      (
+        playerChoice === "paper" &&
+        botChoice === "rock"
+      )
     ) {
       result = "win";
     } else if (
@@ -791,7 +899,9 @@ async function handleRPS(
         "rps"
       );
 
-    await sleep(editDelay());
+    await sleep(
+      editDelay()
+    );
 
     const reward =
       await awardPlayer(
@@ -828,7 +938,7 @@ async function handleRPS(
       "",
       divider(),
       "",
-      `♙ YOU     ${playerChoice.toUpperCase()}`,
+      `♙ YOU      ${playerChoice.toUpperCase()}`,
       `♟ OPPONENT ${botChoice.toUpperCase()}`,
       "",
       rewardLine(
@@ -857,7 +967,10 @@ async function handleRPS(
     );
   }
 
-  unlockGame(threadID, userID);
+  unlockGame(
+    threadID,
+    userID
+  );
 }
 
 // ============================================================
@@ -869,21 +982,33 @@ async function handleRoll(
   event,
   args
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
     await safeReply(
       api,
       event,
       "⏳ You already have a game in progress."
     );
+
     return;
   }
 
   try {
     const sides =
-      parseInt(args[0], 10) || 20;
+      parseInt(
+        args?.[0],
+        10
+      ) || 20;
 
     if (
       sides < 2 ||
@@ -924,7 +1049,9 @@ async function handleRoll(
         "roll"
       );
 
-    await sleep(editDelay());
+    await sleep(
+      editDelay()
+    );
 
     const result =
       randInt(1, sides);
@@ -966,7 +1093,10 @@ async function handleRoll(
     );
   }
 
-  unlockGame(threadID, userID);
+  unlockGame(
+    threadID,
+    userID
+  );
 }
 
 // ============================================================
@@ -978,24 +1108,39 @@ async function handleGuess(
   event,
   args
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
     await safeReply(
       api,
       event,
       "⏳ You already have a game in progress."
     );
+
     return;
   }
 
   try {
     const min =
-      parseInt(args[0], 10) || 1;
+      parseInt(
+        args?.[0],
+        10
+      ) || 1;
 
     const max =
-      parseInt(args[1], 10) || 100;
+      parseInt(
+        args?.[1],
+        10
+      ) || 100;
 
     if (min >= max) {
       unlockGame(
@@ -1013,7 +1158,10 @@ async function handleGuess(
     }
 
     const secretNumber =
-      randInt(min, max);
+      randInt(
+        min,
+        max
+      );
 
     const animator =
       await createAnimator(
@@ -1027,7 +1175,7 @@ async function handleGuess(
           "",
           divider(),
           "",
-          `🎯 Find the number between`,
+          "🎯 Find the number between",
           `   ${min} and ${max}`,
           "",
           "You have 3 attempts.",
@@ -1074,11 +1222,17 @@ async function resolveGuess(
   event,
   guessText
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
+
+  const userID =
+    String(event.senderID);
 
   const session =
-    getSession(threadID, userID);
+    getSession(
+      threadID,
+      userID
+    );
 
   if (
     !session ||
@@ -1088,9 +1242,14 @@ async function resolveGuess(
   }
 
   const guess =
-    parseInt(guessText, 10);
+    parseInt(
+      guessText,
+      10
+    );
 
-  if (Number.isNaN(guess)) {
+  if (
+    Number.isNaN(guess)
+  ) {
     await safeReply(
       api,
       event,
@@ -1107,17 +1266,21 @@ async function resolveGuess(
   let isCorrect = false;
 
   if (
-    guess === session.secretNumber
+    guess ===
+    session.secretNumber
   ) {
     isCorrect = true;
 
     resultMessage =
       `🏆 Correct! You found ${session.secretNumber} in ${tries} attempt${tries === 1 ? "" : "s"}.`;
-  } else if (tries >= 3) {
+  } else if (
+    tries >= 3
+  ) {
     resultMessage =
       `❌ The number was ${session.secretNumber}.`;
   } else if (
-    guess < session.secretNumber
+    guess <
+    session.secretNumber
   ) {
     resultMessage =
       `📈 Too low. Go higher. • ${3 - tries} attempt${3 - tries === 1 ? "" : "s"} left`;
@@ -1126,56 +1289,72 @@ async function resolveGuess(
       `📉 Too high. Go lower. • ${3 - tries} attempt${3 - tries === 1 ? "" : "s"} left`;
   }
 
-  if (
+  const terminal =
     isCorrect ||
-    tries >= 3
-  ) {
+    tries >= 3;
+
+  if (terminal) {
     clearSession(
       threadID,
       userID
     );
 
-    const reward =
-      await awardPlayer(
-        threadID,
-        userID,
-        "guess",
+    try {
+      const reward =
+        await awardPlayer(
+          threadID,
+          userID,
+          "guess",
+          isCorrect
+        );
+
+      const balanceText =
+        await getFinalBalanceText(
+          threadID,
+          userID
+        );
+
+      const finalText = [
+        gameHeader("guess"),
+        "",
+        resultMessage,
+        "",
         isCorrect
+          ? "✦ Your intuition was correct."
+          : "✦ The number remains hidden no longer.",
+        "",
+        rewardLine(
+          reward,
+          balanceText,
+          isCorrect
+        ),
+      ].join("\n");
+
+      await updateGameMessage(
+        api,
+        threadID,
+        session.messageID,
+        finalText
+      );
+    } catch (error) {
+      console.error(
+        "[games] guess reward:",
+        error
       );
 
-    const balanceText =
-      await getFinalBalanceText(
+      try {
+        await safeReply(
+          api,
+          event,
+          "❌ Guess ended, but the final reward update failed."
+        );
+      } catch (_) {}
+    } finally {
+      unlockGame(
         threadID,
         userID
       );
-
-    const finalText = [
-      gameHeader("guess"),
-      "",
-      resultMessage,
-      "",
-      isCorrect
-        ? "✦ Your intuition was correct."
-        : "✦ The number remains hidden no longer.",
-      "",
-      rewardLine(
-        reward,
-        balanceText,
-        isCorrect
-      ),
-    ].join("\n");
-
-    await updateGameMessage(
-      api,
-      threadID,
-      session.messageID,
-      finalText
-    );
-
-    unlockGame(
-      threadID,
-      userID
-    );
+    }
   } else {
     setSession(
       threadID,
@@ -1196,12 +1375,19 @@ async function resolveGuess(
       "↳ Try again.",
     ].join("\n");
 
-    await updateGameMessage(
-      api,
-      threadID,
-      session.messageID,
-      text
-    );
+    try {
+      await updateGameMessage(
+        api,
+        threadID,
+        session.messageID,
+        text
+      );
+    } catch (error) {
+      console.error(
+        "[games] guess update:",
+        error
+      );
+    }
   }
 
   return true;
@@ -1216,21 +1402,32 @@ async function handleCoinFlip(
   event,
   args
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
     await safeReply(
       api,
       event,
       "⏳ You already have a game in progress."
     );
+
     return;
   }
 
   try {
     const choice =
-      (args[0] || "").toLowerCase();
+      String(
+        args?.[0] || ""
+      ).toLowerCase();
 
     if (
       ![
@@ -1273,7 +1470,9 @@ async function handleCoinFlip(
         "coinflip"
       );
 
-    await sleep(editDelay());
+    await sleep(
+      editDelay()
+    );
 
     const result =
       randInt(0, 1) === 0
@@ -1377,7 +1576,9 @@ function createDeck() {
         CARD_VALUES
       )
     ) {
-      deck.push(`${value}${suit}`);
+      deck.push(
+        `${value}${suit}`
+      );
     }
   }
 
@@ -1386,17 +1587,24 @@ function createDeck() {
 
 function drawCard(deck) {
   if (deck.length === 0) {
-    deck.push(...createDeck());
+    deck.push(
+      ...createDeck()
+    );
   }
 
   const idx =
     Math.floor(
-      Math.random() * deck.length
+      Math.random() *
+        deck.length
     );
 
-  const card = deck[idx];
+  const card =
+    deck[idx];
 
-  deck.splice(idx, 1);
+  deck.splice(
+    idx,
+    1
+  );
 
   return card;
 }
@@ -1405,19 +1613,25 @@ function getCardValue(card) {
   const value =
     card.slice(0, -1);
 
-  return CARD_VALUES[value] || 0;
+  return (
+    CARD_VALUES[value] ||
+    0
+  );
 }
 
 function calcHandValue(hand) {
-  let value = hand.reduce(
-    (sum, card) =>
-      sum + getCardValue(card),
-    0
-  );
+  let value =
+    hand.reduce(
+      (sum, card) =>
+        sum +
+        getCardValue(card),
+      0
+    );
 
   let aces =
-    hand.filter((card) =>
-      card.startsWith("A")
+    hand.filter(
+      (card) =>
+        card.startsWith("A")
     ).length;
 
   while (
@@ -1435,15 +1649,24 @@ async function handleBlackjack(
   api,
   event
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
     await safeReply(
       api,
       event,
       "⏳ You already have a game in progress."
     );
+
     return;
   }
 
@@ -1528,11 +1751,17 @@ async function resolveBlackjack(
   event,
   action
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
+
+  const userID =
+    String(event.senderID);
 
   const session =
-    getSession(threadID, userID);
+    getSession(
+      threadID,
+      userID
+    );
 
   if (
     !session ||
@@ -1541,104 +1770,149 @@ async function resolveBlackjack(
     return false;
   }
 
+  // Supports both:
+  // hit
+  // !hit
+  // stand
+  // !stand
   const cmd =
     String(action)
       .trim()
-      .toLowerCase();
+      .toLowerCase()
+      .replace(/^!/, "");
 
-  if (cmd === "hit") {
-    const card =
-      drawCard(session.deck);
+  if (
+    cmd !== "hit" &&
+    cmd !== "stand"
+  ) {
+    await safeReply(
+      api,
+      event,
+      "❌ Use `hit` or `stand`."
+    );
 
-    session.playerHand.push(card);
+    return true;
+  }
 
-    const playerValue =
-      calcHandValue(
-        session.playerHand
-      );
+  try {
+    // ----------------------------------------------------------
+    // HIT
+    // ----------------------------------------------------------
 
-    if (playerValue > 21) {
-      clearSession(
-        threadID,
-        userID
-      );
-
-      const reward =
-        await awardPlayer(
-          threadID,
-          userID,
-          "blackjack",
-          false
+    if (cmd === "hit") {
+      const card =
+        drawCard(
+          session.deck
         );
 
-      const balanceText =
-        await getFinalBalanceText(
+      session.playerHand.push(
+        card
+      );
+
+      const playerValue =
+        calcHandValue(
+          session.playerHand
+        );
+
+      // Player busts.
+      if (playerValue > 21) {
+        clearSession(
           threadID,
           userID
         );
 
-      const finalText = [
-        gameHeader("blackjack"),
-        "",
-        "╭────────── BUST ─────────╮",
-        "│  ❌ Your hand went over 21.",
-        "╰─────────────────────────╯",
-        "",
-        `♙ ${session.playerHand.join("  ")}`,
-        `Total: ${playerValue}`,
-        "",
-        rewardLine(
-          reward,
-          balanceText,
-          false
+        try {
+          const reward =
+            await awardPlayer(
+              threadID,
+              userID,
+              "blackjack",
+              false
+            );
+
+          const balanceText =
+            await getFinalBalanceText(
+              threadID,
+              userID
+            );
+
+          const finalText = [
+            gameHeader(
+              "blackjack"
+            ),
+            "",
+            "╭────────── BUST ─────────╮",
+            "│  ❌ Your hand went over 21.",
+            "╰─────────────────────────╯",
+            "",
+            `♙ ${session.playerHand.join("  ")}`,
+            `Total: ${playerValue}`,
+            "",
+            rewardLine(
+              reward,
+              balanceText,
+              false
+            ),
+          ].join("\n");
+
+          await updateGameMessage(
+            api,
+            threadID,
+            session.messageID,
+            finalText
+          );
+        } finally {
+          unlockGame(
+            threadID,
+            userID
+          );
+        }
+
+        return true;
+      }
+
+      // Player is still in the game.
+      // Refresh the session timeout and KEEP
+      // the active-game lock.
+      setSession(
+        threadID,
+        userID,
+        session
+      );
+
+      const text = [
+        gameHeader(
+          "blackjack"
         ),
+        "",
+        divider(),
+        "",
+        `♙ YOU     ${session.playerHand.join("  ")}`,
+        `          Total: ${playerValue}`,
+        "",
+        `♟ DEALER  ${session.botHand[0]}  ▣`,
+        "          Total: ?",
+        "",
+        divider(),
+        "",
+        "↳ hit   •   draw another card",
+        "↳ stand •   hold your hand",
       ].join("\n");
 
       await updateGameMessage(
         api,
         threadID,
         session.messageID,
-        finalText
-      );
-
-      unlockGame(
-        threadID,
-        userID
+        text
       );
 
       return true;
     }
 
-    setSession(
-      threadID,
-      userID,
-      session
-    );
+    // ----------------------------------------------------------
+    // STAND
+    // ----------------------------------------------------------
 
-    const text = [
-      gameHeader("blackjack"),
-      "",
-      divider(),
-      "",
-      `♙ YOU     ${session.playerHand.join("  ")}`,
-      `          Total: ${playerValue}`,
-      "",
-      `♟ DEALER  ${session.botHand[0]}  ▣`,
-      "          Total: ?",
-      "",
-      divider(),
-      "",
-      "↳ hit   •   draw another card",
-      "↳ stand •   hold your hand",
-    ].join("\n");
-
-    await updateGameMessage(
-      api,
-      threadID,
-      session.messageID,
-      text
-    );
-  } else if (cmd === "stand") {
     clearSession(
       threadID,
       userID
@@ -1649,9 +1923,13 @@ async function resolveBlackjack(
         session.botHand
       );
 
-    while (botValue < 17) {
+    while (
+      botValue < 17
+    ) {
       session.botHand.push(
-        drawCard(session.deck)
+        drawCard(
+          session.deck
+        )
       );
 
       botValue =
@@ -1666,9 +1944,12 @@ async function resolveBlackjack(
       );
 
     let result = "loss";
-    let resultText = "Dealer wins.";
+    let resultText =
+      "Dealer wins.";
 
-    if (botValue > 21) {
+    if (
+      botValue > 21
+    ) {
       result = "win";
       resultText =
         "Dealer busted. You win!";
@@ -1676,74 +1957,102 @@ async function resolveBlackjack(
       playerValue > botValue
     ) {
       result = "win";
-      resultText = "You win!";
+      resultText =
+        "You win!";
     } else if (
       playerValue === botValue
     ) {
       result = "draw";
-      resultText = "Push — it's a draw.";
+      resultText =
+        "Push — it's a draw.";
     }
 
-    const reward =
-      await awardPlayer(
-        threadID,
-        userID,
-        "blackjack",
-        result === "win"
-      );
+    try {
+      const reward =
+        await awardPlayer(
+          threadID,
+          userID,
+          "blackjack",
+          result === "win"
+        );
 
-    const balanceText =
-      await getFinalBalanceText(
+      const balanceText =
+        await getFinalBalanceText(
+          threadID,
+          userID
+        );
+
+      const finalText = [
+        gameHeader(
+          "blackjack"
+        ),
+        "",
+        result === "win"
+          ? "🏆 YOU WIN"
+          : result === "draw"
+            ? "🤝 PUSH"
+            : "❌ DEALER WINS",
+        "",
+        divider(),
+        "",
+        `♙ YOU     ${session.playerHand.join("  ")}`,
+        `          Total: ${playerValue}`,
+        "",
+        `♟ DEALER  ${session.botHand.join("  ")}`,
+        `          Total: ${botValue}`,
+        "",
+        resultText,
+        "",
+        rewardLine(
+          reward,
+          balanceText,
+          result === "win"
+        ),
+      ].join("\n");
+
+      await updateGameMessage(
+        api,
+        threadID,
+        session.messageID,
+        finalText
+      );
+    } finally {
+      // Critical:
+      // even if DB reward or message edit fails,
+      // the player must not remain permanently locked.
+      unlockGame(
         threadID,
         userID
       );
+    }
 
-    const finalText = [
-      gameHeader("blackjack"),
-      "",
-      result === "win"
-        ? "🏆 YOU WIN"
-        : result === "draw"
-          ? "🤝 PUSH"
-          : "❌ DEALER WINS",
-      "",
-      divider(),
-      "",
-      `♙ YOU     ${session.playerHand.join("  ")}`,
-      `          Total: ${playerValue}`,
-      "",
-      `♟ DEALER  ${session.botHand.join("  ")}`,
-      `          Total: ${botValue}`,
-      "",
-      resultText,
-      "",
-      rewardLine(
-        reward,
-        balanceText,
-        result === "win"
-      ),
-    ].join("\n");
+    return true;
+  } catch (error) {
+    console.error(
+      "[games] blackjack resolve:",
+      error
+    );
 
-    await updateGameMessage(
-      api,
+    clearSession(
       threadID,
-      session.messageID,
-      finalText
+      userID
     );
 
     unlockGame(
       threadID,
       userID
     );
-  } else {
-    await safeReply(
-      api,
-      event,
-      "❌ Use `hit` or `stand`."
-    );
-  }
 
-  return true;
+    try {
+      await safeReply(
+        api,
+        event,
+        "❌ Blackjack ended because something went wrong."
+      );
+    } catch (_) {}
+
+    return true;
+  }
 }
 
 // ============================================================
@@ -1754,15 +2063,24 @@ async function handleSlots(
   api,
   event
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
     await safeReply(
       api,
       event,
       "⏳ You already have a game in progress."
     );
+
     return;
   }
 
@@ -1796,31 +2114,32 @@ async function handleSlots(
 
     await sleep(700);
 
-    const randomReels = () => [
-      symbols[
-        randInt(
-          0,
-          symbols.length - 1
-        )
-      ],
-      symbols[
-        randInt(
-          0,
-          symbols.length - 1
-        )
-      ],
-      symbols[
-        randInt(
-          0,
-          symbols.length - 1
-        )
-      ],
-    ];
+    const randomReels =
+      () => [
+        symbols[
+          randInt(
+            0,
+            symbols.length - 1
+          )
+        ],
+        symbols[
+          randInt(
+            0,
+            symbols.length - 1
+          )
+        ],
+        symbols[
+          randInt(
+            0,
+            symbols.length - 1
+          )
+        ],
+      ];
 
-    const reelText = (reels) =>
-      `│     ${reels.join("   │   ")}     │`;
+    const reelText =
+      (reels) =>
+        `│     ${reels.join("   │   ")}     │`;
 
-    // Small animation before final result.
     for (let i = 0; i < 2; i++) {
       const rolling =
         randomReels();
@@ -1840,7 +2159,9 @@ async function handleSlots(
         ].join("\n")
       );
 
-      await sleep(editDelay());
+      await sleep(
+        editDelay()
+      );
     }
 
     const reels =
@@ -1915,15 +2236,24 @@ async function handleMath(
   api,
   event
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
     await safeReply(
       api,
       event,
       "⏳ You already have a game in progress."
     );
+
     return;
   }
 
@@ -1941,7 +2271,9 @@ async function handleMath(
     ];
 
     const op =
-      ops[randInt(0, 2)];
+      ops[
+        randInt(0, 2)
+      ];
 
     let correctAnswer;
 
@@ -2013,11 +2345,17 @@ async function resolveMath(
   event,
   answerText
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
+
+  const userID =
+    String(event.senderID);
 
   const session =
-    getSession(threadID, userID);
+    getSession(
+      threadID,
+      userID
+    );
 
   if (
     !session ||
@@ -2032,10 +2370,15 @@ async function resolveMath(
   );
 
   const userAnswer =
-    parseInt(answerText, 10);
+    parseInt(
+      answerText,
+      10
+    );
 
   const correct =
-    !Number.isNaN(userAnswer) &&
+    !Number.isNaN(
+      userAnswer
+    ) &&
     userAnswer ===
       session.correctAnswer;
 
@@ -2103,15 +2446,24 @@ async function handleRiddle(
   api,
   event
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
     await safeReply(
       api,
       event,
       "⏳ You already have a game in progress."
     );
+
     return;
   }
 
@@ -2196,11 +2548,17 @@ async function resolveRiddle(
   event,
   answerText
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
+
+  const userID =
+    String(event.senderID);
 
   const session =
-    getSession(threadID, userID);
+    getSession(
+      threadID,
+      userID
+    );
 
   if (
     !session ||
@@ -2316,21 +2674,32 @@ async function handleEightBall(
   event,
   args
 ) {
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+  const threadID =
+    String(event.threadID);
 
-  if (!lockGame(threadID, userID)) {
+  const userID =
+    String(event.senderID);
+
+  if (
+    !lockGame(
+      threadID,
+      userID
+    )
+  ) {
     await safeReply(
       api,
       event,
       "⏳ You already have a game in progress."
     );
+
     return;
   }
 
   try {
     const question =
-      (args || []).join(" ");
+      Array.isArray(args)
+        ? args.join(" ")
+        : String(args || "");
 
     if (!question.trim()) {
       unlockGame(
@@ -2368,7 +2737,9 @@ async function handleEightBall(
         "8ball"
       );
 
-    await sleep(editDelay());
+    await sleep(
+      editDelay()
+    );
 
     const response =
       EIGHTBALL_RESPONSES[
@@ -2490,7 +2861,26 @@ async function handleGameCommand(
 ) {
   const cmd =
     String(command || "")
+      .trim()
       .toLowerCase();
+
+  // ----------------------------------------------------------
+  // IMPORTANT FIX:
+  // index.js currently passes gameArgs as a string.
+  //
+  // Games such as RPS, roll, guess, and coinflip
+  // expect args[0], args[1], etc.
+  //
+  // Normalize both formats so either works.
+  // ----------------------------------------------------------
+
+  const normalizedArgs =
+    Array.isArray(args)
+      ? args
+      : String(args || "")
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean);
 
   if (cmd === "trivia") {
     await handleTrivia(
@@ -2501,25 +2891,25 @@ async function handleGameCommand(
     await handleRPS(
       api,
       event,
-      args
+      normalizedArgs
     );
   } else if (cmd === "roll") {
     await handleRoll(
       api,
       event,
-      args
+      normalizedArgs
     );
   } else if (cmd === "guess") {
     await handleGuess(
       api,
       event,
-      args
+      normalizedArgs
     );
   } else if (cmd === "coinflip") {
     await handleCoinFlip(
       api,
       event,
-      args
+      normalizedArgs
     );
   } else if (cmd === "blackjack") {
     await handleBlackjack(
@@ -2545,7 +2935,7 @@ async function handleGameCommand(
     await handleEightBall(
       api,
       event,
-      args
+      normalizedArgs
     );
   } else {
     await safeReply(
@@ -2553,7 +2943,19 @@ async function handleGameCommand(
       event,
       `❌ Unknown game: ${cmd}`
     );
+
+    return false;
   }
+
+  // IMPORTANT:
+  // index.js uses:
+  //
+  // if (await handleGamesCommand(...)) {
+  //   return;
+  // }
+  //
+  // Therefore recognized commands MUST return true.
+  return true;
 }
 
 // ============================================================
@@ -2640,8 +3042,14 @@ async function handleGameResponse(
 
 module.exports = {
   handleGameCommand,
-  handleGamesCommand: handleGameCommand,
+
+  // Backwards compatibility:
+  // index.js may still import/use handleGamesCommand.
+  handleGamesCommand:
+    handleGameCommand,
+
   handleGameResponse,
+
   lockGame,
   unlockGame,
 };
