@@ -28,11 +28,6 @@ const {
   getNextPublicReply,
 } = require("./triggers");
 
-const {
-  searchJamendo,
-  downloadAudioToFile,
-} = require("./jamendo");
-
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -46,8 +41,6 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .map((id) => id.trim())
   .filter(Boolean);
 
-// Global automatic roast switch.
-// Individual groups can still use !banat on/off.
 const RANDOM_ROAST_ENABLED = !/^(0|false|no|off)$/i.test(
   process.env.RANDOM_ROAST || ""
 );
@@ -61,13 +54,9 @@ const RANDOM_ROAST_COOLDOWN_MS =
     ? parsedCooldown
     : 30_000;
 
-// Temporary cooldown tracking.
-// Persistent banat settings are stored in Neon.
 const lastRandomRoastByThread = new Map();
-
-// Threads seen while the bot is running.
-// Used by !broadcast.
 const activeThreads = new Set();
+
 
 // ---------------------------------------------------------------------------
 // Timeout helper
@@ -89,14 +78,12 @@ function withTimeout(operation, timeoutMs, timeoutMessage) {
       .then(
         (value) => {
           if (settled) return;
-
           settled = true;
           clearTimeout(timer);
           resolve(value);
         },
         (error) => {
           if (settled) return;
-
           settled = true;
           clearTimeout(timer);
           reject(error);
@@ -104,6 +91,7 @@ function withTimeout(operation, timeoutMs, timeoutMessage) {
       );
   });
 }
+
 
 // ---------------------------------------------------------------------------
 // Messenger Promise wrapper
@@ -113,11 +101,8 @@ function sendMessengerMessage(api, message, threadID) {
   return new Promise((resolve, reject) => {
     try {
       api.sendMessage(message, threadID, (error) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve();
-        }
+        if (error) reject(error);
+        else resolve();
       });
     } catch (error) {
       reject(error);
@@ -125,25 +110,20 @@ function sendMessengerMessage(api, message, threadID) {
   });
 }
 
+
 // ---------------------------------------------------------------------------
 // YouTube audio
 // ---------------------------------------------------------------------------
 
 async function sendAudioTrack(api, requestedSong, threadID) {
-  if (
-    typeof requestedSong !== "string" ||
-    !requestedSong.trim()
-  ) {
+  if (typeof requestedSong !== "string" || !requestedSong.trim()) {
     api.sendMessage(
       "🎵 Usage: !play <song name>",
       threadID,
       (error) => {
-        if (error) {
-          console.error("Usage message failed:", error);
-        }
+        if (error) console.error("Usage message failed:", error);
       }
     );
-
     return;
   }
 
@@ -157,12 +137,7 @@ async function sendAudioTrack(api, requestedSong, threadID) {
       "🔎 Searching for the song...",
       threadID,
       (error) => {
-        if (error) {
-          console.error(
-            "Search status message failed:",
-            error
-          );
-        }
+        if (error) console.error("Search status message failed:", error);
       }
     );
 
@@ -173,66 +148,44 @@ async function sendAudioTrack(api, requestedSong, threadID) {
     );
 
     if (!video || !video.url) {
-      throw new Error(
-        `No YouTube result found for "${requestedSong}".`
-      );
+      throw new Error(`No YouTube result found for "${requestedSong}".`);
     }
 
     await withTimeout(
-      () =>
-        downloadYouTubeAudio(
-          video.url,
-          temporaryFile
-        ),
+      () => downloadYouTubeAudio(video.url, temporaryFile),
       YOUTUBE_DOWNLOAD_TIMEOUT_MS,
       "YouTube download timed out after 3 minutes. Please try again."
     );
 
     const fileInfo = await fsp.stat(temporaryFile);
 
-    if (
-      !fileInfo.isFile() ||
-      fileInfo.size === 0
-    ) {
-      throw new Error(
-        "The downloaded audio file is empty."
-      );
+    if (!fileInfo.isFile() || fileInfo.size === 0) {
+      throw new Error("The downloaded audio file is empty.");
     }
 
     await sendMessengerMessage(
       api,
       {
         body: `🎵 ${video.title || requestedSong}`,
-        attachment: fs.createReadStream(
-          temporaryFile
-        ),
+        attachment: fs.createReadStream(temporaryFile),
       },
       threadID
     );
   } catch (error) {
-    console.error(
-      "Audio command failed:",
-      error
-    );
+    console.error("Audio command failed:", error);
 
     api.sendMessage(
       `❌ Unable to download that song.\n${error.message}`,
       threadID,
       (sendError) => {
-        if (sendError) {
-          console.error(
-            "Audio error message failed:",
-            sendError
-          );
-        }
+        if (sendError) console.error("Audio error message failed:", sendError);
       }
     );
   } finally {
-    await fsp
-      .unlink(temporaryFile)
-      .catch(() => {});
+    await fsp.unlink(temporaryFile).catch(() => {});
   }
 }
+
 
 // ---------------------------------------------------------------------------
 // Render health-check web server
@@ -244,55 +197,31 @@ app.get("/", (_req, res) => {
   res.status(200).send("Bot is running ✅");
 });
 
-const port = Number.parseInt(
-  process.env.PORT || "3000",
-  10
-);
+const port = Number.parseInt(process.env.PORT || "3000", 10);
 
-if (
-  !Number.isInteger(port) ||
-  port < 1 ||
-  port > 65535
-) {
-  throw new Error(
-    `Invalid PORT value: ${process.env.PORT}`
-  );
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  throw new Error(`Invalid PORT value: ${process.env.PORT}`);
 }
 
-const server = app.listen(
-  port,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `Web server listening on port ${port}`
-    );
-  }
-);
+const server = app.listen(port, "0.0.0.0", () => {
+  console.log(`Web server listening on port ${port}`);
+});
 
 server.on("error", (error) => {
-  console.error(
-    "Web server error:",
-    error
-  );
-
+  console.error("Web server error:", error);
   process.exitCode = 1;
 });
+
 
 // ---------------------------------------------------------------------------
 // Facebook cookies
 // ---------------------------------------------------------------------------
 
 function readAppState() {
-  const rawCookies =
-    process.env.FB_COOKIES;
+  const rawCookies = process.env.FB_COOKIES;
 
-  if (
-    typeof rawCookies !== "string" ||
-    !rawCookies.trim()
-  ) {
-    throw new Error(
-      "FB_COOKIES is missing."
-    );
+  if (typeof rawCookies !== "string" || !rawCookies.trim()) {
+    throw new Error("FB_COOKIES is missing.");
   }
 
   let parsed;
@@ -304,18 +233,11 @@ function readAppState() {
       parsed = JSON.parse(parsed);
     }
   } catch {
-    throw new Error(
-      "FB_COOKIES must contain valid JSON."
-    );
+    throw new Error("FB_COOKIES must contain valid JSON.");
   }
 
-  if (
-    !Array.isArray(parsed) ||
-    parsed.length === 0
-  ) {
-    throw new Error(
-      "FB_COOKIES must be a non-empty cookie array."
-    );
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error("FB_COOKIES must be a non-empty cookie array.");
   }
 
   return parsed.map((cookie) => {
@@ -324,9 +246,7 @@ function readAppState() {
       typeof cookie !== "object" ||
       Array.isArray(cookie)
     ) {
-      throw new Error(
-        "Each FB_COOKIES entry must be an object."
-      );
+      throw new Error("Each FB_COOKIES entry must be an object.");
     }
 
     const key =
@@ -356,12 +276,10 @@ let appState;
 try {
   appState = readAppState();
 } catch (error) {
-  console.error(
-    `Configuration error: ${error.message}`
-  );
-
+  console.error(`Configuration error: ${error.message}`);
   process.exit(1);
 }
+
 
 // ---------------------------------------------------------------------------
 // Login to Facebook
@@ -378,72 +296,38 @@ login(
 
   async (loginError, api) => {
     if (loginError) {
-      console.error(
-        "Login failed:",
-        loginError
-      );
-
+      console.error("Login failed:", loginError);
       process.exit(1);
     }
 
     if (!api) {
-      console.error(
-        "Login failed: Facebook API object was not returned."
-      );
-
+      console.error("Login failed: Facebook API object was not returned.");
       process.exit(1);
     }
 
-    console.log(
-      "Logged in successfully."
-    );
-
-    // -----------------------------------------------------------------------
-    // Connect Neon BEFORE Messenger listener
-    // -----------------------------------------------------------------------
+    console.log("Logged in successfully.");
 
     try {
       await db.connect();
-
-      console.log(
-        "Neon database connected successfully."
-      );
+      console.log("Neon database connected successfully.");
     } catch (error) {
-      console.error(
-        "Database connection failed:",
-        error
-      );
-
+      console.error("Database connection failed:", error);
       process.exit(1);
     }
-
-    // -----------------------------------------------------------------------
-    // Facebook API options
-    // -----------------------------------------------------------------------
 
     api.setOptions({
       listenEvents: true,
       selfListen: false,
     });
 
-    // -----------------------------------------------------------------------
-    // Optional startup message
-    // -----------------------------------------------------------------------
-
-    const startupThreadID =
-      process.env.STARTUP_THREAD_ID;
+    const startupThreadID = process.env.STARTUP_THREAD_ID;
 
     if (startupThreadID) {
       api.sendMessage(
         "🟢 Bot is online and ready.",
         startupThreadID,
         (sendError) => {
-          if (sendError) {
-            console.error(
-              "Startup message failed:",
-              sendError
-            );
-          }
+          if (sendError) console.error("Startup message failed:", sendError);
         }
       );
     }
@@ -452,63 +336,41 @@ login(
       "Listener started. Send a message from a different Facebook account."
     );
 
-    // -----------------------------------------------------------------------
-    // Messenger event listener
-    // -----------------------------------------------------------------------
-
-    api.listenMqtt(
-      (listenError, event) => {
-        if (listenError) {
-          console.error(
-            "Listener error:",
-            listenError
-          );
-
-          return;
-        }
-
-        if (
-          !event ||
-          typeof event !== "object"
-        ) {
-          return;
-        }
-
-        console.log(
-          "Incoming event:",
-          {
-            type: event.type,
-            senderID: event.senderID,
-            threadID: event.threadID,
-          }
-        );
-
-        if (
-          (event.type === "message" || event.type === "message_reply") &&
-          event.threadID
-        ) {
-          const threadID = String(event.threadID);
-          activeThreads.add(threadID);
-
-          console.log(
-            `[Threads] Active threads: ${activeThreads.size}`
-          );
-
-          void handleMessage(api, event);
-        }
+    api.listenMqtt((listenError, event) => {
+      if (listenError) {
+        console.error("Listener error:", listenError);
+        return;
       }
-    );
+
+      if (!event || typeof event !== "object") return;
+
+      console.log("Incoming event:", {
+        type: event.type,
+        senderID: event.senderID,
+        threadID: event.threadID,
+      });
+
+      if (
+        (event.type === "message" || event.type === "message_reply") &&
+        event.threadID
+      ) {
+        const threadID = String(event.threadID);
+        activeThreads.add(threadID);
+
+        console.log(`[Threads] Active threads: ${activeThreads.size}`);
+
+        void handleMessage(api, event);
+      }
+    });
   }
 );
+
 
 // ---------------------------------------------------------------------------
 // Message handling
 // ---------------------------------------------------------------------------
 
-async function handleMessage(
-  api,
-  event
-) {
+async function handleMessage(api, event) {
   const {
     threadID,
     senderID,
@@ -523,109 +385,24 @@ async function handleMessage(
     return;
   }
 
-  const threadId =
-    String(threadID);
+  const threadId = String(threadID);
+  const originalText = body.trim();
+  const text = originalText.toLowerCase();
+  const senderId = String(senderID || "").trim();
 
-  const originalText =
-    body.trim();
-
-  const text =
-    originalText.toLowerCase();
-
-  const senderId =
-    String(senderID || "").trim();
 
   // -------------------------------------------------------------------------
-  // Private AI sessions run before normal commands.
-  // -------------------------------------------------------------------------
-
-  if (await handleAiMessage(api, event, text, originalText)) {
-    return;
-  }
-
-  if (await handleRpgCharacterMessage(api, event, text, originalText)) {
-    return;
-  }
-
-  // -------------------------------------------------------------------------
-  // Active game responses
-  // -------------------------------------------------------------------------
-
-  try {
-    if (await handleGameResponse(api, event, text, originalText)) {
-      return;
-    }
-  } catch (error) {
-    console.error("Game response failed:", error);
-    return;
-  }
-  
-  // -------------------------------------------------------------------------
-  // Games & RPG Commands
-  // -------------------------------------------------------------------------
-
-  try {
-    if (text.startsWith("!rpg")) {
-      const rpgArgs = originalText.replace(/^!rpg\s*/i, "").trim().split(/\s+/).filter(Boolean);
-      if (await handleRpgCommand(api, event, rpgArgs)) {
-        return;
-      }
-    }
-
-    const gameMatch = text.match(/^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|game)(?:\s+(.*))?$/i);
-
-    if (gameMatch) {
-      const gameCommand = gameMatch[1].toLowerCase();
-      const gameArgs = gameMatch[2] ? gameMatch[2].trim().split(/\s+/) : [];
-
-      if (
-        await handleGamesCommand(
-          api,
-          event,
-          gameCommand,
-          gameArgs
-        )
-      ) {
-        return;
-      }
-    }
-
-    if (
-      await handleEconomyCommand(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "RPG/economy/games command failed:",
-      error
-    );
-
-    return;
-  }
-
-  // -------------------------------------------------------------------------
-  // Ping
+  // SIMPLE DIRECT COMMANDS
+  //
+  // These are intentionally FIRST.
+  // This prevents AI/RPG/game/economy handlers from swallowing !ping,
+  // !help, !play, or !broadcast when one of those handlers errors.
   // -------------------------------------------------------------------------
 
   if (text === "!ping") {
-    sendReplyWithTyping(
-      api,
-      "🏓 Pong!",
-      threadID
-    );
-
+    sendReplyWithTyping(api, "🏓 Pong!", threadID);
     return;
   }
-
-  // -------------------------------------------------------------------------
-  // HELP
-  // -------------------------------------------------------------------------
 
   if (text === "!help") {
     sendReplyWithTyping(
@@ -750,9 +527,158 @@ async function handleMessage(
       ].join("\n"),
       threadID
     );
-
     return;
   }
+
+  if (text === "!play" || text.startsWith("!play ")) {
+    const requestedSong = originalText.slice("!play".length).trim();
+
+    void sendAudioTrack(api, requestedSong, threadID);
+    return;
+  }
+
+  if (text.startsWith("!broadcast ")) {
+    if (!ADMIN_IDS.includes(senderId)) {
+      sendReplyWithTyping(api, "❌ Admin only.", threadID);
+      return;
+    }
+
+    const message = originalText.slice("!broadcast ".length).trim();
+
+    if (!message) {
+      sendReplyWithTyping(
+        api,
+        "📢 Usage: !broadcast <message>",
+        threadID
+      );
+      return;
+    }
+
+    broadcastToAllThreads(api, message);
+    sendReplyWithTyping(
+      api,
+      `📢 Broadcast queued for ${activeThreads.size} active thread(s).`,
+      threadID
+    );
+    return;
+  }
+
+
+  // -------------------------------------------------------------------------
+  // AI / RPG CHARACTER SESSIONS
+  // -------------------------------------------------------------------------
+
+  try {
+    if (await handleAiMessage(api, event, text, originalText)) {
+      return;
+    }
+  } catch (error) {
+    console.error("AI message handler failed:", error);
+  }
+
+  try {
+    if (
+      await handleRpgCharacterMessage(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
+      return;
+    }
+  } catch (error) {
+    console.error("RPG character handler failed:", error);
+  }
+
+
+  // -------------------------------------------------------------------------
+  // ACTIVE GAME RESPONSES
+  // -------------------------------------------------------------------------
+
+  try {
+    if (
+      await handleGameResponse(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
+      return;
+    }
+  } catch (error) {
+    console.error("Game response failed:", error);
+  }
+
+
+  // -------------------------------------------------------------------------
+  // RPG / GAMES / ECONOMY COMMANDS
+  // -------------------------------------------------------------------------
+
+  try {
+    if (text.startsWith("!rpg")) {
+      const rpgArgs = originalText
+        .replace(/^!rpg\s*/i, "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+
+      if (await handleRpgCommand(api, event, rpgArgs)) {
+        return;
+      }
+    }
+
+    const gameMatch = text.match(
+      /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|game|games)(?:\s+(.*))?$/i
+    );
+
+    if (gameMatch) {
+      const gameCommand = gameMatch[1].toLowerCase();
+
+      // !games is handled here so it cannot become "Unknown game".
+      if (gameCommand === "games") {
+        sendGameCenter(api, threadID);
+        return;
+      }
+
+      const gameArgs = gameMatch[2]
+        ? gameMatch[2].trim().split(/\s+/)
+        : [];
+
+      if (
+        await handleGamesCommand(
+          api,
+          event,
+          gameCommand,
+          gameArgs
+        )
+      ) {
+        return;
+      }
+    }
+
+    if (
+      await handleEconomyCommand(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
+      return;
+    }
+  } catch (error) {
+    console.error(
+      "RPG/economy/games command failed:",
+      error
+    );
+
+    // Do NOT return here.
+    // A failed optional handler must not prevent the fallback systems
+    // below from running.
+  }
+
 
   // -------------------------------------------------------------------------
   // BANAT ON
@@ -760,10 +686,7 @@ async function handleMessage(
 
   if (text === "!banat on") {
     try {
-      await db.setRoastEnabled(
-        threadId,
-        true
-      );
+      await db.setRoastEnabled(threadId, true);
 
       sendReplyWithTyping(
         api,
@@ -780,10 +703,7 @@ async function handleMessage(
         threadID
       );
     } catch (error) {
-      console.error(
-        "Failed to enable banat:",
-        error
-      );
+      console.error("Failed to enable banat:", error);
 
       sendReplyWithTyping(
         api,
@@ -795,20 +715,16 @@ async function handleMessage(
     return;
   }
 
+
   // -------------------------------------------------------------------------
   // BANAT OFF
   // -------------------------------------------------------------------------
 
   if (text === "!banat off") {
     try {
-      await db.setRoastEnabled(
-        threadId,
-        false
-      );
+      await db.setRoastEnabled(threadId, false);
 
-      lastRandomRoastByThread.delete(
-        threadId
-      );
+      lastRandomRoastByThread.delete(threadId);
 
       sendReplyWithTyping(
         api,
@@ -825,10 +741,7 @@ async function handleMessage(
         threadID
       );
     } catch (error) {
-      console.error(
-        "Failed to disable banat:",
-        error
-      );
+      console.error("Failed to disable banat:", error);
 
       sendReplyWithTyping(
         api,
@@ -840,60 +753,17 @@ async function handleMessage(
     return;
   }
 
-  // -------------------------------------------------------------------------
-  // PLAY
-  // -------------------------------------------------------------------------
-
-  if (
-    text === "!play" ||
-    text.startsWith("!play ")
-  ) {
-    const requestedSong =
-      originalText
-        .slice("!play".length)
-        .trim();
-
-    void sendAudioTrack(
-      api,
-      requestedSong,
-      threadID
-    );
-
-    return;
-  }
-
-  // -------------------------------------------------------------------------
-  // BROADCAST
-  // -------------------------------------------------------------------------
-
-  if (
-    text.startsWith("!broadcast ") &&
-    ADMIN_IDS.includes(senderId)
-  ) {
-    const message =
-      originalText
-        .slice("!broadcast ".length)
-        .trim();
-
-    broadcastToAllThreads(
-      api,
-      message
-    );
-
-    return;
-  }
 
   // -------------------------------------------------------------------------
   // TARGETED TRIGGER / ROAST
   // -------------------------------------------------------------------------
 
   try {
-    const triggerReply =
-      await getTriggerReply(
-        body,
-        senderId,
-        threadId
-      );
+    const triggerReply = await getTriggerReply(
+      body,
+      senderId,
+      threadId
+    );
 
     if (triggerReply) {
       sendReplyWithTyping(
@@ -902,15 +772,12 @@ async function handleMessage(
         threadID,
         true
       );
-
       return;
     }
   } catch (error) {
-    console.error(
-      "Trigger system failed:",
-      error
-    );
+    console.error("Trigger system failed:", error);
   }
+
 
   // -------------------------------------------------------------------------
   // PUBLIC RANDOM ROAST
@@ -921,37 +788,21 @@ async function handleMessage(
   }
 
   try {
-    const roastEnabled =
-      await db.isRoastEnabled(
-        threadId
-      );
+    const roastEnabled = await db.isRoastEnabled(threadId);
 
     if (!roastEnabled) {
       return;
     }
   } catch (error) {
-    console.error(
-      "Could not check roast setting:",
-      error
-    );
-
-    // Fail closed.
+    console.error("Could not check roast setting:", error);
     return;
   }
 
-  if (
-    canRandomRoastThread(
-      threadId
-    )
-  ) {
-    const publicReply =
-      getNextPublicReply();
+  if (canRandomRoastThread(threadId)) {
+    const publicReply = getNextPublicReply();
 
     if (publicReply) {
-      lastRandomRoastByThread.set(
-        threadId,
-        Date.now()
-      );
+      lastRandomRoastByThread.set(threadId, Date.now());
 
       sendReplyWithTyping(
         api,
@@ -963,50 +814,96 @@ async function handleMessage(
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Game Center
+// ---------------------------------------------------------------------------
+
+function sendGameCenter(api, threadID) {
+  sendReplyWithTyping(
+    api,
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━╮",
+      "       🎮 GAME CENTER",
+      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🧠 TRIVIA",
+      "!trivia",
+      "Answer A, B, C, or D.",
+      "",
+      "✊ RPS",
+      "!rps rock 100",
+      "!rps paper 100",
+      "!rps scissors 100",
+      "Win = 2× • Tie = refund.",
+      "",
+      "🎲 ROLL",
+      "!roll 100",
+      "55+ wins 2×.",
+      "",
+      "🎯 GUESS",
+      "!guess 7 100",
+      "Exact guess = 5×.",
+      "",
+      "🪙 COINFLIP",
+      "!coinflip 100 heads",
+      "Correct = 2×.",
+      "",
+      "🎰 SLOTS",
+      "!slots 100",
+      "Matching symbols pay out.",
+      "",
+      "🃏 BLACKJACK",
+      "!blackjack 100",
+      "Then use !hit / !stand.",
+      "",
+      "🔮 8-BALL",
+      "!8ball Will I win?",
+      "",
+      "🧮 MATH",
+      "!math",
+      "Solve the generated problem.",
+      "",
+      "🧩 RIDDLE",
+      "!riddle",
+      "Solve the generated riddle.",
+      "",
+      "⚙️ GAME SWITCH",
+      "!game on",
+      "!game off",
+      "",
+      "💡 Type !help for the complete bot menu.",
+    ].join("\n"),
+    threadID
+  );
+}
+
+
 // ---------------------------------------------------------------------------
 // Random roast cooldown
 // ---------------------------------------------------------------------------
 
-function canRandomRoastThread(
-  threadID
-) {
+function canRandomRoastThread(threadID) {
   const now = Date.now();
 
   const lastRoastAt =
-    lastRandomRoastByThread.get(
-      threadID
-    ) || 0;
+    lastRandomRoastByThread.get(threadID) || 0;
 
-  if (
-    now - lastRoastAt <
-    RANDOM_ROAST_COOLDOWN_MS
-  ) {
+  if (now - lastRoastAt < RANDOM_ROAST_COOLDOWN_MS) {
     return false;
   }
 
-  if (
-    lastRandomRoastByThread.size >
-    1000
-  ) {
-    const expiry =
-      Math.max(
-        RANDOM_ROAST_COOLDOWN_MS * 2,
-        60_000
-      );
+  if (lastRandomRoastByThread.size > 1000) {
+    const expiry = Math.max(
+      RANDOM_ROAST_COOLDOWN_MS * 2,
+      60_000
+    );
 
     for (
-      const [
-        knownThreadID,
-        roastAt,
-      ] of lastRandomRoastByThread.entries()
+      const [knownThreadID, roastAt] of lastRandomRoastByThread.entries()
     ) {
-      if (
-        now - roastAt >
-        expiry
-      ) {
-        lastRandomRoastByThread.delete(
-          knownThreadID
-        );
+      if (now - roastAt > expiry) {
+        lastRandomRoastByThread.delete(knownThreadID);
       }
     }
   }
@@ -1014,33 +911,21 @@ function canRandomRoastThread(
   return true;
 }
 
+
 // ---------------------------------------------------------------------------
 // Broadcast
 // ---------------------------------------------------------------------------
 
-function broadcastToAllThreads(
-  api,
-  message
-) {
-  if (
-    !message ||
-    !message.trim()
-  ) {
-    console.log(
-      "[Broadcast] No message to broadcast."
-    );
-
+function broadcastToAllThreads(api, message) {
+  if (!message || !message.trim()) {
+    console.log("[Broadcast] No message to broadcast.");
     return;
   }
 
-  const threads =
-    Array.from(activeThreads);
+  const threads = Array.from(activeThreads);
 
   if (threads.length === 0) {
-    console.log(
-      "[Broadcast] No active threads."
-    );
-
+    console.log("[Broadcast] No active threads.");
     return;
   }
 
@@ -1048,38 +933,34 @@ function broadcastToAllThreads(
     `[Broadcast] Broadcasting to ${threads.length} threads.`
   );
 
-  const broadcastMessage =
-    [
-      "╭━━━━━━━━━━━━━━━━╮",
-      "        📢 ANNOUNCEMENT",
-      "╰━━━━━━━━━━━━━━━━╯",
-      "",
-      message.trim(),
-    ].join("\n");
+  const broadcastMessage = [
+    "╭━━━━━━━━━━━━━━━━╮",
+    "        📢 ANNOUNCEMENT",
+    "╰━━━━━━━━━━━━━━━━╯",
+    "",
+    message.trim(),
+  ].join("\n");
 
-  threads.forEach(
-    (threadID, index) => {
-      setTimeout(() => {
-        api.sendMessage(
-          broadcastMessage,
-          threadID,
-          (sendError) => {
-            if (sendError) {
-              console.error(
-                `[Broadcast] Failed for ${threadID}:`,
-                sendError
-              );
-            } else {
-              console.log(
-                `[Broadcast] Sent to ${threadID}`
-              );
-            }
+  threads.forEach((threadID, index) => {
+    setTimeout(() => {
+      api.sendMessage(
+        broadcastMessage,
+        threadID,
+        (sendError) => {
+          if (sendError) {
+            console.error(
+              `[Broadcast] Failed for ${threadID}:`,
+              sendError
+            );
+          } else {
+            console.log(`[Broadcast] Sent to ${threadID}`);
           }
-        );
-      }, index * 500);
-    }
-  );
+        }
+      );
+    }, index * 500);
+  });
 }
+
 
 // ---------------------------------------------------------------------------
 // Safe reply helper
@@ -1094,10 +975,7 @@ function sendReplyWithTyping(
   const typingDelayMs = 1200;
 
   try {
-    if (
-      typeof api.sendTypingIndicator ===
-      "function"
-    ) {
+    if (typeof api.sendTypingIndicator === "function") {
       api.sendTypingIndicator(
         threadID,
         (typingError) => {
@@ -1111,117 +989,74 @@ function sendReplyWithTyping(
       );
     }
   } catch (typingError) {
-    console.error(
-      "Typing indicator error:",
-      typingError
-    );
+    console.error("Typing indicator error:", typingError);
   }
 
   setTimeout(() => {
     try {
-      const memePath =
-        attachMeme
-          ? getRandomMemePath()
-          : null;
+      const memePath = attachMeme ? getRandomMemePath() : null;
 
-      const outgoingMessage =
-        memePath
-          ? {
-              body: message,
-              attachment:
-                fs.createReadStream(
-                  memePath
-                ),
-            }
-          : message;
+      const outgoingMessage = memePath
+        ? {
+            body: message,
+            attachment: fs.createReadStream(memePath),
+          }
+        : message;
 
       api.sendMessage(
         outgoingMessage,
         threadID,
         (sendError) => {
           if (sendError) {
-            console.error(
-              "Reply failed:",
-              sendError
-            );
+            console.error("Reply failed:", sendError);
           }
         }
       );
     } catch (sendError) {
-      console.error(
-        "Reply error:",
-        sendError
-      );
+      console.error("Reply error:", sendError);
     }
   }, typingDelayMs);
 }
+
 
 // ---------------------------------------------------------------------------
 // Meme helper
 // ---------------------------------------------------------------------------
 
 function getRandomMemePath() {
-  const memeDirectory =
-    path.join(
-      __dirname,
-      "memes"
-    );
+  const memeDirectory = path.join(__dirname, "memes");
 
-  const supportedExtensions =
-    new Set([
-      ".jpg",
-      ".jpeg",
-      ".png",
-      ".gif",
-      ".webp",
-    ]);
+  const supportedExtensions = new Set([
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+  ]);
 
   try {
-    if (
-      !fs.existsSync(
-        memeDirectory
-      )
-    ) {
+    if (!fs.existsSync(memeDirectory)) {
       return null;
     }
 
-    const files =
-      fs
-        .readdirSync(
-          memeDirectory
+    const files = fs
+      .readdirSync(memeDirectory)
+      .filter((fileName) =>
+        supportedExtensions.has(
+          path.extname(fileName).toLowerCase()
         )
-        .filter((fileName) =>
-          supportedExtensions.has(
-            path.extname(
-              fileName
-            ).toLowerCase()
-          )
-        );
+      );
 
-    if (
-      files.length === 0
-    ) {
+    if (files.length === 0) {
       return null;
     }
 
     const randomFile =
-      files[
-        Math.floor(
-          Math.random() *
-            files.length
-        )
-      ];
+      files[Math.floor(Math.random() * files.length)];
 
-    return path.join(
-      memeDirectory,
-      randomFile
-    );
+    return path.join(memeDirectory, randomFile);
   } catch (error) {
-    console.error(
-      "Could not load memes:",
-      error
-    );
-
+    console.error("Could not load memes:", error);
     return null;
   }
 }
