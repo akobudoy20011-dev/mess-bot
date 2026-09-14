@@ -999,121 +999,113 @@ async function handleRoll(
   event,
   args
 ) {
-  const threadID =
-    String(event.threadID);
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-  const userID =
-    String(event.senderID);
-
-  if (
-    !lockGame(
-      threadID,
-      userID
-    )
-  ) {
-    await safeReply(
-      api,
-      event,
-      "⏳ You already have a game in progress."
-    );
-
+  if (!lockGame(threadID, userID)) {
+    await safeReply(api, event, "⏳ You already have a game in progress.");
     return;
   }
 
+  let betCharged = false;
+  let payoutPaid = false;
+
   try {
-    const sides =
-      parseInt(
-        args?.[0],
-        10
-      ) || 20;
+    const bet = Number(String(args?.[0] || "").replace(/,/g, ""));
+    const sides = parseInt(args?.[1], 10) || 100;
 
-    if (
-      sides < 2 ||
-      sides > 1000
-    ) {
-      unlockGame(
-        threadID,
-        userID
-      );
-
+    if (!Number.isInteger(bet) || bet < 1 || bet > 1_000_000) {
+      unlockGame(threadID, userID);
       await safeReply(
         api,
         event,
-        "❌ Die sides must be between 2 and 1000."
+        "❌ Your roll bet must be between 1 and 1,000,000 coins."
       );
-
       return;
     }
 
-    const animator =
-      await createAnimator(
-        api,
-        threadID,
-        [
-          gameHeader(
-            "roll",
-            playerLine(event)
-          ),
-          "",
-          divider(),
-          "",
-          `🎲 Rolling a ${sides}-sided die...`,
-          "",
-          "       ⚄",
-          "",
-          "       ROLLING...",
-        ].join("\n"),
-        "roll"
-      );
+    if (sides < 2 || sides > 1000) {
+      unlockGame(threadID, userID);
+      await safeReply(api, event, "❌ Die sides must be between 2 and 1000.");
+      return;
+    }
 
-    await sleep(
-      editDelay()
+    const animator = await createAnimator(
+      api,
+      threadID,
+      [
+        gameHeader("roll", playerLine(event)),
+        "",
+        divider(),
+        "",
+        `🎲 Rolling a ${sides}-sided die...`,
+        `💰 Bet: ${formatNumber(bet)} coins`,
+        "",
+        "       ⚄",
+        "",
+        "       ROLLING...",
+      ].join("\n"),
+      "roll"
     );
 
-    const result =
-      randInt(1, sides);
-
-    const balanceText =
-      await getFinalBalanceText(
+    try {
+      await db.spendBalance(threadID, userID, bet, `Roll bet: ${bet}`);
+      betCharged = true;
+    } catch (error) {
+      await updateGameMessage(
+        api,
         threadID,
-        userID
+        animator.messageID,
+        [
+          gameHeader("roll"),
+          "",
+          "❌ Roll cancelled.",
+          error.message || "Not enough wallet coins.",
+        ].join("\n")
       );
+      return;
+    }
 
+    await sleep(editDelay());
+
+    const result = randInt(1, sides);
+    const highThreshold = Math.ceil(sides * 0.55);
+    const won = result >= highThreshold;
+    const payout = won ? bet * 2 : 0;
+
+    if (payout > 0) {
+      await db.addBalance(threadID, userID, payout);
+      payoutPaid = true;
+    }
+
+    const balanceText = await getFinalBalanceText(threadID, userID);
     const finalText = [
       gameHeader("roll"),
       "",
-      "╭──────── RESULT ────────╮",
-      `│        🎲 ${result}`,
-      "╰────────────────────────╯",
+      won ? "╭──────── 🏆 HIGH HIT ────────╮" : "╭──────── ❌ LOW ROLL ─────────╮",
+      `│        🎲 ${result} / ${sides}`,
+      won ? "╰──────────────────────────────╯" : "╰──────────────────────────────╯",
       "",
-      `You rolled a ${sides}-sided die.`,
+      `High starts at ${highThreshold}+`,
+      won
+        ? `🏆 Payout: +${formatNumber(payout)} coins (2× bet)`
+        : `💸 Lost bet: -${formatNumber(bet)} coins`,
       "",
       balanceText,
     ].join("\n");
 
-    await updateGameMessage(
-      api,
-      threadID,
-      animator.messageID,
-      finalText
-    );
+    await updateGameMessage(api, threadID, animator.messageID, finalText);
   } catch (error) {
-    console.error(
-      "[games] roll:",
-      error
-    );
+    console.error("[games] roll:", error);
 
-    await safeReply(
-      api,
-      event,
-      "❌ Roll failed."
-    );
+    if (betCharged && !payoutPaid) {
+      await db.addBalance(threadID, userID, Number(String(args?.[0] || "").replace(/,/g, ""))).catch(() => {});
+    }
+
+    await safeReply(api, event, "❌ Roll failed.");
   }
 
-  unlockGame(
-    threadID,
-    userID
-  );
+  unlockGame(threadID, userID);
 }
 
 // ============================================================
