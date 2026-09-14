@@ -393,10 +393,6 @@ async function handleMessage(api, event) {
 
   // -------------------------------------------------------------------------
   // SIMPLE DIRECT COMMANDS
-  //
-  // These are intentionally FIRST.
-  // This prevents AI/RPG/game/economy handlers from swallowing !ping,
-  // !help, !play, or !broadcast when one of those handlers errors.
   // -------------------------------------------------------------------------
 
   if (text === "!ping") {
@@ -532,7 +528,6 @@ async function handleMessage(api, event) {
 
   if (text === "!play" || text.startsWith("!play ")) {
     const requestedSong = originalText.slice("!play".length).trim();
-
     void sendAudioTrack(api, requestedSong, threadID);
     return;
   }
@@ -581,14 +576,14 @@ async function handleMessage(api, event) {
     }
   } catch (error) {
     console.error("Game response failed:", error);
+    sendReplyWithTyping(api, `❌ Game Error: ${error.message}`, threadID);
+    return;
   }
 
+  // -------------------------------------------------------------------------
+  // RPG COMMANDS
+  // -------------------------------------------------------------------------
 
-
-
-  // RPG commands must be handled before AI and character sessions.
-  // Otherwise a broad conversational handler can consume !rpg messages
-  // before the RPG dispatcher gets a chance to respond.
   if (/^!rpg(?:\s|$)/i.test(originalText)) {
     try {
       await handleRpgCommand(api, event, text, originalText);
@@ -635,21 +630,22 @@ async function handleMessage(api, event) {
   // RPG / GAMES / ECONOMY COMMANDS
   // -------------------------------------------------------------------------
 
+  try {
+    // Supports both standalone actions ("hit", "stand") and prefixed commands ("!hit", "!blackjack")
     const gameMatch = text.match(
-      /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|game|games)(?:\s+(.*))?$/i
+      /^(?:!?(hit|stand|double|split|surrender)|!(trivia|rps|roll|guess|coinflip|blackjack|slots|math|riddle|8ball|game|games))(?:\s+(.*))?$/i
     );
 
     if (gameMatch) {
-      const gameCommand = gameMatch[1].toLowerCase();
+      const gameCommand = (gameMatch[1] || gameMatch[2]).toLowerCase();
 
-      // !games is handled here so it cannot become "Unknown game".
       if (gameCommand === "games") {
         sendGameCenter(api, threadID);
         return;
       }
 
-      const gameArgs = gameMatch[2]
-        ? gameMatch[2].trim().split(/\s+/)
+      const gameArgs = gameMatch[3]
+        ? gameMatch[3].trim().split(/\s+/)
         : [];
 
       if (
@@ -679,15 +675,11 @@ async function handleMessage(api, event) {
       "RPG/economy/games command failed:",
       error
     );
-
-    // Do NOT return here.
-    // A failed optional handler must not prevent the fallback systems
-    // below from running.
   }
 
 
   // -------------------------------------------------------------------------
-  // BANAT ON
+  // BANAT ON / OFF
   // -------------------------------------------------------------------------
 
   if (text === "!banat on") {
@@ -721,15 +713,9 @@ async function handleMessage(api, event) {
     return;
   }
 
-
-  // -------------------------------------------------------------------------
-  // BANAT OFF
-  // -------------------------------------------------------------------------
-
   if (text === "!banat off") {
     try {
       await db.setRoastEnabled(threadId, false);
-
       lastRandomRoastByThread.delete(threadId);
 
       sendReplyWithTyping(
@@ -891,9 +877,7 @@ function sendGameCenter(api, threadID) {
 
 function canRandomRoastThread(threadID) {
   const now = Date.now();
-
-  const lastRoastAt =
-    lastRandomRoastByThread.get(threadID) || 0;
+  const lastRoastAt = lastRandomRoastByThread.get(threadID) || 0;
 
   if (now - lastRoastAt < RANDOM_ROAST_COOLDOWN_MS) {
     return false;
@@ -905,9 +889,7 @@ function canRandomRoastThread(threadID) {
       60_000
     );
 
-    for (
-      const [knownThreadID, roastAt] of lastRandomRoastByThread.entries()
-    ) {
+    for (const [knownThreadID, roastAt] of lastRandomRoastByThread.entries()) {
       if (now - roastAt > expiry) {
         lastRandomRoastByThread.delete(knownThreadID);
       }
