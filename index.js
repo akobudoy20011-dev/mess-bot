@@ -654,7 +654,7 @@ async function handleMessage(api, event) {
   } catch (error) {
     console.error("Game response failed:", error);
   }
-
+}
 
   // -------------------------------------------------------------------------
   // RPG / GAMES / ECONOMY COMMANDS
