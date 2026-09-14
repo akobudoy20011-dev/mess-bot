@@ -552,7 +552,7 @@ async function handleMessage(
   // -------------------------------------------------------------------------
 
   try {
-    if (await handleGameResponse(api, event, text)) {
+    if (await handleGameResponse(api, event, text, originalText)) {
       return;
     }
   } catch (error) {
