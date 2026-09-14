@@ -5,6 +5,9 @@
  *
  * Commands:
  *   !balance / !bal
+ *   !bank
+ *   !deposit / !dep <amount|all>
+ *   !withdraw / !wd <amount|all>
  *   !daily
  *   !work
  *   !pay <amount>       — reply to someone's message
@@ -12,6 +15,7 @@
  *   !shop
  *   !buy <item>
  *   !inventory / !inv
+ *   !use <item>
  *
  * Admin:
  *   !addmoney <amount>
@@ -99,11 +103,20 @@ const SHOP_ITEMS = {
 };
 
 // ============================================================================
-// DISPLAY HELPERS
+// DISPLAY & UTILITY HELPERS
 // ============================================================================
 
 function formatCoins(amount) {
   return Number(amount || 0).toLocaleString();
+}
+
+function parseAmountInput(input, maxAmount) {
+  if (!input) return 0;
+  const str = String(input).toLowerCase().trim();
+  if (str === "all" || str === "max") return maxAmount;
+  const cleaned = str.replace(/[^0-9]/g, "");
+  const val = parseInt(cleaned, 10);
+  return isNaN(val) ? 0 : val;
 }
 
 function getDisplayName(user) {
@@ -159,37 +172,23 @@ function randInt(min, max) {
 }
 
 // ============================================================================
-// BALANCE
+// BALANCE & BANK
 // ============================================================================
 
 async function handleBalance(api, event) {
-  const {
-    threadID,
-    senderID,
-  } = event;
+  const { threadID, senderID } = event;
+  const user = await db.getUser(threadID, senderID);
 
-  const user = await db.getUser(
-    threadID,
-    senderID
-  );
-
-  const wallet =
-    Number(user.balance) || 0;
-
-  const bank =
-    Number(user.bank_balance) || 0;
-
-  const total =
-    wallet + bank;
-
-  const name =
-    getDisplayName(user);
+  const wallet = Number(user.balance) || 0;
+  const bank = Number(user.bank_balance) || 0;
+  const total = wallet + bank;
+  const name = getDisplayName(user);
 
   await reply(
     api,
     threadID,
     createBox(
-      "💰 WALLET",
+      "💳 BANK ACCOUNT",
       [
         `👤 ${name}`,
         "",
@@ -198,6 +197,104 @@ async function handleBalance(api, event) {
         `💎 Total: ${formatCoins(total)} coins`,
       ]
     )
+  );
+}
+
+async function handleDeposit(api, event, args) {
+  const { threadID, senderID } = event;
+  const user = await db.getUser(threadID, senderID);
+  const wallet = Number(user.balance) || 0;
+  const bank = Number(user.bank_balance) || 0;
+
+  const amount = parseAmountInput(args[0], wallet);
+
+  if (amount <= 0) {
+    return reply(
+      api,
+      threadID,
+      createError("Specify a valid amount to deposit.\n\nUsage: !deposit <amount|all>")
+    );
+  }
+
+  if (wallet < amount) {
+    return reply(
+      api,
+      threadID,
+      createBox("📥 DEPOSIT FAILED", [
+        "You do not have enough coins in your wallet.",
+        "",
+        `💵 Wallet: ${formatCoins(wallet)} coins`,
+        `💵 Deposit Amount: ${formatCoins(amount)} coins`,
+      ])
+    );
+  }
+
+  const newWallet = wallet - amount;
+  const newBank = bank + amount;
+
+  await db.updateUser(threadID, senderID, {
+    balance: newWallet,
+    bank_balance: newBank,
+  });
+
+  await reply(
+    api,
+    threadID,
+    createBox("📥 DEPOSIT COMPLETE", [
+      `💰 Deposited: +${formatCoins(amount)} coins`,
+      "",
+      `💵 Wallet: ${formatCoins(newWallet)} coins`,
+      `🏦 Bank: ${formatCoins(newBank)} coins`,
+    ])
+  );
+}
+
+async function handleWithdraw(api, event, args) {
+  const { threadID, senderID } = event;
+  const user = await db.getUser(threadID, senderID);
+  const wallet = Number(user.balance) || 0;
+  const bank = Number(user.bank_balance) || 0;
+
+  const amount = parseAmountInput(args[0], bank);
+
+  if (amount <= 0) {
+    return reply(
+      api,
+      threadID,
+      createError("Specify a valid amount to withdraw.\n\nUsage: !withdraw <amount|all>")
+    );
+  }
+
+  if (bank < amount) {
+    return reply(
+      api,
+      threadID,
+      createBox("📤 WITHDRAW FAILED", [
+        "You do not have enough coins in your bank balance.",
+        "",
+        `🏦 Bank Balance: ${formatCoins(bank)} coins`,
+        `💵 Requested: ${formatCoins(amount)} coins`,
+      ])
+    );
+  }
+
+  const newWallet = wallet + amount;
+  const newBank = bank - amount;
+
+  await db.updateUser(threadID, senderID, {
+    balance: newWallet,
+    bank_balance: newBank,
+  });
+
+  await reply(
+    api,
+    threadID,
+    createBox("📤 WITHDRAW COMPLETE", [
+      `💰 Withdrawn: +${formatCoins(amount)} coins`,
+      "",
+      `💵 Wallet: ${formatCoins(newWallet)} coins`,
+      `🏦 Bank: ${formatCoins(newBank)} coins`,
+    ])
   );
 }
 
@@ -222,10 +319,6 @@ async function handleDaily(api, event) {
     user.last_daily
       ? Number(user.last_daily)
       : null;
-
-  // --------------------------------------------------------------------------
-  // COOLDOWN
-  // --------------------------------------------------------------------------
 
   if (
     last !== null &&
@@ -255,10 +348,6 @@ async function handleDaily(api, event) {
     return;
   }
 
-  // --------------------------------------------------------------------------
-  // STREAK
-  // --------------------------------------------------------------------------
-
   let streak;
 
   if (
@@ -272,10 +361,6 @@ async function handleDaily(api, event) {
   } else {
     streak = 1;
   }
-
-  // --------------------------------------------------------------------------
-  // REWARD
-  // --------------------------------------------------------------------------
 
   const bonus =
     Math.min(
@@ -347,10 +432,6 @@ async function handleWork(api, event) {
       ? Number(user.last_work)
       : null;
 
-  // --------------------------------------------------------------------------
-  // COOLDOWN
-  // --------------------------------------------------------------------------
-
   if (
     last !== null &&
     now - last < WORK_COOLDOWN_MS
@@ -377,10 +458,6 @@ async function handleWork(api, event) {
 
     return;
   }
-
-  // --------------------------------------------------------------------------
-  // PAYOUT
-  // --------------------------------------------------------------------------
 
   const earned =
     randInt(
@@ -420,8 +497,6 @@ async function handleWork(api, event) {
 
 // ============================================================================
 // PAY
-// !pay <amount>
-// Must reply to recipient's message
 // ============================================================================
 
 async function handlePay(
@@ -441,10 +516,6 @@ async function handlePay(
       10
     );
 
-  // --------------------------------------------------------------------------
-  // INVALID AMOUNT
-  // --------------------------------------------------------------------------
-
   if (
     !Number.isInteger(amount) ||
     amount <= 0
@@ -459,10 +530,6 @@ async function handlePay(
 
     return;
   }
-
-  // --------------------------------------------------------------------------
-  // NO REPLY
-  // --------------------------------------------------------------------------
 
   if (
     !messageReply ||
@@ -487,10 +554,6 @@ async function handlePay(
   const senderIDString =
     String(senderID);
 
-  // --------------------------------------------------------------------------
-  // SELF PAYMENT
-  // --------------------------------------------------------------------------
-
   if (
     recipientID ===
     senderIDString
@@ -505,10 +568,6 @@ async function handlePay(
 
     return;
   }
-
-  // --------------------------------------------------------------------------
-  // LOAD USERS
-  // --------------------------------------------------------------------------
 
   const sender =
     await db.getUser(
@@ -549,10 +608,6 @@ async function handlePay(
     return;
   }
 
-  // --------------------------------------------------------------------------
-  // TRANSFER
-  // --------------------------------------------------------------------------
-
   try {
     await db.transfer(
       threadID,
@@ -577,10 +632,6 @@ async function handlePay(
 
     return;
   }
-
-  // --------------------------------------------------------------------------
-  // GET UPDATED BALANCE
-  // --------------------------------------------------------------------------
 
   const updatedSender =
     await db.getUser(
@@ -712,6 +763,7 @@ async function handleShop(api, event) {
   Object.entries(SHOP_ITEMS).forEach(([id, item]) => lines.push(item.name + " · " + formatCoins(item.price) + " coins", "   Buy: !buy " + id, ""));
   await reply(api, event.threadID, createBox("🛒 SHOP", lines));
 }
+
 // ============================================================================
 // BUY
 // ============================================================================
@@ -737,6 +789,7 @@ async function handleBuy(api, event, args) {
   const updatedUser = await db.getUser(event.threadID, event.senderID);
   await reply(api, event.threadID, createBox("🛍️ PURCHASE COMPLETE", ["🎁 Item: " + item.name, "💰 Price: " + formatCoins(item.price) + " coins", "", "💵 Balance: " + formatCoins(updatedUser.balance) + " coins", "", "✨ Added to your inventory!"]));
 }
+
 // ============================================================================
 // INVENTORY
 // ============================================================================
@@ -751,6 +804,7 @@ async function handleInventory(api, event) {
   if (economyItems.length) { lines.push("🎁 COLLECTIBLES", ""); for (const [id, amount] of economyItems) lines.push(SHOP_ITEMS[id].name + " ×" + amount, ""); }
   await reply(api, event.threadID, createBox("🎒 INVENTORY", lines));
 }
+
 // ============================================================================
 // COMMAND ROUTER
 // ============================================================================
@@ -772,18 +826,51 @@ async function handleEconomyCommand(
     ).trim();
 
   // ==========================================================================
-  // BALANCE
+  // BALANCE / BANK
   // ==========================================================================
 
   if (
     text === "!balance" ||
-    text === "!bal"
+    text === "!bal" ||
+    text === "!bank"
   ) {
     await handleBalance(
       api,
       event
     );
 
+    return true;
+  }
+
+  // ==========================================================================
+  // DEPOSIT
+  // ==========================================================================
+
+  if (
+    text === "!deposit" ||
+    text.startsWith("!deposit ") ||
+    text === "!dep" ||
+    text.startsWith("!dep ")
+  ) {
+    const cmdName = text.startsWith("!deposit") ? "!deposit" : "!dep";
+    const args = originalText.slice(cmdName.length).trim().split(/\s+/).filter(Boolean);
+    await handleDeposit(api, event, args);
+    return true;
+  }
+
+  // ==========================================================================
+  // WITHDRAW
+  // ==========================================================================
+
+  if (
+    text === "!withdraw" ||
+    text.startsWith("!withdraw ") ||
+    text === "!wd" ||
+    text.startsWith("!wd ")
+  ) {
+    const cmdName = text.startsWith("!withdraw") ? "!withdraw" : "!wd";
+    const args = originalText.slice(cmdName.length).trim().split(/\s+/).filter(Boolean);
+    await handleWithdraw(api, event, args);
     return true;
   }
 
@@ -913,32 +1000,8 @@ async function handleEconomyCommand(
   }
 
   // ==========================================================================
-  // ADMIN — ADD MONEY
-  // ==========================================================================
-
-  if (
-    text === "!addmoney" ||
-    text.startsWith("!addmoney ")
-  ) {
-    const args =
-      originalText
-        .slice("!addmoney".length)
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean);
-
-    await handleAddMoney(
-      api,
-      event,
-      args
-    );
-
-    return true;
-  }
-
-  // ============================================================================
   // STANDALONE RPG CONSUMABLES
-  // ============================================================================
+  // ==========================================================================
   if (text === "!use" || text.startsWith("!use ")) {
     const args = originalText.slice("!use".length).trim().split(/\s+/).filter(Boolean);
     try {
