@@ -558,6 +558,232 @@ async function handleMessage(api, event) {
     return;
   }
 
+    // -------------------------------------------------------------------------
+  // ADMIN CHEAT COMMANDS
+  // -------------------------------------------------------------------------
+
+  if (/^!(addxp|addmoney|setlevel|setbalance)(?:\s+.+)?$/i.test(originalText)) {
+    if (!ADMIN_IDS.includes(senderId)) {
+      sendReplyWithTyping(api, "❌ Admin only.", threadID);
+      return;
+    }
+
+    const cheatMatch = originalText.match(
+      /^!(addxp|addmoney|setlevel|setbalance)\s+([0-9]+)$/i
+    );
+
+    if (!cheatMatch) {
+      sendReplyWithTyping(
+        api,
+        [
+          "🛠️ ADMIN CHEATS",
+          "",
+          "!addxp <amount>",
+          "!addmoney <amount>",
+          "!setlevel <level>",
+          "!setbalance <amount>",
+        ].join("\n"),
+        threadID
+      );
+      return;
+    }
+
+    const cheatCommand = cheatMatch[1].toLowerCase();
+    const amount = Number(cheatMatch[2]);
+
+    if (!Number.isSafeInteger(amount) || amount < 0) {
+      sendReplyWithTyping(
+        api,
+        "❌ Invalid amount.",
+        threadID
+      );
+      return;
+    }
+
+    try {
+      // -------------------------------------------------------
+      // ADD XP
+      // -------------------------------------------------------
+      if (cheatCommand === "addxp") {
+        const result = await db.addXP(
+          threadId,
+          senderId,
+          amount
+        );
+
+        sendReplyWithTyping(
+          api,
+          [
+            "⚡ ADMIN XP",
+            "",
+            `Added: +${amount.toLocaleString()} XP`,
+            `Level: ${result.level}`,
+            `Total XP: ${result.xp.toLocaleString()}`,
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      // -------------------------------------------------------
+      // ADD MONEY
+      // -------------------------------------------------------
+      if (cheatCommand === "addmoney") {
+        const user = await db.addBalance(
+          threadId,
+          senderId,
+          amount
+        );
+
+        sendReplyWithTyping(
+          api,
+          [
+            "💰 ADMIN MONEY",
+            "",
+            `Added: +${amount.toLocaleString()} coins`,
+            `Balance: ${user.balance.toLocaleString()} coins`,
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      // -------------------------------------------------------
+      // SET LEVEL
+      // -------------------------------------------------------
+      if (cheatCommand === "setlevel") {
+        const user = await db.getUser(
+          threadId,
+          senderId
+        );
+
+        await db.updateUser(
+          threadId,
+          senderId,
+          {
+            level: amount,
+          }
+        );
+
+        sendReplyWithTyping(
+          api,
+          [
+            "👑 ADMIN LEVEL",
+            "",
+            `Previous: Level ${user.level}`,
+            `New: Level ${amount}`,
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      // -------------------------------------------------------
+      // SET BALANCE
+      // -------------------------------------------------------
+      if (cheatCommand === "setbalance") {
+        await db.updateUser(
+          threadId,
+          senderId,
+          {
+            balance: amount,
+          }
+        );
+
+        sendReplyWithTyping(
+          api,
+          [
+            "💰 ADMIN BALANCE",
+            "",
+            `Balance set to: ${amount.toLocaleString()} coins`,
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+    } catch (error) {
+      console.error("Admin cheat command failed:", error);
+
+      sendReplyWithTyping(
+        api,
+        "❌ Admin command failed.",
+        threadID
+      );
+
+      return;
+    }
+  }
+  
+  // -------------------------------------------------------------------------
+// GLOBAL BOT ON / OFF — ADMIN ONLY
+// -------------------------------------------------------------------------
+
+if (/^!bot(?:\s+(on|off))?$/i.test(originalText)) {
+  if (!ADMIN_IDS.includes(senderId)) {
+    sendReplyWithTyping(api, "❌ Admin only.", threadID);
+    return;
+  }
+
+  const botMatch = originalText.match(
+    /^!bot(?:\s+(on|off))?$/i
+  );
+
+  // !bot
+  if (!botMatch || !botMatch[1]) {
+    sendReplyWithTyping(
+      api,
+      [
+        "🤖 BOT CONTROL",
+        "",
+        "!bot on — Enable the bot",
+        "!bot off — Disable the bot",
+      ].join("\n"),
+      threadID
+    );
+    return;
+  }
+
+  const botState = botMatch[1].toLowerCase();
+
+  if (botState === "off") {
+    global.botDisabled = true;
+
+    sendReplyWithTyping(
+      api,
+      [
+        "🔴 BOT OFFLINE",
+        "",
+        "The bot has been disabled globally.",
+        "No commands will be processed.",
+        "",
+        "Use !bot on to enable it again.",
+      ].join("\n"),
+      threadID
+    );
+
+    return;
+  }
+
+  if (botState === "on") {
+    global.botDisabled = false;
+
+    sendReplyWithTyping(
+      api,
+      [
+        "🟢 BOT ONLINE",
+        "",
+        "The bot has been enabled globally.",
+      ].join("\n"),
+      threadID
+    );
+
+    return;
+  }
+}
 
   // -------------------------------------------------------------------------
   // ACTIVE GAME RESPONSES
