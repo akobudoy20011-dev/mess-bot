@@ -483,25 +483,18 @@ login(
           }
         );
 
-        if (event.threadID) {
-          const threadID =
-            String(event.threadID);
-
+        if (
+          (event.type === "message" || event.type === "message_reply") &&
+          event.threadID
+        ) {
+          const threadID = String(event.threadID);
           activeThreads.add(threadID);
 
           console.log(
             `[Threads] Active threads: ${activeThreads.size}`
           );
-        }
 
-        if (
-          event.type === "message" ||
-          event.type === "message_reply"
-        ) {
-          void handleMessage(
-            api,
-            event
-          );
+          void handleMessage(api, event);
         }
       }
     );
@@ -555,51 +548,47 @@ async function handleMessage(
   }
 
   // -------------------------------------------------------------------------
-// Active game responses
-// -------------------------------------------------------------------------
-
-try {
-  if (await handleGameResponse(api, event, text)) {
-    return;
-  }
-} catch (error) {
-  console.error("Game response failed:", error);
-  return;
-}
-  
-  // -------------------------------------------------------------------------
-  // Games FIRST
+  // Active game responses
   // -------------------------------------------------------------------------
 
   try {
-    if (
-      await handleRpgCommand(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
+    if (await handleGameResponse(api, event, text)) {
       return;
     }
-
-    const gameMatch = text.match(/^!(trivia|rps|roll|guess|coinflip|blackjack|slots|math|riddle|8ball)(?:\s+(.*))?$/i);
-
-if (gameMatch) {
-  const gameCommand = gameMatch[1].toLowerCase();
-  const gameArgs = gameMatch[2] || "";
-
-  if (
-    await handleGamesCommand(
-      api,
-      event,
-      gameCommand,
-      gameArgs
-    )
-  ) {
+  } catch (error) {
+    console.error("Game response failed:", error);
     return;
   }
-}
+  
+  // -------------------------------------------------------------------------
+  // Games & RPG Commands
+  // -------------------------------------------------------------------------
+
+  try {
+    if (text.startsWith("!rpg")) {
+      const rpgArgs = originalText.replace(/^!rpg\s*/i, "").trim().split(/\s+/).filter(Boolean);
+      if (await handleRpgCommand(api, event, rpgArgs)) {
+        return;
+      }
+    }
+
+    const gameMatch = text.match(/^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|game)(?:\s+(.*))?$/i);
+
+    if (gameMatch) {
+      const gameCommand = gameMatch[1].toLowerCase();
+      const gameArgs = gameMatch[2] ? gameMatch[2].trim().split(/\s+/) : [];
+
+      if (
+        await handleGamesCommand(
+          api,
+          event,
+          gameCommand,
+          gameArgs
+        )
+      ) {
+        return;
+      }
+    }
 
     if (
       await handleEconomyCommand(
