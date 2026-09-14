@@ -8,7 +8,7 @@ const ytdlp = require("youtube-dl-exec");
 const ffmpegPath = require("ffmpeg-static");
 
 // -----------------------------------------------------------------------------
-// CONFIG
+// CONFIGURATION
 // -----------------------------------------------------------------------------
 
 const YOUTUBE_COOKIES =
@@ -18,7 +18,7 @@ const YOUTUBE_COOKIES =
     : null;
 
 // -----------------------------------------------------------------------------
-// SEARCH
+// YOUTUBE SEARCH
 // -----------------------------------------------------------------------------
 
 async function searchYouTube(query) {
@@ -28,7 +28,7 @@ async function searchYouTube(query) {
 
   const cleanQuery = query.trim();
 
-  console.log(`[YouTube] Searching: ${cleanQuery}`);
+  console.log(`[YouTube] Searching for: ${cleanQuery}`);
 
   try {
     const result = await ytSearch(cleanQuery);
@@ -45,7 +45,10 @@ async function searchYouTube(query) {
     );
 
     if (!video) {
-      console.log("[YouTube] No result found.");
+      console.log(
+        `[YouTube] No result found for: ${cleanQuery}`
+      );
+
       return null;
     }
 
@@ -56,15 +59,19 @@ async function searchYouTube(query) {
     return {
       title: video.title || "Unknown title",
       url: video.url,
+
       duration:
         typeof video.timestamp === "string"
           ? video.timestamp
           : formatDuration(video.seconds),
+
       thumbnail: video.thumbnail || null,
+
       author:
         video.author?.name ||
         video.author?.channel ||
         null,
+
       views: Number.isFinite(video.views)
         ? video.views
         : null,
@@ -77,24 +84,27 @@ async function searchYouTube(query) {
 
     throw new Error(
       `YouTube search failed: ${
-        error?.message || "Unknown error"
+        error?.message || "Unknown search error"
       }`
     );
   }
 }
 
 // -----------------------------------------------------------------------------
-// DOWNLOAD
+// DOWNLOAD YOUTUBE AUDIO
 // -----------------------------------------------------------------------------
 
-async function downloadYouTubeAudio(videoUrl, outputPath) {
+async function downloadYouTubeAudio(
+  videoUrl,
+  outputPath
+) {
   if (!isYouTubeUrl(videoUrl)) {
     throw new Error("Invalid YouTube URL.");
   }
 
   if (!ffmpegPath) {
     throw new Error(
-      "FFmpeg is unavailable. Make sure ffmpeg-static is installed."
+      "FFmpeg was not found. Make sure ffmpeg-static is installed."
     );
   }
 
@@ -102,32 +112,40 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
     typeof outputPath !== "string" ||
     !outputPath.trim()
   ) {
-    throw new Error("Invalid output path.");
+    throw new Error(
+      "A valid output path is required."
+    );
   }
 
+  // Make sure the output directory exists.
   await fs.mkdir(
     path.dirname(outputPath),
-    { recursive: true }
+    {
+      recursive: true,
+    }
   );
 
+  // Remove any existing output.
   await fs.rm(
     outputPath,
-    { force: true }
+    {
+      force: true,
+    }
   );
 
-  let cookieFile = null;
+  let cookieFilePath = null;
 
   try {
-    // ---------------------------------------------------------
-    // COOKIES
-    // ---------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // OPTIONAL YOUTUBE COOKIES
+    // -------------------------------------------------------------------------
 
     if (YOUTUBE_COOKIES) {
-      cookieFile =
+      cookieFilePath =
         `${outputPath}.youtube-cookies.txt`;
 
       await fs.writeFile(
-        cookieFile,
+        cookieFilePath,
         `${YOUTUBE_COOKIES}\n`,
         {
           mode: 0o600,
@@ -139,56 +157,58 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
       );
     }
 
-    // ---------------------------------------------------------
+    // -------------------------------------------------------------------------
     // YT-DLP OPTIONS
-    // ---------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     const options = {
       output: outputPath,
 
+      // Prefer normal audio formats, then fall back to best.
       format:
         "bestaudio[ext=m4a]/bestaudio/best",
 
+      // Convert downloaded audio to MP3.
       extractAudio: true,
       audioFormat: "mp3",
       audioQuality: "0",
 
+      // Never download a playlist.
       noPlaylist: true,
 
+      // Retry failed requests/fragments.
       retries: 5,
       fragmentRetries: 5,
 
+      // Use ffmpeg-static.
       ffmpegLocation: ffmpegPath,
 
-      // Current yt-dlp requires an external JS runtime
-      // for full YouTube extraction.
-      jsRuntimes: `node:${process.execPath}`,
+      // Current yt-dlp YouTube extraction may require
+      // a JavaScript runtime.
+      jsRuntimes:
+        `node:${process.execPath}`,
 
-      noWarnings: false,
+      // Allow yt-dlp to use its EJS challenge solver.
+      remoteComponents:
+        "ejs:github",
     };
 
-    if (cookieFile) {
-      options.cookies = cookieFile;
+    // Add cookies only when configured.
+    if (cookieFilePath) {
+      options.cookies = cookieFilePath;
     }
-
-    // ---------------------------------------------------------
-    // EJS CHALLENGE SOLVER
-    // ---------------------------------------------------------
-
-    // Allow yt-dlp to obtain its current EJS components.
-    options.remoteComponents = "ejs:github";
 
     console.log(
       "[YouTube] Starting yt-dlp..."
     );
 
     console.log(
-      `[YouTube] URL: ${videoUrl}`
+      `[YouTube] Downloading: ${videoUrl}`
     );
 
-    // ---------------------------------------------------------
-    // EXECUTE
-    // ---------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // RUN YT-DLP
+    // -------------------------------------------------------------------------
 
     await ytdlp(
       videoUrl,
@@ -198,9 +218,9 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
       }
     );
 
-    // ---------------------------------------------------------
-    // VERIFY
-    // ---------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // VERIFY OUTPUT
+    // -------------------------------------------------------------------------
 
     const fileInfo =
       await fs.stat(outputPath).catch(
@@ -218,20 +238,36 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
     }
 
     console.log(
-      `[YouTube] Audio ready: ${fileInfo.size} bytes`
+      `[YouTube] Download succeeded: ${fileInfo.size} bytes`
     );
 
     return outputPath;
   } catch (error) {
+    const stderr =
+      typeof error?.stderr === "string"
+        ? error.stderr.trim()
+        : "";
+
+    const stdout =
+      typeof error?.stdout === "string"
+        ? error.stdout.trim()
+        : "";
+
     const message =
-      error?.stderr ||
+      stderr ||
+      stdout ||
       error?.message ||
       String(error);
 
     console.error(
-      "[YouTube] Download failed:",
-      message
+      "[YouTube] Download failed:"
     );
+
+    console.error(message);
+
+    // -------------------------------------------------------------------------
+    // YOUTUBE BOT DETECTION
+    // -------------------------------------------------------------------------
 
     if (
       /sign in to confirm|not a bot|confirm you're not a bot|bot detection/i.test(
@@ -240,9 +276,13 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
     ) {
       throw new Error(
         "YouTube is blocking Render's server request. " +
-        "A fresh YOUTUBE_COOKIES secret may be required."
+        "Configure a fresh YOUTUBE_COOKIES secret using a valid Netscape-format YouTube cookie export."
       );
     }
+
+    // -------------------------------------------------------------------------
+    // JAVASCRIPT / EJS CHALLENGE
+    // -------------------------------------------------------------------------
 
     if (
       /javascript|js runtime|ejs|challenge/i.test(
@@ -250,10 +290,14 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
       )
     ) {
       throw new Error(
-        "YouTube's JavaScript challenge could not be solved. " +
+        "YouTube's player challenge could not be solved. " +
         "Make sure Render is using Node.js 22+ and the latest yt-dlp."
       );
     }
+
+    // -------------------------------------------------------------------------
+    // FFMPEG
+    // -------------------------------------------------------------------------
 
     if (
       /ffmpeg|postprocess|conversion/i.test(
@@ -261,25 +305,36 @@ async function downloadYouTubeAudio(videoUrl, outputPath) {
       )
     ) {
       throw new Error(
-        "FFmpeg audio conversion failed."
+        "FFmpeg audio conversion failed. " +
+        "Make sure ffmpeg-static is installed correctly."
       );
     }
+
+    // -------------------------------------------------------------------------
+    // GENERAL ERROR
+    // -------------------------------------------------------------------------
 
     throw new Error(
       `YouTube download failed: ${message}`
     );
   } finally {
-    if (cookieFile) {
+    // -------------------------------------------------------------------------
+    // CLEAN UP COOKIE FILE
+    // -------------------------------------------------------------------------
+
+    if (cookieFilePath) {
       await fs.rm(
-        cookieFile,
-        { force: true }
+        cookieFilePath,
+        {
+          force: true,
+        }
       );
     }
   }
 }
 
 // -----------------------------------------------------------------------------
-// URL VALIDATION
+// YOUTUBE URL VALIDATION
 // -----------------------------------------------------------------------------
 
 function isYouTubeUrl(value) {
@@ -297,23 +352,26 @@ function isYouTubeUrl(value) {
       return false;
     }
 
-    return [
+    const hostname =
+      url.hostname.toLowerCase();
+
+    const allowedHosts = new Set([
       "youtube.com",
       "www.youtube.com",
       "m.youtube.com",
       "music.youtube.com",
       "youtu.be",
       "www.youtu.be",
-    ].includes(
-      url.hostname.toLowerCase()
-    );
+    ]);
+
+    return allowedHosts.has(hostname);
   } catch {
     return false;
   }
 }
 
 // -----------------------------------------------------------------------------
-// DURATION
+// FORMAT DURATION
 // -----------------------------------------------------------------------------
 
 function formatDuration(seconds) {
@@ -324,34 +382,32 @@ function formatDuration(seconds) {
     return "Unknown duration";
   }
 
-  const total =
+  const totalSeconds =
     Math.floor(seconds);
 
   const hours =
-    Math.floor(total / 3600);
+    Math.floor(totalSeconds / 3600);
 
   const minutes =
     Math.floor(
-      (total % 3600) / 60
+      (totalSeconds % 3600) / 60
     );
 
-  const secs =
-    total % 60;
+  const remainingSeconds =
+    totalSeconds % 60;
 
   if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(
-      2,
-      "0"
-    )}:${String(secs).padStart(
-      2,
-      "0"
-    )}`;
+    return (
+      `${hours}:` +
+      `${String(minutes).padStart(2, "0")}:` +
+      `${String(remainingSeconds).padStart(2, "0")}`
+    );
   }
 
-  return `${minutes}:${String(secs).padStart(
-    2,
-    "0"
-  )}`;
+  return (
+    `${minutes}:` +
+    `${String(remainingSeconds).padStart(2, "0")}`
+  );
 }
 
 // -----------------------------------------------------------------------------
