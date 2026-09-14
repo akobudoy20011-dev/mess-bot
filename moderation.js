@@ -28,12 +28,24 @@ const MAX_SINGLE_XP_AMOUNT = 100000;
 const WARN_LIMIT = 3;
 
 /*
+ * Repeated suspicious behavior.
+ *
+ * These are intentionally conservative.
+ * A single large/legitimate action should not automatically
+ * punish an administrator.
+ */
+
+const ADMIN_STRIKE_LOCK_MS = 30 * 60 * 1000;
+
+const OWNER_NOTIFY_STRIKE_THRESHOLD = 4;
+
+/*
 |--------------------------------------------------------------------------
 | MEMORY CACHE
 |--------------------------------------------------------------------------
 |
 | Database remains the persistent source of truth.
-| These caches are only used for short-term rate limiting.
+| These maps are only short-term rate-limit caches.
 |
 */
 
@@ -78,27 +90,41 @@ function cleanReason(reason) {
   return value.slice(0, 500);
 }
 
+/*
+|--------------------------------------------------------------------------
+| TARGET PARSING
+|--------------------------------------------------------------------------
+*/
+
 function parseTargetId(event, args) {
   /*
-   * Messenger mentions are not always exposed identically by every
-   * Facebook bot library, so we support:
+   * Try Messenger mentions first.
    *
+   * Supports:
+   * !warn @user reason
+   * !kick @user reason
+   * !ban @user reason
+   *
+   * Also supports direct IDs:
    * !warn 123456789 reason
-   * !warn @123456789 reason
-   * !warn <123456789> reason
-   *
-   * and attempt to use event.mentions when available.
    */
 
   const mentions = event?.mentions || {};
 
-  const mentionIds = Object.keys(mentions);
+  if (
+    mentions &&
+    typeof mentions === "object"
+  ) {
+    const mentionIds =
+      Object.keys(mentions);
 
-  if (mentionIds.length > 0) {
-    return mentionIds[0];
+    if (mentionIds.length > 0) {
+      return String(mentionIds[0]);
+    }
   }
 
-  const first = String(args[0] || "").trim();
+  const first =
+    String(args[0] || "").trim();
 
   if (!first) {
     return null;
@@ -115,22 +141,51 @@ function getReason(args, targetId) {
     return "No reason provided";
   }
 
-  let start = 1;
+  /*
+   * The first argument is normally the target.
+   * Remove it before joining the reason.
+   */
 
-  if (String(args[0]) === String(targetId)) {
-    start = 1;
+  let reasonArgs = args.slice(1);
+
+  /*
+   * If the target was obtained from event.mentions,
+   * args[0] may be "@username" instead of the actual ID.
+   * That still needs to be removed.
+   */
+
+  if (
+    reasonArgs.length === 0 &&
+    args.length > 0
+  ) {
+    return "No reason provided";
   }
 
-  return cleanReason(args.slice(start).join(" "));
+  return cleanReason(
+    reasonArgs.join(" ")
+  );
 }
 
-function rateLimit(map, key, maxActions, windowMs) {
+/*
+|--------------------------------------------------------------------------
+| RATE LIMIT
+|--------------------------------------------------------------------------
+*/
+
+function rateLimit(
+  map,
+  key,
+  maxActions,
+  windowMs
+) {
   const timestamp = now();
 
-  let entries = map.get(key) || [];
+  let entries =
+    map.get(key) || [];
 
   entries = entries.filter(
-    (time) => timestamp - time < windowMs
+    (time) =>
+      timestamp - time < windowMs
   );
 
   if (entries.length >= maxActions) {
@@ -139,14 +194,38 @@ function rateLimit(map, key, maxActions, windowMs) {
   }
 
   entries.push(timestamp);
+
   map.set(key, entries);
 
   return true;
 }
 
-async function send(api, threadID, message) {
+/*
+|--------------------------------------------------------------------------
+| SEND
+|--------------------------------------------------------------------------
+*/
+
+async function send(
+  api,
+  threadID,
+  message
+) {
   return new Promise((resolve) => {
-    api.sendMessage(message, threadID, () => resolve());
+    try {
+      api.sendMessage(
+        message,
+        threadID,
+        () => resolve()
+      );
+    } catch (error) {
+      console.error(
+        "[moderation] send error:",
+        error
+      );
+
+      resolve();
+    }
   });
 }
 
@@ -249,21 +328,78 @@ async function logAdminAbuse({
 
 /*
 |--------------------------------------------------------------------------
-| STRIKES
+| OWNER NOTIFICATION
 |--------------------------------------------------------------------------
 */
 
-async function getAdminRestriction(threadID, adminId) {
-  const result = await db.query(
-    `
-    SELECT *
-    FROM admin_restrictions
-    WHERE thread_id = $1
-      AND admin_id = $2
-    LIMIT 1
-    `,
-    [threadID, adminId]
+async function notifyOwner(
+  api,
+  threadID,
+  adminId,
+  strikes,
+  reason
+) {
+  /*
+   * Only notify the configured Bot Owner(s).
+   *
+   * We send the alert to the current group thread so the
+   * owner can see the warning if they are present there.
+   */
+
+  if (
+    !ADMIN_IDS.length ||
+    !api
+  ) {
+    return;
+  }
+
+  const message =
+    [
+      "🚨 ADMIN ABUSE ALERT",
+      "",
+      `👮 Admin: ${adminId}`,
+      `⚠️ Strikes: ${strikes}`,
+      `📌 Reason: ${cleanReason(reason)}`,
+      "",
+      "The moderation system has detected repeated suspicious administrator activity.",
+    ].join("\n");
+
+  /*
+   * Avoid repeatedly spamming the owner every single action.
+   * Only call this when the threshold is reached.
+   */
+
+  await send(
+    api,
+    threadID,
+    message
   );
+}
+
+/*
+|--------------------------------------------------------------------------
+| ADMIN RESTRICTIONS
+|--------------------------------------------------------------------------
+*/
+
+async function getAdminRestriction(
+  threadID,
+  adminId
+) {
+  const result =
+    await db.query(
+      `
+      SELECT *
+      FROM admin_restrictions
+      WHERE thread_id = $1
+        AND admin_id = $2
+      LIMIT 1
+      `,
+      [
+        threadID,
+        adminId,
+      ]
+    );
 
   return result.rows[0] || null;
 }
@@ -271,20 +407,27 @@ async function getAdminRestriction(threadID, adminId) {
 async function addAdminStrike(
   threadID,
   adminId,
-  type = "moderation"
+  type = "moderation",
+  api = null
 ) {
-  const current = await getAdminRestriction(
-    threadID,
-    adminId
-  );
+  const current =
+    await getAdminRestriction(
+      threadID,
+      adminId
+    );
 
-  const strikes = Number(current?.strikes || 0) + 1;
+  const strikes =
+    Number(current?.strikes || 0) + 1;
 
   let moderationLocked =
-    Boolean(current?.moderation_locked);
+    Boolean(
+      current?.moderation_locked
+    );
 
   let economyLocked =
-    Boolean(current?.economy_locked);
+    Boolean(
+      current?.economy_locked
+    );
 
   let lockedUntil =
     current?.locked_until || null;
@@ -292,19 +435,24 @@ async function addAdminStrike(
   /*
    * Strike escalation:
    *
-   * 1 = warning
-   * 2 = restriction
-   * 3 = temporary lock
-   * 4+ = owner should be notified
+   * 1 = logged warning
+   * 2 = economy restriction for economy abuse
+   * 3 = temporary moderation lock
+   * 4+ = owner alert
    */
 
-  if (strikes >= 2 && type === "economy") {
+  if (
+    strikes >= 2 &&
+    type === "economy"
+  ) {
     economyLocked = true;
   }
 
   if (strikes >= 3) {
     moderationLocked = true;
-    lockedUntil = now() + 30 * 60 * 1000;
+    lockedUntil =
+      now() +
+      ADMIN_STRIKE_LOCK_MS;
   }
 
   await db.query(
@@ -340,6 +488,24 @@ async function addAdminStrike(
     ]
   );
 
+  /*
+   * Notify the owner only after repeated abuse.
+   */
+
+  if (
+    strikes >=
+      OWNER_NOTIFY_STRIKE_THRESHOLD &&
+    api
+  ) {
+    await notifyOwner(
+      api,
+      threadID,
+      adminId,
+      strikes,
+      `Repeated ${type} abuse`
+    );
+  }
+
   return {
     strikes,
     moderationLocked,
@@ -359,18 +525,33 @@ async function checkAdminRestriction(
   adminId,
   type
 ) {
-  const restriction = await getAdminRestriction(
-    threadID,
-    adminId
-  );
+  /*
+   * Bot owner is never restricted by this system.
+   */
+
+  if (isBotOwner(adminId)) {
+    return false;
+  }
+
+  const restriction =
+    await getAdminRestriction(
+      threadID,
+      adminId
+    );
 
   if (!restriction) {
     return false;
   }
 
+  /*
+   * Temporary moderation lock expired.
+   */
+
   if (
     restriction.locked_until &&
-    Number(restriction.locked_until) < now()
+    Number(
+      restriction.locked_until
+    ) < now()
   ) {
     await db.query(
       `
@@ -382,10 +563,23 @@ async function checkAdminRestriction(
       WHERE thread_id = $1
         AND admin_id = $2
       `,
-      [threadID, adminId, now()]
+      [
+        threadID,
+        adminId,
+        now(),
+      ]
     );
 
-    return false;
+    /*
+     * Economy lock is intentionally preserved.
+     * A separate economy restriction may still apply.
+     */
+
+    if (
+      type === "moderation"
+    ) {
+      return false;
+    }
   }
 
   if (
@@ -407,22 +601,29 @@ async function checkAdminRestriction(
 
 /*
 |--------------------------------------------------------------------------
-| WARN
+| WARNINGS
 |--------------------------------------------------------------------------
 */
 
-async function getWarnings(threadID, userId) {
-  const result = await db.query(
-    `
-    SELECT *
-    FROM moderation_warnings
-    WHERE thread_id = $1
-      AND user_id = $2
-      AND active = TRUE
-    ORDER BY created_at DESC
-    `,
-    [threadID, userId]
-  );
+async function getWarnings(
+  threadID,
+  userId
+) {
+  const result =
+    await db.query(
+      `
+      SELECT *
+      FROM moderation_warnings
+      WHERE thread_id = $1
+        AND user_id = $2
+        AND active = TRUE
+      ORDER BY created_at DESC
+      `,
+      [
+        threadID,
+        userId,
+      ]
+    );
 
   return result.rows;
 }
@@ -455,7 +656,10 @@ async function addWarning(
     ]
   );
 
-  return getWarnings(threadID, targetId);
+  return getWarnings(
+    threadID,
+    targetId
+  );
 }
 
 /*
@@ -464,20 +668,52 @@ async function addWarning(
 |--------------------------------------------------------------------------
 */
 
-async function isLocallyBanned(threadID, userId) {
-  const result = await db.query(
-    `
-    SELECT *
-    FROM moderation_bans
-    WHERE thread_id = $1
-      AND user_id = $2
-      AND active = TRUE
-    LIMIT 1
-    `,
-    [threadID, userId]
-  );
+async function isLocallyBanned(
+  threadID,
+  userId
+) {
+  const result =
+    await db.query(
+      `
+      SELECT *
+      FROM moderation_bans
+      WHERE thread_id = $1
+        AND user_id = $2
+        AND active = TRUE
+      LIMIT 1
+      `,
+      [
+        threadID,
+        userId,
+      ]
+    );
 
-  return Boolean(result.rows[0]);
+  return Boolean(
+    result.rows[0]
+  );
+}
+
+async function getLocalBan(
+  threadID,
+  userId
+) {
+  const result =
+    await db.query(
+      `
+      SELECT *
+      FROM moderation_bans
+      WHERE thread_id = $1
+        AND user_id = $2
+        AND active = TRUE
+      LIMIT 1
+      `,
+      [
+        threadID,
+        userId,
+      ]
+    );
+
+  return result.rows[0] || null;
 }
 
 async function createBan(
@@ -527,7 +763,10 @@ async function removeBan(
     WHERE thread_id = $1
       AND user_id = $2
     `,
-    [threadID, targetId]
+    [
+      threadID,
+      targetId,
+    ]
   );
 }
 
@@ -543,39 +782,42 @@ async function removeFromGroup(
   targetId
 ) {
   if (
-    typeof api.removeUserFromGroup !== "function"
+    typeof api.removeUserFromGroup !==
+    "function"
   ) {
     return false;
   }
 
-  return new Promise((resolve) => {
-    try {
-      api.removeUserFromGroup(
-        targetId,
-        threadID,
-        (error) => {
-          if (error) {
-            console.error(
-              "[moderation] removeUserFromGroup:",
-              error
-            );
+  return new Promise(
+    (resolve) => {
+      try {
+        api.removeUserFromGroup(
+          targetId,
+          threadID,
+          (error) => {
+            if (error) {
+              console.error(
+                "[moderation] removeUserFromGroup:",
+                error
+              );
 
-            resolve(false);
-            return;
+              resolve(false);
+              return;
+            }
+
+            resolve(true);
           }
+        );
+      } catch (error) {
+        console.error(
+          "[moderation] Failed to remove user:",
+          error
+        );
 
-          resolve(true);
-        }
-      );
-    } catch (error) {
-      console.error(
-        "[moderation] Failed to remove user:",
-        error
-      );
-
-      resolve(false);
+        resolve(false);
+      }
     }
-  });
+  );
 }
 
 /*
@@ -589,7 +831,7 @@ function canModerateTarget(
   targetId
 ) {
   /*
-   * Bot owner cannot be punished.
+   * Bot Owner is untouchable.
    */
 
   if (isBotOwner(targetId)) {
@@ -601,16 +843,23 @@ function canModerateTarget(
   }
 
   const moderatorLevel =
-    getAdminLevel(moderatorId);
+    getAdminLevel(
+      moderatorId
+    );
 
   const targetLevel =
-    getAdminLevel(targetId);
+    getAdminLevel(
+      targetId
+    );
 
   /*
-   * Nobody can punish someone equal/higher in hierarchy.
+   * Nobody can punish an equal/higher authority.
    */
 
-  if (targetLevel >= moderatorLevel) {
+  if (
+    targetLevel >=
+    moderatorLevel
+  ) {
     return {
       allowed: false,
       reason:
@@ -626,16 +875,14 @@ function canModerateTarget(
 
 /*
 |--------------------------------------------------------------------------
-| MODERATION COMMANDS
+| MODERATION PRECHECK
 |--------------------------------------------------------------------------
 */
 
-async function handleWarn(
+async function validateModerator(
   api,
-  event,
   threadID,
-  moderatorId,
-  args
+  moderatorId
 ) {
   if (!isAdmin(moderatorId)) {
     await send(
@@ -644,7 +891,7 @@ async function handleWarn(
       "❌ You do not have permission to use moderation commands."
     );
 
-    return true;
+    return false;
   }
 
   if (
@@ -660,6 +907,32 @@ async function handleWarn(
       "🔒 Your moderation privileges are temporarily locked."
     );
 
+    return false;
+  }
+
+  return true;
+}
+
+/*
+|--------------------------------------------------------------------------
+| WARN
+|--------------------------------------------------------------------------
+*/
+
+async function handleWarn(
+  api,
+  event,
+  threadID,
+  moderatorId,
+  args
+) {
+  if (
+    !(await validateModerator(
+      api,
+      threadID,
+      moderatorId
+    ))
+  ) {
     return true;
   }
 
@@ -674,7 +947,8 @@ async function handleWarn(
     await logAdminAbuse({
       threadID,
       adminId: moderatorId,
-      abuseType: "moderation_rate_limit",
+      abuseType:
+        "moderation_rate_limit",
       command: "!warn",
       severity: "medium",
       blocked: true,
@@ -683,7 +957,8 @@ async function handleWarn(
     await addAdminStrike(
       threadID,
       moderatorId,
-      "moderation"
+      "moderation",
+      api
     );
 
     await send(
@@ -695,10 +970,11 @@ async function handleWarn(
     return true;
   }
 
-  const targetId = parseTargetId(
-    event,
-    args
-  );
+  const targetId =
+    parseTargetId(
+      event,
+      args
+    );
 
   if (!targetId) {
     await send(
@@ -721,7 +997,8 @@ async function handleWarn(
       threadID,
       adminId: moderatorId,
       targetId,
-      abuseType: "unauthorized_moderation",
+      abuseType:
+        "unauthorized_moderation",
       command: "!warn",
       severity: "high",
       blocked: true,
@@ -730,7 +1007,8 @@ async function handleWarn(
     await addAdminStrike(
       threadID,
       moderatorId,
-      "moderation"
+      "moderation",
+      api
     );
 
     await send(
@@ -743,14 +1021,18 @@ async function handleWarn(
   }
 
   const reason =
-    getReason(args, targetId);
+    getReason(
+      args,
+      targetId
+    );
 
-  const warnings = await addWarning(
-    threadID,
-    targetId,
-    moderatorId,
-    reason
-  );
+  const warnings =
+    await addWarning(
+      threadID,
+      targetId,
+      moderatorId,
+      reason
+    );
 
   await logModeration({
     threadID,
@@ -760,14 +1042,48 @@ async function handleWarn(
     reason,
   });
 
+  /*
+   * Automatic escalation at WARN_LIMIT.
+   *
+   * Three warnings do not automatically ban the user.
+   * They are recorded as an escalation event instead.
+   */
+
+  if (
+    warnings.length >=
+    WARN_LIMIT
+  ) {
+    await logModeration({
+      threadID,
+      moderatorId,
+      targetId,
+      action:
+        "warning_threshold_reached",
+      reason:
+        `${WARN_LIMIT} active warnings reached`,
+    });
+  }
+
   await send(
     api,
     threadID,
-    `⚠️ Warning issued.\n\n👤 User: ${targetId}\n📌 Reason: ${reason}\n⚠️ Active warnings: ${warnings.length}/${WARN_LIMIT}`
+    [
+      "⚠️ Warning issued.",
+      "",
+      `👤 User: ${targetId}`,
+      `📌 Reason: ${reason}`,
+      `⚠️ Active warnings: ${warnings.length}/${WARN_LIMIT}`,
+    ].join("\n")
   );
 
   return true;
 }
+
+/*
+|--------------------------------------------------------------------------
+| KICK
+|--------------------------------------------------------------------------
+*/
 
 async function handleKick(
   api,
@@ -776,29 +1092,13 @@ async function handleKick(
   moderatorId,
   args
 ) {
-  if (!isAdmin(moderatorId)) {
-    await send(
-      api,
-      threadID,
-      "❌ You do not have permission to use moderation commands."
-    );
-
-    return true;
-  }
-
   if (
-    await checkAdminRestriction(
-      threadID,
-      moderatorId,
-      "moderation"
-    )
-  ) {
-    await send(
+    !(await validateModerator(
       api,
       threadID,
-      "🔒 Your moderation privileges are temporarily locked."
-    );
-
+      moderatorId
+    ))
+  ) {
     return true;
   }
 
@@ -813,7 +1113,8 @@ async function handleKick(
     await logAdminAbuse({
       threadID,
       adminId: moderatorId,
-      abuseType: "moderation_rate_limit",
+      abuseType:
+        "moderation_rate_limit",
       command: "!kick",
       severity: "medium",
       blocked: true,
@@ -822,7 +1123,8 @@ async function handleKick(
     await addAdminStrike(
       threadID,
       moderatorId,
-      "moderation"
+      "moderation",
+      api
     );
 
     await send(
@@ -834,10 +1136,11 @@ async function handleKick(
     return true;
   }
 
-  const targetId = parseTargetId(
-    event,
-    args
-  );
+  const targetId =
+    parseTargetId(
+      event,
+      args
+    );
 
   if (!targetId) {
     await send(
@@ -860,7 +1163,8 @@ async function handleKick(
       threadID,
       adminId: moderatorId,
       targetId,
-      abuseType: "unauthorized_kick",
+      abuseType:
+        "unauthorized_kick",
       command: "!kick",
       severity: "high",
       blocked: true,
@@ -869,7 +1173,8 @@ async function handleKick(
     await addAdminStrike(
       threadID,
       moderatorId,
-      "moderation"
+      "moderation",
+      api
     );
 
     await send(
@@ -882,7 +1187,10 @@ async function handleKick(
   }
 
   const reason =
-    getReason(args, targetId);
+    getReason(
+      args,
+      targetId
+    );
 
   const removed =
     await removeFromGroup(
@@ -913,11 +1221,22 @@ async function handleKick(
   await send(
     api,
     threadID,
-    `👢 User removed.\n\n👤 User: ${targetId}\n📌 Reason: ${reason}`
+    [
+      "👢 User removed.",
+      "",
+      `👤 User: ${targetId}`,
+      `📌 Reason: ${reason}`,
+    ].join("\n")
   );
 
   return true;
 }
+
+/*
+|--------------------------------------------------------------------------
+| BAN
+|--------------------------------------------------------------------------
+*/
 
 async function handleBan(
   api,
@@ -926,36 +1245,55 @@ async function handleBan(
   moderatorId,
   args
 ) {
-  if (!isAdmin(moderatorId)) {
-    await send(
+  if (
+    !(await validateModerator(
       api,
       threadID,
-      "❌ You do not have permission to use moderation commands."
-    );
-
+      moderatorId
+    ))
+  ) {
     return true;
   }
 
   if (
-    await checkAdminRestriction(
-      threadID,
-      moderatorId,
-      "moderation"
+    !rateLimit(
+      moderationRate,
+      `${threadID}:${moderatorId}`,
+      MAX_MOD_ACTIONS_PER_WINDOW,
+      MOD_ACTION_WINDOW_MS
     )
   ) {
+    await logAdminAbuse({
+      threadID,
+      adminId: moderatorId,
+      abuseType:
+        "moderation_rate_limit",
+      command: "!ban",
+      severity: "high",
+      blocked: true,
+    });
+
+    await addAdminStrike(
+      threadID,
+      moderatorId,
+      "moderation",
+      api
+    );
+
     await send(
       api,
       threadID,
-      "🔒 Your moderation privileges are temporarily locked."
+      "⚠️ Too many moderation actions in a short period."
     );
 
     return true;
   }
 
-  const targetId = parseTargetId(
-    event,
-    args
-  );
+  const targetId =
+    parseTargetId(
+      event,
+      args
+    );
 
   if (!targetId) {
     await send(
@@ -978,7 +1316,8 @@ async function handleBan(
       threadID,
       adminId: moderatorId,
       targetId,
-      abuseType: "unauthorized_ban",
+      abuseType:
+        "unauthorized_ban",
       command: "!ban",
       severity: "high",
       blocked: true,
@@ -987,7 +1326,8 @@ async function handleBan(
     await addAdminStrike(
       threadID,
       moderatorId,
-      "moderation"
+      "moderation",
+      api
     );
 
     await send(
@@ -1000,7 +1340,16 @@ async function handleBan(
   }
 
   const reason =
-    getReason(args, targetId);
+    getReason(
+      args,
+      targetId
+    );
+
+  /*
+   * Persist local ban FIRST.
+   * This means even if Facebook removal fails,
+   * the bot still recognizes the local ban.
+   */
 
   await createBan(
     threadID,
@@ -1028,11 +1377,27 @@ async function handleBan(
   await send(
     api,
     threadID,
-    `🔨 User banned from the bot's local moderation system.\n\n👤 User: ${targetId}\n📌 Reason: ${reason}\n👢 Removed: ${removed ? "Yes" : "No"}`
+    [
+      "🔨 User banned from the bot's local moderation system.",
+      "",
+      `👤 User: ${targetId}`,
+      `📌 Reason: ${reason}`,
+      `👢 Removed from group: ${removed ? "Yes" : "No"}`,
+      "",
+      removed
+        ? "The user was removed and locally banned."
+        : "The Facebook group removal failed, but the local ban remains active.",
+    ].join("\n")
   );
 
   return true;
 }
+
+/*
+|--------------------------------------------------------------------------
+| UNBAN
+|--------------------------------------------------------------------------
+*/
 
 async function handleUnban(
   api,
@@ -1040,7 +1405,9 @@ async function handleUnban(
   moderatorId,
   args
 ) {
-  if (!isAdmin(moderatorId)) {
+  if (
+    !isAdmin(moderatorId)
+  ) {
     await send(
       api,
       threadID,
@@ -1049,6 +1416,11 @@ async function handleUnban(
 
     return true;
   }
+
+  /*
+   * Only the Bot Owner can unban another administrator.
+   * Trusted admins can unban normal members.
+   */
 
   const targetId =
     String(args[0] || "")
@@ -1066,6 +1438,43 @@ async function handleUnban(
     return true;
   }
 
+  if (
+    isAdmin(targetId) &&
+    !isBotOwner(moderatorId)
+  ) {
+    await logAdminAbuse({
+      threadID,
+      adminId: moderatorId,
+      targetId,
+      abuseType:
+        "unauthorized_admin_unban",
+      command: "!unban",
+      severity: "high",
+      blocked: true,
+    });
+
+    await addAdminStrike(
+      threadID,
+      moderatorId,
+      "moderation",
+      api
+    );
+
+    await send(
+      api,
+      threadID,
+      "🛡️ Only the Bot Owner can change the local ban status of an administrator."
+    );
+
+    return true;
+  }
+
+  const existing =
+    await getLocalBan(
+      threadID,
+      targetId
+    );
+
   await removeBan(
     threadID,
     targetId
@@ -1076,13 +1485,17 @@ async function handleUnban(
     moderatorId,
     targetId,
     action: "unban",
-    reason: "Manual unban",
+    reason: existing
+      ? "Manual unban"
+      : "Unban requested; no active ban found",
   });
 
   await send(
     api,
     threadID,
-    `✅ Local ban removed for ${targetId}.`
+    existing
+      ? `✅ Local ban removed for ${targetId}.`
+      : `ℹ️ No active local ban was found for ${targetId}.`
   );
 
   return true;
@@ -1099,7 +1512,9 @@ async function handleModlog(
   threadID,
   moderatorId
 ) {
-  if (!isAdmin(moderatorId)) {
+  if (
+    !isAdmin(moderatorId)
+  ) {
     await send(
       api,
       threadID,
@@ -1109,24 +1524,27 @@ async function handleModlog(
     return true;
   }
 
-  const result = await db.query(
-    `
-    SELECT
-      moderator_id,
-      target_id,
-      action,
-      reason,
-      success,
-      created_at
-    FROM moderation_logs
-    WHERE thread_id = $1
-    ORDER BY created_at DESC
-    LIMIT 15
-    `,
-    [threadID]
-  );
+  const result =
+    await db.query(
+      `
+      SELECT
+        moderator_id,
+        target_id,
+        action,
+        reason,
+        success,
+        created_at
+      FROM moderation_logs
+      WHERE thread_id = $1
+      ORDER BY created_at DESC
+      LIMIT 15
+      `,
+      [threadID]
+    );
 
-  if (!result.rows.length) {
+  if (
+    !result.rows.length
+  ) {
     await send(
       api,
       threadID,
@@ -1136,27 +1554,149 @@ async function handleModlog(
     return true;
   }
 
-  const lines = result.rows.map(
-    (row, index) => {
-      const date = new Date(
-        Number(row.created_at)
-      ).toLocaleString();
+  const lines =
+    result.rows.map(
+      (row, index) => {
+        const date =
+          new Date(
+            Number(
+              row.created_at
+            )
+          ).toLocaleString();
 
-      return (
-        `${index + 1}. ${row.action.toUpperCase()}\n` +
-        `👮 ${row.moderator_id}\n` +
-        `👤 ${row.target_id || "—"}\n` +
-        `📌 ${row.reason || "—"}\n` +
-        `✅ ${row.success ? "Success" : "Failed"}\n` +
-        `🕒 ${date}`
-      );
-    }
-  );
+        return (
+          `${index + 1}. ${String(
+            row.action
+          ).toUpperCase()}\n` +
+          `👮 ${row.moderator_id}\n` +
+          `👤 ${row.target_id || "—"}\n` +
+          `📌 ${row.reason || "—"}\n` +
+          `✅ ${
+            row.success
+              ? "Success"
+              : "Failed"
+          }\n` +
+          `🕒 ${date}`
+        );
+      }
+    );
 
   await send(
     api,
     threadID,
-    `📋 MODERATION LOG\n\n${lines.join("\n\n")}`
+    `📋 MODERATION LOG\n\n${lines.join(
+      "\n\n"
+    )}`
+  );
+
+  return true;
+}
+
+/*
+|--------------------------------------------------------------------------
+| ADMIN ABUSE LOG
+|--------------------------------------------------------------------------
+*/
+
+async function handleAdminLog(
+  api,
+  threadID,
+  moderatorId
+) {
+  /*
+   * Only Bot Owner can inspect administrator abuse logs.
+   */
+
+  if (
+    !isBotOwner(moderatorId)
+  ) {
+    await send(
+      api,
+      threadID,
+      "❌ Only the Bot Owner can view the administrator abuse log."
+    );
+
+    return true;
+  }
+
+  const result =
+    await db.query(
+      `
+      SELECT
+        admin_id,
+        target_id,
+        abuse_type,
+        command,
+        amount,
+        reason,
+        severity,
+        blocked,
+        created_at
+      FROM admin_abuse_logs
+      WHERE thread_id = $1
+      ORDER BY created_at DESC
+      LIMIT 20
+      `,
+      [threadID]
+    );
+
+  if (
+    !result.rows.length
+  ) {
+    await send(
+      api,
+      threadID,
+      "📋 No administrator abuse events have been logged."
+    );
+
+    return true;
+  }
+
+  const lines =
+    result.rows.map(
+      (row, index) => {
+        const date =
+          new Date(
+            Number(
+              row.created_at
+            )
+          ).toLocaleString();
+
+        return [
+          `${index + 1}. ${String(
+            row.abuse_type
+          ).toUpperCase()}`,
+          `👮 Admin: ${row.admin_id}`,
+          `🎯 Target: ${
+            row.target_id || "—"
+          }`,
+          `⌨️ Command: ${
+            row.command || "—"
+          }`,
+          `💰 Amount: ${
+            row.amount == null
+              ? "—"
+              : Number(
+                  row.amount
+                ).toLocaleString()
+          }`,
+          `⚠️ Severity: ${row.severity}`,
+          `🚫 Blocked: ${
+            row.blocked
+              ? "Yes"
+              : "No"
+          }`,
+          `🕒 ${date}`,
+        ].join("\n");
+      }
+    );
+
+  await send(
+    api,
+    threadID,
+    `🚨 ADMIN ABUSE LOG\n\n${lines.join(
+      "\n\n"
+    )}`
   );
 
   return true;
@@ -1169,41 +1709,59 @@ async function handleModlog(
 */
 
 function parseAmount(value) {
-  const clean = String(value || "")
-    .replace(/,/g, "")
-    .trim();
+  const clean =
+    String(value || "")
+      .replace(/,/g, "")
+      .trim();
 
-  if (!/^\d+$/.test(clean)) {
+  if (
+    !/^\d+$/.test(clean)
+  ) {
     return null;
   }
 
-  const amount = Number(clean);
+  const amount =
+    Number(clean);
 
-  if (!Number.isSafeInteger(amount)) {
+  if (
+    !Number.isSafeInteger(
+      amount
+    )
+  ) {
     return null;
   }
 
   return amount;
 }
 
-const ECONOMY_COMMANDS = new Set([
-  "addmoney",
-  "removemoney",
-  "setmoney",
-  "addbank",
-  "removebank",
-  "setbank",
-  "addxp",
-  "removexp",
-  "setxp",
-]);
+const ECONOMY_COMMANDS =
+  new Set([
+    "addmoney",
+    "removemoney",
+    "setmoney",
+    "addbank",
+    "removebank",
+    "setbank",
+    "addxp",
+    "removexp",
+    "setxp",
+  ]);
+
+/*
+|--------------------------------------------------------------------------
+| ECONOMY COMMAND INSPECTION
+|--------------------------------------------------------------------------
+*/
 
 async function inspectEconomyCommand(
   threadID,
   adminId,
-  originalText
+  originalText,
+  api = null
 ) {
-  if (!isAdmin(adminId)) {
+  if (
+    !isAdmin(adminId)
+  ) {
     return {
       handled: false,
       blocked: false,
@@ -1211,33 +1769,47 @@ async function inspectEconomyCommand(
   }
 
   const parts =
-    String(originalText || "")
+    String(
+      originalText || ""
+    )
       .trim()
       .split(/\s+/);
 
   const command =
-    String(parts[0] || "")
+    String(
+      parts[0] || ""
+    )
       .replace(/^!/, "")
       .toLowerCase();
 
-  if (!ECONOMY_COMMANDS.has(command)) {
+  if (
+    !ECONOMY_COMMANDS.has(
+      command
+    )
+  ) {
     return {
       handled: false,
       blocked: false,
     };
   }
 
+  /*
+   * Bot Owner bypasses administrator economy locks.
+   */
+
   if (
-    await checkAdminRestriction(
+    !isBotOwner(adminId) &&
+    (await checkAdminRestriction(
       threadID,
       adminId,
       "economy"
-    )
+    ))
   ) {
     await logAdminAbuse({
       threadID,
       adminId,
-      abuseType: "economy_locked",
+      abuseType:
+        "economy_locked",
       command: `!${command}`,
       severity: "high",
       blocked: true,
@@ -1254,6 +1826,11 @@ async function inspectEconomyCommand(
   const amount =
     parseAmount(parts[1]);
 
+  /*
+   * Let economy.js handle malformed commands
+   * so its normal usage/error response remains intact.
+   */
+
   if (amount === null) {
     return {
       handled: false,
@@ -1261,7 +1838,12 @@ async function inspectEconomyCommand(
     };
   }
 
+  /*
+   * Rate limit.
+   */
+
   if (
+    !isBotOwner(adminId) &&
     !rateLimit(
       economyRate,
       `${threadID}:${adminId}`,
@@ -1272,71 +1854,106 @@ async function inspectEconomyCommand(
     await logAdminAbuse({
       threadID,
       adminId,
-      abuseType: "economy_rate_limit",
+      abuseType:
+        "economy_rate_limit",
       command: `!${command}`,
       amount,
       severity: "high",
       blocked: true,
     });
 
-    await addAdminStrike(
-      threadID,
-      adminId,
-      "economy"
-    );
+    const restriction =
+      await addAdminStrike(
+        threadID,
+        adminId,
+        "economy",
+        api
+      );
 
     return {
       handled: true,
       blocked: true,
       message:
-        "⚠️ Too many economy-admin actions in a short period. Economy privileges have been temporarily restricted.",
+        restriction.economyLocked
+          ? "🚨 Economy action blocked.\n\nYour economy privileges have been temporarily restricted because of repeated administrator economy activity."
+          : "⚠️ Too many economy-admin actions in a short period.",
     };
   }
 
   const isXp =
     command.includes("xp");
 
-  const maxAmount = isXp
-    ? MAX_SINGLE_XP_AMOUNT
-    : MAX_SINGLE_MONEY_AMOUNT;
+  const maxAmount =
+    isXp
+      ? MAX_SINGLE_XP_AMOUNT
+      : MAX_SINGLE_MONEY_AMOUNT;
 
-  if (amount > maxAmount) {
+  /*
+   * Excessive single transaction.
+   */
+
+  if (
+    !isBotOwner(adminId) &&
+    amount > maxAmount
+  ) {
     await logAdminAbuse({
       threadID,
       adminId,
-      abuseType: "excessive_economy_amount",
+      abuseType:
+        "excessive_economy_amount",
       command: `!${command}`,
       amount,
       severity: "high",
       blocked: true,
     });
 
-    await addAdminStrike(
-      threadID,
-      adminId,
-      "economy"
-    );
+    const restriction =
+      await addAdminStrike(
+        threadID,
+        adminId,
+        "economy",
+        api
+      );
 
     return {
       handled: true,
       blocked: true,
       message:
-        `🚨 Economy action blocked.\n\nMaximum allowed amount for this command is ${maxAmount.toLocaleString()}.`,
+        `🚨 Economy action blocked.\n\nMaximum allowed amount for this command is ${maxAmount.toLocaleString()}.\n\n⚠️ Administrator abuse strike: ${restriction.strikes}`,
     };
   }
 
   /*
-   * Normal admin economy commands are allowed.
-   * They are still recorded so the owner has an audit trail.
+   * Extra protection:
+   *
+   * setmoney / setbank can instantly replace an existing
+   * balance, so record them as higher-risk than add/remove.
+   */
+
+  let severity =
+    "low";
+
+  if (
+    command === "setmoney" ||
+    command === "setbank" ||
+    command === "setxp"
+  ) {
+    severity = "medium";
+  }
+
+  /*
+   * Normal admin economy commands remain allowed.
+   * They are audited but NOT blocked.
    */
 
   await logAdminAbuse({
     threadID,
     adminId,
-    abuseType: "economy_admin_action",
+    abuseType:
+      "economy_admin_action",
     command: `!${command}`,
     amount,
-    severity: "low",
+    severity,
     blocked: false,
   });
 
@@ -1344,6 +1961,58 @@ async function inspectEconomyCommand(
     handled: false,
     blocked: false,
   };
+}
+
+/*
+|--------------------------------------------------------------------------
+| LOCAL BAN ENFORCEMENT
+|--------------------------------------------------------------------------
+*/
+
+async function enforceLocalBan(
+  api,
+  event,
+  threadID,
+  senderId
+) {
+  /*
+   * Never block the Bot Owner.
+   */
+
+  if (
+    isBotOwner(senderId)
+  ) {
+    return false;
+  }
+
+  const ban =
+    await getLocalBan(
+      threadID,
+      senderId
+    );
+
+  if (!ban) {
+    return false;
+  }
+
+  /*
+   * Do NOT repeatedly send a message for every command.
+   * Simply consume the message.
+   */
+
+  await logModeration({
+    threadID,
+    moderatorId:
+      ban.moderator_id,
+    targetId: senderId,
+    action:
+      "blocked_local_ban_attempt",
+    reason:
+      ban.reason,
+    success: true,
+  });
+
+  return true;
 }
 
 /*
@@ -1359,33 +2028,68 @@ async function handleModerationMessage(
   originalText
 ) {
   const threadID =
-    event.threadID;
+    String(
+      event?.threadID || ""
+    );
 
   const senderId =
-    event.senderID;
+    String(
+      event?.senderID || ""
+    );
 
   const clean =
-    String(originalText || text || "")
-      .trim();
+    String(
+      originalText ||
+        text ||
+        ""
+    ).trim();
 
-  if (!clean) {
+  if (
+    !threadID ||
+    !senderId ||
+    !clean
+  ) {
     return false;
+  }
+
+  /*
+   * ================================================================
+   * LOCAL BAN CHECK
+   * ================================================================
+   *
+   * This is now performed for EVERY incoming message.
+   *
+   * Because moderation.js runs before RPG/games/economy/AI
+   * in index.js, a locally banned user cannot simply use
+   * another bot command to bypass the local ban.
+   */
+
+  if (
+    await enforceLocalBan(
+      api,
+      event,
+      threadID,
+      senderId
+    )
+  ) {
+    return true;
   }
 
   const parts =
     clean.split(/\s+/);
 
   const command =
-    parts[0]
-      .toLowerCase();
+    String(
+      parts[0] || ""
+    ).toLowerCase();
 
   const args =
     parts.slice(1);
 
   /*
-   * Economy protection is checked here,
-   * but normal economy commands are still
-   * handled by economy.js.
+   * ================================================================
+   * ECONOMY PROTECTION
+   * ================================================================
    */
 
   if (
@@ -1397,10 +2101,13 @@ async function handleModerationMessage(
       await inspectEconomyCommand(
         threadID,
         senderId,
-        clean
+        clean,
+        api
       );
 
-    if (result.blocked) {
+    if (
+      result.blocked
+    ) {
       await send(
         api,
         threadID,
@@ -1411,10 +2118,16 @@ async function handleModerationMessage(
     }
 
     /*
-     * Not blocked.
-     * Let economy.js handle it.
+     * Normal economy commands continue
+     * to economy.js.
      */
   }
+
+  /*
+   * ================================================================
+   * MODERATION COMMANDS
+   * ================================================================
+   */
 
   switch (command) {
     case "!warn":
@@ -1454,6 +2167,13 @@ async function handleModerationMessage(
 
     case "!modlog":
       return handleModlog(
+        api,
+        threadID,
+        senderId
+      );
+
+    case "!adminlog":
+      return handleAdminLog(
         api,
         threadID,
         senderId
