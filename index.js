@@ -626,7 +626,7 @@ async function handleMessage(api, event) {
         .split(/\s+/)
         .filter(Boolean);
 
-      if (await handleRpgCommand(api, event, rpgArgs)) {
+      if (await handleRpgCommand(api, event, text, originalText)) {
         return;
       }
     }
