@@ -167,6 +167,136 @@ async function connect() {
   `);
 
   // ─────────────────────────────────────────────────────────
+  // MODERATION SYSTEM
+  //
+  // Persistent warnings, strikes, bans, admin-abuse detection,
+  // and economy-abuse logging.
+  // ─────────────────────────────────────────────────────────
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS moderation_warnings (
+      id            BIGSERIAL PRIMARY KEY,
+
+      thread_id     TEXT NOT NULL,
+      user_id       TEXT NOT NULL,
+
+      moderator_id  TEXT NOT NULL,
+
+      reason        TEXT NOT NULL,
+
+      active        BOOLEAN NOT NULL DEFAULT TRUE,
+
+      created_at    BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS moderation_bans (
+      thread_id     TEXT NOT NULL,
+      user_id       TEXT NOT NULL,
+
+      moderator_id  TEXT NOT NULL,
+
+      reason        TEXT NOT NULL,
+
+      active        BOOLEAN NOT NULL DEFAULT TRUE,
+
+      created_at    BIGINT NOT NULL,
+
+      PRIMARY KEY (thread_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS moderation_strikes (
+      thread_id     TEXT NOT NULL,
+      user_id       TEXT NOT NULL,
+
+      strikes       INTEGER NOT NULL DEFAULT 0,
+
+      updated_at    BIGINT NOT NULL,
+
+      PRIMARY KEY (thread_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS moderation_logs (
+      id            BIGSERIAL PRIMARY KEY,
+
+      thread_id     TEXT NOT NULL,
+
+      moderator_id  TEXT NOT NULL,
+
+      target_id     TEXT,
+
+      action        TEXT NOT NULL,
+
+      reason        TEXT,
+
+      success       BOOLEAN NOT NULL DEFAULT TRUE,
+
+      created_at    BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS admin_abuse_logs (
+      id            BIGSERIAL PRIMARY KEY,
+
+      thread_id     TEXT NOT NULL,
+
+      admin_id      TEXT NOT NULL,
+
+      target_id     TEXT,
+
+      abuse_type    TEXT NOT NULL,
+
+      command       TEXT,
+
+      amount        BIGINT,
+
+      reason        TEXT,
+
+      severity      TEXT NOT NULL DEFAULT 'low',
+
+      blocked       BOOLEAN NOT NULL DEFAULT FALSE,
+
+      created_at    BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS admin_restrictions (
+      thread_id     TEXT NOT NULL,
+      admin_id      TEXT NOT NULL,
+
+      moderation_locked BOOLEAN NOT NULL DEFAULT FALSE,
+
+      economy_locked    BOOLEAN NOT NULL DEFAULT FALSE,
+
+      strikes           INTEGER NOT NULL DEFAULT 0,
+
+      locked_until      BIGINT,
+
+      updated_at        BIGINT NOT NULL,
+
+      PRIMARY KEY (thread_id, admin_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS moderation_warnings_lookup_idx
+      ON moderation_warnings (
+        thread_id,
+        user_id,
+        active,
+        created_at DESC
+      );
+
+    CREATE INDEX IF NOT EXISTS moderation_logs_thread_idx
+      ON moderation_logs (
+        thread_id,
+        created_at DESC
+      );
+
+    CREATE INDEX IF NOT EXISTS admin_abuse_logs_lookup_idx
+      ON admin_abuse_logs (
+        thread_id,
+        admin_id,
+        created_at DESC
+      );
+  `);
+  
+  // ─────────────────────────────────────────────────────────
   // INVENTORY
   // ─────────────────────────────────────────────────────────
 
