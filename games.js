@@ -1407,100 +1407,78 @@ async function handleCoinFlip(
   event,
   args
 ) {
-  const threadID =
-    String(event.threadID);
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
 
-  const userID =
-    String(event.senderID);
-
-  if (
-    !lockGame(
-      threadID,
-      userID
-    )
-  ) {
-    await safeReply(
-      api,
-      event,
-      "⏳ You already have a game in progress."
-    );
-
+  if (!lockGame(threadID, userID)) {
+    await safeReply(api, event, "⏳ You already have a game in progress.");
     return;
   }
 
+  let betCharged = false;
+  let settled = false;
+
   try {
-    const choice =
-      String(
-        args?.[0] || ""
-      ).toLowerCase();
+    const first = String(args?.[0] || "").trim().toLowerCase();
+    const second = String(args?.[1] || "").trim().toLowerCase();
+    const choice = ["heads", "tails"].includes(first) ? first : second;
+    const betText = ["heads", "tails"].includes(first) ? second : first;
+    const bet = Number(betText.replace(/,/g, ""));
 
-    if (
-      ![
-        "heads",
-        "tails",
-      ].includes(choice)
-    ) {
-      unlockGame(
-        threadID,
-        userID
-      );
-
-      await safeReply(
-        api,
-        event,
-        "❌ Choose heads or tails."
-      );
-
+    if (!Number.isInteger(bet) || bet < 1 || bet > 1_000_000 || !["heads", "tails"].includes(choice)) {
+      unlockGame(threadID, userID);
+      await safeReply(api, event, "❌ Usage: !coinflip <bet> <heads|tails>");
       return;
     }
 
-    const animator =
-      await createAnimator(
-        api,
-        threadID,
-        [
-          gameHeader(
-            "coinflip",
-            playerLine(event)
-          ),
-          "",
-          divider(),
-          "",
-          `🪙 Your call: ${choice.toUpperCase()}`,
-          "",
-          "       ◉",
-          "",
-          "       FLIPPING...",
-        ].join("\n"),
-        "coinflip"
-      );
-
-    await sleep(
-      editDelay()
+    const animator = await createAnimator(
+      api,
+      threadID,
+      [
+        gameHeader("coinflip", playerLine(event)),
+        "",
+        divider(),
+        "",
+        `🪙 Your call: ${choice.toUpperCase()}`,
+        `💰 Bet: ${formatNumber(bet)} coins`,
+        "",
+        "       ◉",
+        "",
+        "       FLIPPING...",
+      ].join("\n"),
+      "coinflip"
     );
 
-    const result =
-      randInt(0, 1) === 0
-        ? "heads"
-        : "tails";
-
-    const isCorrect =
-      choice === result;
-
-    const reward =
-      await awardPlayer(
+    try {
+      await db.spendBalance(threadID, userID, bet, `Coinflip bet: ${bet}`);
+      betCharged = true;
+    } catch (error) {
+      await updateGameMessage(
+        api,
         threadID,
-        userID,
-        "coinflip",
-        isCorrect
+        animator.messageID,
+        [
+          gameHeader("coinflip"),
+          "",
+          "❌ Coinflip cancelled.",
+          error.message || "Not enough wallet coins.",
+        ].join("\n")
       );
+      return;
+    }
 
-    const balanceText =
-      await getFinalBalanceText(
-        threadID,
-        userID
-      );
+    await sleep(editDelay());
 
+    const result = randInt(0, 1) === 0 ? "heads" : "tails";
+    const won = choice === result;
+    const payout = won ? bet * 2 : 0;
+
+    if (won) {
+      await db.addBalance(threadID, userID, payout);
+    }
+    settled = true;
+
+    const balanceText = await getFinalBalanceText(threadID, userID);
     const finalText = [
       gameHeader("coinflip"),
       "",
@@ -1508,43 +1486,33 @@ async function handleCoinFlip(
       "",
       `Your call  •  ${choice.toUpperCase()}`,
       `Result     •  ${result.toUpperCase()}`,
+      `Bet        •  ${formatNumber(bet)} coins`,
       "",
-      isCorrect
-        ? "🏆 You called it."
-        : "❌ The coin disagreed.",
+      won
+        ? `🏆 You win ${formatNumber(payout)} coins (2× payout).`
+        : `❌ You lose ${formatNumber(bet)} coins.`,
       "",
-      rewardLine(
-        reward,
-        balanceText,
-        isCorrect
-      ),
+      balanceText,
     ].join("\n");
 
-    await updateGameMessage(
-      api,
-      threadID,
-      animator.messageID,
-      finalText
-    );
+    await updateGameMessage(api, threadID, animator.messageID, finalText);
   } catch (error) {
-    console.error(
-      "[games] coinflip:",
-      error
-    );
+    console.error("[games] coinflip:", error);
 
-    await safeReply(
-      api,
-      event,
-      "❌ Coin flip failed."
-    );
+    if (betCharged && !settled) {
+      const betText = [String(args?.[0] || ""), String(args?.[1] || "")]
+        .find((value) => /\d/.test(value));
+      const bet = Number(String(betText || "").replace(/,/g, ""));
+      if (Number.isInteger(bet) && bet > 0) {
+        await db.addBalance(threadID, userID, bet).catch(() => {});
+      }
+    }
+
+    await safeReply(api, event, "❌ Coinflip failed.");
+  } finally {
+    unlockGame(threadID, userID);
   }
-
-  unlockGame(
-    threadID,
-    userID
-  );
 }
-
 // ============================================================
 // BLACKJACK
 // ============================================================
