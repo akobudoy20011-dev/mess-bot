@@ -20,8 +20,8 @@ function riddleText(raw) {
     .normalize('NFKC')
     .trim()
     .toLowerCase()
-    .replace(/[^\\p{L}\\p{N}]+/gu, ' ')
-    .replace(/\\s+/g, ' ');
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ');
 }
 
 function makeRiddleId(raw) {
