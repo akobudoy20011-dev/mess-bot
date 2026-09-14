@@ -634,7 +634,6 @@ async function handleMessage(api, event) {
   } catch (error) {
     console.error("RPG character handler failed:", error);
   }
-}
 
   // -------------------------------------------------------------------------
   // ACTIVE GAME RESPONSES
