@@ -390,6 +390,86 @@ async function handleMessage(api, event) {
   const text = originalText.toLowerCase();
   const senderId = String(senderID || "").trim();
 
+    // -------------------------------------------------------------------------
+  // GLOBAL BOT SHUTDOWN / STARTUP — ADMIN ONLY
+  // -------------------------------------------------------------------------
+
+  if (
+    /^!(shutdown|startup)$/i.test(originalText)
+  ) {
+    if (!ADMIN_IDS.includes(senderId)) {
+      sendReplyWithTyping(
+        api,
+        "❌ Admin only.",
+        threadID
+      );
+      return;
+    }
+
+    const controlCommand =
+      originalText.slice(1).toLowerCase();
+
+    // -------------------------------------------------------
+    // SHUTDOWN
+    // -------------------------------------------------------
+
+    if (controlCommand === "shutdown") {
+      global.botDisabled = true;
+
+      sendReplyWithTyping(
+        api,
+        [
+          "🔴 BOT SHUTDOWN",
+          "",
+          "The bot has been disabled globally.",
+          "All commands and automatic responses",
+          "are now suspended.",
+          "",
+          "Use !startup to enable the bot again.",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    // -------------------------------------------------------
+    // STARTUP
+    // -------------------------------------------------------
+
+    if (controlCommand === "startup") {
+      global.botDisabled = false;
+
+      sendReplyWithTyping(
+        api,
+        [
+          "🟢 BOT STARTED",
+          "",
+          "The bot has been enabled globally.",
+          "All commands and automatic responses",
+          "are active again.",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // GLOBAL BOT DISABLED GATE
+  // -------------------------------------------------------------------------
+  //
+  // When the bot is shut down, EVERYTHING below this point
+  // is ignored.
+  //
+  // !shutdown and !startup are handled above this gate so
+  // the admin can always control the bot.
+  // -------------------------------------------------------------------------
+
+  if (global.botDisabled === true) {
+    return;
+  }
 
   // -------------------------------------------------------------------------
   // SIMPLE DIRECT COMMANDS
@@ -716,112 +796,6 @@ async function handleMessage(api, event) {
 
       return;
     }
-  }
-  
-  // -------------------------------------------------------------------------
-// GLOBAL BOT ON / OFF — ADMIN ONLY
-// -------------------------------------------------------------------------
-
-if (/^!bot(?:\s+(on|off))?$/i.test(originalText)) {
-  if (!ADMIN_IDS.includes(senderId)) {
-    sendReplyWithTyping(api, "❌ Admin only.", threadID);
-    return;
-  }
-
-  const botMatch = originalText.match(
-    /^!bot(?:\s+(on|off))?$/i
-  );
-
-  // !bot
-  if (!botMatch || !botMatch[1]) {
-    sendReplyWithTyping(
-      api,
-      [
-        "🤖 BOT CONTROL",
-        "",
-        "!bot on — Enable the bot",
-        "!bot off — Disable the bot",
-      ].join("\n"),
-      threadID
-    );
-    return;
-  }
-
-  const botState = botMatch[1].toLowerCase();
-
-  if (botState === "off") {
-    global.botDisabled = true;
-
-    sendReplyWithTyping(
-      api,
-      [
-        "🔴 BOT OFFLINE",
-        "",
-        "The bot has been disabled globally.",
-        "No commands will be processed.",
-        "",
-        "Use !bot on to enable it again.",
-      ].join("\n"),
-      threadID
-    );
-
-    return;
-  }
-
-  if (botState === "on") {
-    global.botDisabled = false;
-
-    sendReplyWithTyping(
-      api,
-      [
-        "🟢 BOT ONLINE",
-        "",
-        "The bot has been enabled globally.",
-      ].join("\n"),
-      threadID
-    );
-
-    return;
-  }
-}
-
-  // -------------------------------------------------------------------------
-  // ACTIVE GAME RESPONSES
-  // -------------------------------------------------------------------------
-
-  try {
-    if (
-      await handleGameResponse(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error("Game response failed:", error);
-    sendReplyWithTyping(api, `❌ Game Error: ${error.message}`, threadID);
-    return;
-  }
-
-  // -------------------------------------------------------------------------
-  // RPG COMMANDS
-  // -------------------------------------------------------------------------
-
-  if (/^!rpg(?:\s|$)/i.test(originalText)) {
-    try {
-      await handleRpgCommand(api, event, text, originalText);
-    } catch (error) {
-      console.error("RPG command failed:", error);
-      sendReplyWithTyping(
-        api,
-        "❌ The RPG command could not be completed right now.",
-        threadID
-      );
-    }
-    return;
   }
 
   // -------------------------------------------------------------------------
