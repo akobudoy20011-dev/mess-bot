@@ -23,6 +23,8 @@ const {
   renderCombat,
 } = require("./combat");
 
+const { explore } = require("./exploration");
+
 const {
   getArmy,
   getRegiments,
@@ -1730,6 +1732,125 @@ async function handleCombat(
 
 
 /* =========================================================
+   EXPLORE
+
+   New: wraps rpg/exploration.js. Reuses combat.js's existing
+   hunt system for encounter outcomes rather than duplicating
+   combat logic. Dorian's flavor line is deterministic
+   (picked in exploration.js) — no AI call per explore.
+========================================================= */
+
+async function handleExplore(api, event) {
+  const threadID = event.threadID;
+  const userID = event.senderID;
+
+  await ensurePlayer(threadID, userID);
+
+  let result;
+
+  try {
+    result = await explore(threadID, userID);
+  } catch (error) {
+    const lines = [
+      error.message ||
+        "You couldn't explore right now.",
+    ];
+
+    if (error.dorianLine) {
+      lines.push("", "🧑‍🏫 Dorian: " + error.dorianLine);
+    }
+
+    await send(
+      api,
+      threadID,
+      errorBox(lines.join("\n"))
+    );
+
+    return;
+  }
+
+  if (
+    result.outcomeType === "encounter" ||
+    result.outcomeType === "elite_encounter"
+  ) {
+    const state =
+      await getUserState(threadID, userID);
+
+    const heading =
+      result.outcomeType === "elite_encounter"
+        ? "👹 AN ELITE MONSTER APPEARED!"
+        : "🌲 YOU ENCOUNTERED SOMETHING!";
+
+    await send(
+      api,
+      threadID,
+      renderCombat(
+        result.hunt.session,
+        state.player,
+        [
+          heading,
+          "",
+          "🧑‍🏫 Dorian: " + result.dorianLine,
+        ]
+      )
+    );
+
+    return;
+  }
+
+  if (result.outcomeType === "gold") {
+    await send(
+      api,
+      threadID,
+      box("🌲 EXPLORATION", [
+        "💰 You discovered " +
+          formatNumber(result.gold) +
+          " coins.",
+
+        "",
+
+        "🧑‍🏫 Dorian: " + result.dorianLine,
+      ])
+    );
+
+    return;
+  }
+
+  if (result.outcomeType === "item") {
+    await send(
+      api,
+      threadID,
+      box("🌲 EXPLORATION", [
+        "💎 You found " +
+          (result.item?.emoji || "🎁") +
+          " " +
+          (result.item?.name || "a rare material") +
+          ".",
+
+        "",
+
+        "🧑‍🏫 Dorian: " + result.dorianLine,
+      ])
+    );
+
+    return;
+  }
+
+  await send(
+    api,
+    threadID,
+    box("🌲 EXPLORATION", [
+      "Nothing but wind and old footprints.",
+
+      "",
+
+      "🧑‍🏫 Dorian: " + result.dorianLine,
+    ])
+  );
+}
+
+
+/* =========================================================
    QUESTS
 ========================================================= */
 
@@ -2104,6 +2225,10 @@ async function handleHelp(api, event) {
 
       "▶ !rpg hunt",
       "Start a battle against a random enemy.",
+
+      "▶ !rpg explore",
+      "Wander out and see what you find.",
+      "Costs stamina. Dorian comments on the result.",
 
       "▶ !rpg attack",
       "Attack the enemy during combat.",
@@ -2562,6 +2687,19 @@ async function handleRpgCommand(
         api,
         event,
         args
+      );
+    }
+
+    /* =====================================================
+       EXPLORE
+    ===================================================== */
+
+    else if (
+      action === "explore"
+    ) {
+      await handleExplore(
+        api,
+        event
       );
     }
 
