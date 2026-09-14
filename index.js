@@ -18,6 +18,9 @@ const { handleRpgCommand } = require("./rpg");
 const { handleRpgCharacterMessage } = require("./rpg/character-ai");
 const { handleAiMessage } = require("./ai");
 
+// MODERATION
+const { handleModerationMessage } = require("./moderation");
+
 const {
   searchYouTube,
   downloadYouTubeAudio,
@@ -605,6 +608,33 @@ async function handleMessage(api, event) {
       threadID
     );
     return;
+  }
+
+
+  // -------------------------------------------------------------------------
+  // MODERATION
+  //
+  // This runs before AI, RPG, games, and economy.
+  // Blocked moderation/economy-admin actions stop here.
+  // Normal economy commands are allowed to continue to economy.js.
+  // -------------------------------------------------------------------------
+
+  try {
+    if (
+      await handleModerationMessage(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
+      return;
+    }
+  } catch (error) {
+    console.error(
+      "Moderation handler failed:",
+      error
+    );
   }
 
 
