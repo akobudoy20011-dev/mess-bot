@@ -676,6 +676,31 @@ async function handleTrivia(
   }
 }
 
+function normalizeAnswerText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .trim()
+    .toLowerCase()
+    .replace(/^(?:the\s+)?answer\s*(?:is|:)?\s*/i, "")
+    .replace(/[.!?,;:]+$/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function parseNumericAnswer(value) {
+  const match = String(value || "").match(/[-+]?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : NaN;
+}
+
+function getTriviaAnswerIndex(answer, qdata) {
+  const normalized = normalizeAnswerText(answer);
+  const letter = normalized.match(/^(?:option|choice)?\s*([abcd])(?:[).]\s*)?$/i);
+  if (letter) return ["a", "b", "c", "d"].indexOf(letter[1].toLowerCase());
+
+  return (qdata.options || []).findIndex(
+    (option) => normalizeAnswerText(option) === normalized
+  );
+}
+
 async function resolveTrivia(
   api,
   event,
@@ -712,15 +737,7 @@ async function resolveTrivia(
     "D",
   ];
 
-  const normalizedAnswer =
-    String(answer)
-      .trim()
-      .toUpperCase();
-
-  const chosenIndex =
-    letters.indexOf(
-      normalizedAnswer
-    );
+  const chosenIndex = getTriviaAnswerIndex(answer, session.qdata);
 
   const correctIndex =
     session.qdata.answer;
@@ -1241,11 +1258,7 @@ async function resolveGuess(
     return false;
   }
 
-  const guess =
-    parseInt(
-      guessText,
-      10
-    );
+  const guess = parseNumericAnswer(guessText);
 
   if (
     Number.isNaN(guess)
@@ -2369,11 +2382,7 @@ async function resolveMath(
     userID
   );
 
-  const userAnswer =
-    parseInt(
-      answerText,
-      10
-    );
+  const userAnswer = parseNumericAnswer(answerText);
 
   const correct =
     !Number.isNaN(
@@ -2572,18 +2581,11 @@ async function resolveRiddle(
     userID
   );
 
-  const normalized =
-    String(answerText)
-      .trim()
-      .toLowerCase();
+  const normalized = normalizeAnswerText(answerText);
 
   const correct =
     session.answers.some(
-      (answer) =>
-        normalized ===
-        String(answer)
-          .trim()
-          .toLowerCase()
+      (answer) => normalizeAnswerText(answer) === normalized
     );
 
   try {
@@ -2965,8 +2967,10 @@ async function handleGameCommand(
 async function handleGameResponse(
   api,
   event,
-  responseText
+  responseText,
+  originalText
 ) {
+  const answerText = String(originalText || responseText || "").trim();
   const threadID =
     String(event.threadID);
 
@@ -2989,7 +2993,7 @@ async function handleGameResponse(
     return resolveTrivia(
       api,
       event,
-      responseText
+      answerText
     );
   }
 
@@ -2999,7 +3003,7 @@ async function handleGameResponse(
     return resolveRiddle(
       api,
       event,
-      responseText
+      answerText
     );
   }
 
@@ -3009,7 +3013,7 @@ async function handleGameResponse(
     return resolveGuess(
       api,
       event,
-      responseText
+      answerText
     );
   }
 
@@ -3019,7 +3023,7 @@ async function handleGameResponse(
     return resolveBlackjack(
       api,
       event,
-      responseText
+      answerText
     );
   }
 
@@ -3029,7 +3033,7 @@ async function handleGameResponse(
     return resolveMath(
       api,
       event,
-      responseText
+      answerText
     );
   }
 
