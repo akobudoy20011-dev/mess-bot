@@ -1,1776 +1,1712 @@
-"use strict";
+“use strict”;
 
-const fs = require("fs");
-const fsp = require("fs/promises");
-const os = require("os");
-const path = require("path");
-const crypto = require("crypto");
-const express = require("express");
-const { login } = require("ws3-fca");
+const fs = require(“fs”);
+const fsp = require(“fs/promises”);
+const os = require(“os”);
+const path = require(“path”);
+const crypto = require(“crypto”);
+const express = require(“express”);
+const { login } = require(“ws3-fca”);
 
-const db = require("./db");
+const db = require(”./db”);
 
-const { handleEconomyCommand } = require("./economy");
-
-const {
-  handleGamesCommand,
-  handleGameResponse,
-} = require("./games");
-
-const { handleRpgCommand } = require("./rpg");
+const { handleEconomyCommand } = require(”./economy”);
 
 const {
-  handleRpgCharacterMessage,
-} = require("./rpg/character-ai");
+handleGamesCommand,
+handleGameResponse,
+} = require(”./games”);
+
+const { handleRpgCommand } = require(”./rpg”);
+
+const {
+handleRpgCharacterMessage,
+} = require(”./rpg/character-ai”);
 
 /*
- * ============================================================
- * SECRET LOVE QUEST
- * ============================================================
- *
- * THE LAST STAR is handled by rpg/love-quest.js.
- *
- * It is NOT a separate RPG system.
- *
- * The normal RPG still handles:
- *
- *   !rpg profile
- *   !rpg explore
- *   !rpg army
- *   !rpg kingdom
- *   !rpg property
- *   etc.
- *
- * The love quest only handles:
- *
- *   !rpg laststar
- *   !rpg laststar follow
- *   !rpg laststar continue
- *   !rpg laststar read
- *   !rpg laststar choose ...
- *
- * Discovery is triggered after the normal !rpg explore command.
- * ============================================================
- */
+
+* ============================================================
+* SECRET LOVE QUEST
+* ============================================================
+* THE LAST STAR is handled by rpg/love-quest.js.
+* It is NOT a separate RPG system.
+* Normal RPG remains responsible for:
+* !rpg profile
+* !rpg explore
+* !rpg army
+* !rpg kingdom
+* !rpg property
+* etc.
+* Love Quest only handles:
+* !rpg laststar
+* !rpg laststar follow
+* !rpg laststar continue
+* !rpg laststar read
+* !rpg laststar choose …
+* etc.
+* Discovery is triggered AFTER normal !rpg explore.
+* ============================================================
+    */
 
 const {
-  isSpecialPlayer,
-  discover: discoverLoveQuest,
-} = require("./rpg/love-quest");
+isSpecialPlayer,
+discover: discoverLoveQuest,
+handleLoveQuestCommand,
+} = require(”./rpg/love-quest”);
 
-const { handleAiMessage } = require("./ai");
+const { handleAiMessage } = require(”./ai”);
 
 // MODERATION
 const {
-  handleModerationMessage,
-} = require("./moderation");
+handleModerationMessage,
+} = require(”./moderation”);
 
 const {
-  searchYouTube,
-  downloadYouTubeAudio,
-} = require("./youtube");
+searchYouTube,
+downloadYouTubeAudio,
+} = require(”./youtube”);
 
 const {
-  getTriggerReply,
-  getNextPublicReply,
-} = require("./triggers");
+getTriggerReply,
+getNextPublicReply,
+} = require(”./triggers”);
 
-
-// ---------------------------------------------------------------------------
+// —————————————————————————
 // Configuration
-// ---------------------------------------------------------------------------
+// —————————————————————————
 
 const YOUTUBE_SEARCH_TIMEOUT_MS = 30_000;
 const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 180_000;
 
-const ADMIN_IDS = (process.env.ADMIN_IDS || "")
-  .split(",")
-  .map((id) => id.trim())
-  .filter(Boolean);
+const ADMIN_IDS = (process.env.ADMIN_IDS || “”)
+.split(”,”)
+.map((id) => id.trim())
+.filter(Boolean);
 
 const RANDOM_ROAST_ENABLED =
-  !/^(0|false|no|off)$/i.test(
-    process.env.RANDOM_ROAST || ""
-  );
+!/^(0|false|no|off)$/i.test(
+process.env.RANDOM_ROAST || “”
+);
 
 const parsedCooldown = Number(
-  process.env.RANDOM_ROAST_COOLDOWN_MS || "30000"
+process.env.RANDOM_ROAST_COOLDOWN_MS || “30000”
 );
 
 const RANDOM_ROAST_COOLDOWN_MS =
-  Number.isFinite(parsedCooldown) &&
-  parsedCooldown >= 0
-    ? parsedCooldown
-    : 30_000;
+Number.isFinite(parsedCooldown) &&
+parsedCooldown >= 0
+? parsedCooldown
+: 30_000;
 
 const lastRandomRoastByThread = new Map();
 const activeThreads = new Set();
-
 
 // ===============================
 // MEMORY MONITOR
 // ===============================
 
 setInterval(() => {
-  const m = process.memoryUsage();
+const m = process.memoryUsage();
 
-  console.log(
-    `[MEMORY] RSS: ${Math.round(m.rss / 1024 / 1024)} MB | ` +
-    `Heap: ${Math.round(m.heapUsed / 1024 / 1024)} / ` +
-    `${Math.round(m.heapTotal / 1024 / 1024)} MB | ` +
-    `External: ${Math.round(m.external / 1024 / 1024)} MB`
-  );
+console.log(
+[MEMORY] RSS: ${Math.round(m.rss / 1024 / 1024)} MB |  +
+Heap: ${Math.round(m.heapUsed / 1024 / 1024)} /  +
+${Math.round(m.heapTotal / 1024 / 1024)} MB |  +
+External: ${Math.round(m.external / 1024 / 1024)} MB
+);
 }, 60_000);
 
-
-// ---------------------------------------------------------------------------
+// —————————————————————————
 // Global bot state
-// ---------------------------------------------------------------------------
+// —————————————————————————
 
-if (typeof global.botDisabled !== "boolean") {
-  global.botDisabled = false;
+if (typeof global.botDisabled !== “boolean”) {
+global.botDisabled = false;
 }
 
-
-// ---------------------------------------------------------------------------
+// —————————————————————————
 // Timeout helper
-// ---------------------------------------------------------------------------
+// —————————————————————————
 
 function withTimeout(
-  operation,
-  timeoutMs,
-  timeoutMessage
+operation,
+timeoutMs,
+timeoutMessage
 ) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
+return new Promise((resolve, reject) => {
+let settled = false;
 
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        reject(new Error(timeoutMessage));
-      }
-    }, timeoutMs);
-
-    Promise.resolve()
-      .then(operation)
-      .then(
-        (value) => {
-          if (settled) return;
-
-          settled = true;
-          clearTimeout(timer);
-
-          resolve(value);
-        },
-        (error) => {
-          if (settled) return;
-
-          settled = true;
-          clearTimeout(timer);
-
-          reject(error);
-        }
-      );
-  });
-}
-
-
-// ---------------------------------------------------------------------------
-// Messenger Promise wrapper
-// ---------------------------------------------------------------------------
-
-function sendMessengerMessage(
-  api,
-  message,
-  threadID
-) {
-  return new Promise((resolve, reject) => {
-    try {
-      api.sendMessage(
-        message,
-        threadID,
-        (error) => {
-          if (error) {
-            reject(error);
-          } else {
-            resolve();
-          }
-        }
-      );
-    } catch (error) {
+const timer = setTimeout(() => {
+  if (!settled) {
+    settled = true;
+    reject(new Error(timeoutMessage));
+  }
+}, timeoutMs);
+Promise.resolve()
+  .then(operation)
+  .then(
+    (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    },
+    (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       reject(error);
     }
-  });
-}
-
-
-// ---------------------------------------------------------------------------
-// YouTube audio
-// ---------------------------------------------------------------------------
-
-async function sendAudioTrack(
-  api,
-  requestedSong,
-  threadID
-) {
-  if (
-    typeof requestedSong !== "string" ||
-    !requestedSong.trim()
-  ) {
-    api.sendMessage(
-      "🎵 Usage: !play <song name>",
-      threadID,
-      (error) => {
-        if (error) {
-          console.error(
-            "Usage message failed:",
-            error
-          );
-        }
-      }
-    );
-
-    return;
-  }
-
-  const temporaryFile = path.join(
-    os.tmpdir(),
-    `audio-${crypto.randomUUID()}.mp3`
   );
 
-  try {
-    api.sendMessage(
-      "🔎 Searching for the song...",
-      threadID,
-      (error) => {
-        if (error) {
-          console.error(
-            "Search status message failed:",
-            error
-          );
-        }
-      }
-    );
-
-    const video = await withTimeout(
-      () => searchYouTube(requestedSong),
-      YOUTUBE_SEARCH_TIMEOUT_MS,
-      "YouTube search timed out after 30 seconds. Please try again."
-    );
-
-    if (!video || !video.url) {
-      throw new Error(
-        `No YouTube result found for "${requestedSong}".`
-      );
-    }
-
-    await withTimeout(
-      () =>
-        downloadYouTubeAudio(
-          video.url,
-          temporaryFile
-        ),
-      YOUTUBE_DOWNLOAD_TIMEOUT_MS,
-      "YouTube download timed out after 3 minutes. Please try again."
-    );
-
-    const fileInfo = await fsp.stat(
-      temporaryFile
-    );
-
-    if (
-      !fileInfo.isFile() ||
-      fileInfo.size === 0
-    ) {
-      throw new Error(
-        "The downloaded audio file is empty."
-      );
-    }
-
-    await sendMessengerMessage(
-      api,
-      {
-        body: `🎵 ${video.title || requestedSong}`,
-        attachment:
-          fs.createReadStream(temporaryFile),
-      },
-      threadID
-    );
-  } catch (error) {
-    console.error(
-      "Audio command failed:",
-      error
-    );
-
-    api.sendMessage(
-      [
-        "❌ Unable to download that song.",
-        error.message,
-      ].join("\n"),
-      threadID,
-      (sendError) => {
-        if (sendError) {
-          console.error(
-            "Audio error message failed:",
-            sendError
-          );
-        }
-      }
-    );
-  } finally {
-    await fsp
-      .unlink(temporaryFile)
-      .catch(() => {});
-  }
+});
 }
 
+// —————————————————————————
+// Messenger Promise wrapper
+// —————————————————————————
 
-// ---------------------------------------------------------------------------
+function sendMessengerMessage(
+api,
+message,
+threadID
+) {
+return new Promise((resolve, reject) => {
+try {
+api.sendMessage(
+message,
+threadID,
+(error) => {
+if (error) {
+reject(error);
+} else {
+resolve();
+}
+}
+);
+} catch (error) {
+reject(error);
+}
+});
+}
+
+// —————————————————————————
+// YouTube audio
+// —————————————————————————
+
+async function sendAudioTrack(
+api,
+requestedSong,
+threadID
+) {
+if (
+typeof requestedSong !== “string” ||
+!requestedSong.trim()
+) {
+api.sendMessage(
+“🎵 Usage: !play ”,
+threadID,
+(error) => {
+if (error) {
+console.error(
+“Usage message failed:”,
+error
+);
+}
+}
+);
+
+return;
+
+}
+
+const temporaryFile = path.join(
+os.tmpdir(),
+audio-${crypto.randomUUID()}.mp3
+);
+
+try {
+api.sendMessage(
+“🔎 Searching for the song…”,
+threadID,
+(error) => {
+if (error) {
+console.error(
+“Search status message failed:”,
+error
+);
+}
+}
+);
+
+const video = await withTimeout(
+  () => searchYouTube(requestedSong),
+  YOUTUBE_SEARCH_TIMEOUT_MS,
+  "YouTube search timed out after 30 seconds. Please try again."
+);
+if (!video || !video.url) {
+  throw new Error(
+    `No YouTube result found for "${requestedSong}".`
+  );
+}
+await withTimeout(
+  () =>
+    downloadYouTubeAudio(
+      video.url,
+      temporaryFile
+    ),
+  YOUTUBE_DOWNLOAD_TIMEOUT_MS,
+  "YouTube download timed out after 3 minutes. Please try again."
+);
+const fileInfo = await fsp.stat(
+  temporaryFile
+);
+if (
+  !fileInfo.isFile() ||
+  fileInfo.size === 0
+) {
+  throw new Error(
+    "The downloaded audio file is empty."
+  );
+}
+await sendMessengerMessage(
+  api,
+  {
+    body: `🎵 ${video.title || requestedSong}`,
+    attachment:
+      fs.createReadStream(temporaryFile),
+  },
+  threadID
+);
+
+} catch (error) {
+console.error(
+“Audio command failed:”,
+error
+);
+
+api.sendMessage(
+  [
+    "❌ Unable to download that song.",
+    error.message,
+  ].join("\n"),
+  threadID,
+  (sendError) => {
+    if (sendError) {
+      console.error(
+        "Audio error message failed:",
+        sendError
+      );
+    }
+  }
+);
+
+} finally {
+await fsp
+.unlink(temporaryFile)
+.catch(() => {});
+}
+}
+
+// —————————————————————————
 // Render health-check web server
-// ---------------------------------------------------------------------------
+// —————————————————————————
 
 const app = express();
 
-app.get("/", (_req, res) => {
-  res.status(200).send(
-    "Bot is running ✅"
-  );
+app.get(”/”, (_req, res) => {
+res.status(200).send(
+“Bot is running ✅”
+);
 });
 
 const port = Number.parseInt(
-  process.env.PORT || "3000",
-  10
+process.env.PORT || “3000”,
+10
 );
 
 if (
-  !Number.isInteger(port) ||
-  port < 1 ||
-  port > 65535
+!Number.isInteger(port) ||
+port < 1 ||
+port > 65535
 ) {
-  throw new Error(
-    `Invalid PORT value: ${process.env.PORT}`
-  );
+throw new Error(
+Invalid PORT value: ${process.env.PORT}
+);
 }
 
 const server = app.listen(
-  port,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `Web server listening on port ${port}`
-    );
-  }
+port,
+“0.0.0.0”,
+() => {
+console.log(
+Web server listening on port ${port}
+);
+}
 );
 
-server.on("error", (error) => {
-  console.error(
-    "Web server error:",
-    error
-  );
+server.on(“error”, (error) => {
+console.error(
+“Web server error:”,
+error
+);
 
-  process.exitCode = 1;
+process.exitCode = 1;
 });
 
-
-// ---------------------------------------------------------------------------
+// —————————————————————————
 // Facebook cookies
-// ---------------------------------------------------------------------------
+// —————————————————————————
 
 function readAppState() {
-  const rawCookies =
-    process.env.FB_COOKIES;
+const rawCookies =
+process.env.FB_COOKIES;
 
-  if (
-    typeof rawCookies !== "string" ||
-    !rawCookies.trim()
-  ) {
-    throw new Error(
-      "FB_COOKIES is missing."
-    );
-  }
+if (
+typeof rawCookies !== “string” ||
+!rawCookies.trim()
+) {
+throw new Error(
+“FB_COOKIES is missing.”
+);
+}
 
-  let parsed;
+let parsed;
 
-  try {
-    parsed = JSON.parse(rawCookies);
+try {
+parsed = JSON.parse(rawCookies);
 
-    if (typeof parsed === "string") {
-      parsed = JSON.parse(parsed);
-    }
-  } catch {
-    throw new Error(
-      "FB_COOKIES must contain valid JSON."
-    );
-  }
+if (typeof parsed === "string") {
+  parsed = JSON.parse(parsed);
+}
 
-  if (
-    !Array.isArray(parsed) ||
-    parsed.length === 0
-  ) {
-    throw new Error(
-      "FB_COOKIES must be a non-empty cookie array."
-    );
-  }
+} catch {
+throw new Error(
+“FB_COOKIES must contain valid JSON.”
+);
+}
 
-  return parsed.map((cookie) => {
-    if (
-      !cookie ||
-      typeof cookie !== "object" ||
-      Array.isArray(cookie)
-    ) {
-      throw new Error(
-        "Each FB_COOKIES entry must be an object."
-      );
-    }
+if (
+!Array.isArray(parsed) ||
+parsed.length === 0
+) {
+throw new Error(
+“FB_COOKIES must be a non-empty cookie array.”
+);
+}
 
-    const key =
-      typeof cookie.key === "string"
-        ? cookie.key
-        : cookie.name;
+return parsed.map((cookie) => {
+if (
+!cookie ||
+typeof cookie !== “object” ||
+Array.isArray(cookie)
+) {
+throw new Error(
+“Each FB_COOKIES entry must be an object.”
+);
+}
 
-    if (
-      typeof key !== "string" ||
-      !key.trim() ||
-      typeof cookie.value !== "string"
-    ) {
-      throw new Error(
-        "Every cookie must contain string name/key and value fields."
-      );
-    }
+const key =
+  typeof cookie.key === "string"
+    ? cookie.key
+    : cookie.name;
+if (
+  typeof key !== "string" ||
+  !key.trim() ||
+  typeof cookie.value !== "string"
+) {
+  throw new Error(
+    "Every cookie must contain string name/key and value fields."
+  );
+}
+return {
+  ...cookie,
+  key,
+};
 
-    return {
-      ...cookie,
-      key,
-    };
-  });
+});
 }
 
 let appState;
 
 try {
-  appState = readAppState();
+appState = readAppState();
 } catch (error) {
-  console.error(
-    `Configuration error: ${error.message}`
-  );
+console.error(
+Configuration error: ${error.message}
+);
+
+process.exit(1);
+}
+
+// —————————————————————————
+// Login to Facebook
+// —————————————————————————
+
+login(
+appState,
+{
+online: true,
+updatePresence: true,
+selfListen: false,
+randomUserAgent: false,
+},
+
+async (loginError, api) => {
+if (loginError) {
+console.error(
+“Login failed:”,
+loginError
+);
 
   process.exit(1);
 }
-
-
-// ---------------------------------------------------------------------------
-// Login to Facebook
-// ---------------------------------------------------------------------------
-
-login(
-  appState,
-  {
-    online: true,
-    updatePresence: true,
-    selfListen: false,
-    randomUserAgent: false,
-  },
-
-  async (loginError, api) => {
-    if (loginError) {
-      console.error(
-        "Login failed:",
-        loginError
-      );
-
-      process.exit(1);
-    }
-
-    if (!api) {
-      console.error(
-        "Login failed: Facebook API object was not returned."
-      );
-
-      process.exit(1);
-    }
-
-    console.log(
-      "Logged in successfully."
-    );
-
-    try {
-      await db.connect();
-
-      console.log(
-        "Neon database connected successfully."
-      );
-    } catch (error) {
-      console.error(
-        "Database connection failed:",
-        error
-      );
-
-      process.exit(1);
-    }
-
-    api.setOptions({
-      listenEvents: true,
-      selfListen: false,
-    });
-
-    const startupThreadID =
-      process.env.STARTUP_THREAD_ID;
-
-    if (startupThreadID) {
-      api.sendMessage(
-        "🟢 Bot is online and ready.",
-        startupThreadID,
-        (sendError) => {
-          if (sendError) {
-            console.error(
-              "Startup message failed:",
-              sendError
-            );
-          }
-        }
-      );
-    }
-
-    console.log(
-      "Listener started. Send a message from a different Facebook account."
-    );
-
-    api.listenMqtt(
-      (listenError, event) => {
-        if (listenError) {
-          console.error(
-            "Listener error:",
-            listenError
-          );
-
-          return;
-        }
-
-        if (
-          !event ||
-          typeof event !== "object"
-        ) {
-          return;
-        }
-
-        console.log(
-          "Incoming event:",
-          {
-            type: event.type,
-            senderID: event.senderID,
-            threadID: event.threadID,
-          }
+if (!api) {
+  console.error(
+    "Login failed: Facebook API object was not returned."
+  );
+  process.exit(1);
+}
+console.log(
+  "Logged in successfully."
+);
+try {
+  await db.connect();
+  console.log(
+    "Neon database connected successfully."
+  );
+} catch (error) {
+  console.error(
+    "Database connection failed:",
+    error
+  );
+  process.exit(1);
+}
+api.setOptions({
+  listenEvents: true,
+  selfListen: false,
+});
+const startupThreadID =
+  process.env.STARTUP_THREAD_ID;
+if (startupThreadID) {
+  api.sendMessage(
+    "🟢 Bot is online and ready.",
+    startupThreadID,
+    (sendError) => {
+      if (sendError) {
+        console.error(
+          "Startup message failed:",
+          sendError
         );
-
-        if (
-          (
-            event.type === "message" ||
-            event.type === "message_reply"
-          ) &&
-          event.threadID
-        ) {
-          const threadID =
-            String(event.threadID);
-
-          activeThreads.add(threadID);
-
-          console.log(
-            `[Threads] Active threads: ${activeThreads.size}`
-          );
-
-          void handleMessage(
-            api,
-            event
-          );
-        }
+      }
+    }
+  );
+}
+console.log(
+  "Listener started. Send a message from a different Facebook account."
+);
+api.listenMqtt(
+  (listenError, event) => {
+    if (listenError) {
+      console.error(
+        "Listener error:",
+        listenError
+      );
+      return;
+    }
+    if (
+      !event ||
+      typeof event !== "object"
+    ) {
+      return;
+    }
+    console.log(
+      "Incoming event:",
+      {
+        type: event.type,
+        senderID: event.senderID,
+        threadID: event.threadID,
       }
     );
+    if (
+      (
+        event.type === "message" ||
+        event.type === "message_reply"
+      ) &&
+      event.threadID
+    ) {
+      const threadID =
+        String(event.threadID);
+      activeThreads.add(threadID);
+      console.log(
+        `[Threads] Active threads: ${activeThreads.size}`
+      );
+      void handleMessage(
+        api,
+        event
+      );
+    }
   }
 );
 
+}
+);
 
-// ---------------------------------------------------------------------------
+// —————————————————————————
 // Message handling
-// ---------------------------------------------------------------------------
+// —————————————————————————
 
 async function handleMessage(
-  api,
-  event
+api,
+event
 ) {
-  const {
-    threadID,
-    senderID,
-    body,
-  } = event;
+const {
+threadID,
+senderID,
+body,
+} = event;
 
-  if (
-    !threadID ||
-    typeof body !== "string" ||
-    !body.trim()
-  ) {
-    return;
-  }
+if (
+!threadID ||
+typeof body !== “string” ||
+!body.trim()
+) {
+return;
+}
 
-  const threadId =
-    String(threadID);
+const threadId =
+String(threadID);
 
-  const originalText =
-    body.trim();
+const originalText =
+body.trim();
 
-  const text =
-    originalText.toLowerCase();
+const text =
+originalText.toLowerCase();
 
-  const senderId =
-    String(senderID || "").trim();
+const senderId =
+String(senderID || “”).trim();
 
+// ———————————————————————––
+// GLOBAL BOT CONTROL
+//
+// !shutdown
+// !startup
+//
+// These remain functional but are NOT shown in public !help.
+// ———————————————————————––
 
-  // -------------------------------------------------------------------------
-  // GLOBAL BOT CONTROL
+if (
+/^!(shutdown|startup)$/i.test(
+originalText
+)
+) {
+if (
+!ADMIN_IDS.includes(senderId)
+) {
+sendReplyWithTyping(
+api,
+“❌ Only the bot admin can use this command.”,
+threadID
+);
+
+  return;
+}
+const controlCommand =
+  originalText
+    .slice(1)
+    .toLowerCase();
+if (
+  controlCommand === "shutdown"
+) {
+  global.botDisabled = true;
+  sendReplyWithTyping(
+    api,
+    "🛑 Bot shutdown enabled. The bot is now OFF in all groups.",
+    threadID
+  );
+  return;
+}
+if (
+  controlCommand === "startup"
+) {
+  global.botDisabled = false;
+  sendReplyWithTyping(
+    api,
+    "🟢 Bot startup enabled. The bot is now ON.",
+    threadID
+  );
+  return;
+}
+
+}
+
+// ———————————————————————––
+// GLOBAL BOT DISABLED STATE
+// ———————————————————————––
+
+if (
+global.botDisabled === true
+) {
+return;
+}
+
+// ———————————————————————––
+// SIMPLE DIRECT COMMANDS
+// ———————————————————————––
+
+if (text === “!ping”) {
+sendReplyWithTyping(
+api,
+“🏓 Pong!”,
+threadID
+);
+
+return;
+
+}
+
+// ———————————————————————––
+// PUBLIC HELP
+//
+// Admin-only controls are deliberately NOT advertised here.
+// ———————————————————————––
+
+if (text === “!help”) {
+sendReplyWithTyping(
+api,
+[
+“╭━━━━━━━━━━━━━━━━━━━━╮”,
+“          🌑 ECLIPSE”,
+“        PUBLIC MENU”,
+“╰━━━━━━━━━━━━━━━━━━━━╯”,
+“”,
+“⚡ GENERAL”,
+“• !ping”,
+“  Check if the bot is online.”,
+“”,
+“• !help”,
+“  Show this public command menu.”,
+“”,
+“🎵 MUSIC”,
+“• !play ”,
+“  Search YouTube and send the audio.”,
+“  Example: !play Die With A Smile”,
+“”,
+“🌑 ECLIPSE RPG”,
+“• !rpg help”,
+“  Open the persistent RPG system.”,
+“”,
+“• !rpg profile”,
+“  View your character and progression.”,
+“”,
+“• !rpg kingdom”,
+“  View your kingdom and domain.”,
+“”,
+“• !rpg property”,
+“  Manage your property.”,
+“”,
+“• !rpg train  ”,
+“  Train troops using your wallet.”,
+“”,
+“• !rpg march ”,
+“  Travel through the world map.”,
+“”,
+“💰 ECONOMY”,
+“• !balance / !bal”,
+“  Check your coins.”,
+“”,
+“• !daily”,
+“  Claim your daily reward.”,
+“”,
+“• !work”,
+“  Work for coins.”,
+“”,
+“• !pay ”,
+“  Pay someone by replying to them.”,
+“”,
+“• !leaderboard / !lb”,
+“  View the richest players.”,
+“”,
+“• !shop”,
+“  View available items.”,
+“”,
+“• !buy ”,
+“  Purchase an item.”,
+“”,
+“• !inventory / !inv”,
+“  View your items.”,
+“”,
+“🎮 GAMES”,
+“• !games”,
+“  Open the ECLIPSE Game Center.”,
+“”,
+“• !games rules”,
+“  View detailed game rules.”,
+“”,
+“• !games status”,
+“  View your game status.”,
+“”,
+“🧠 !trivia”,
+“  Answer the generated question.”,
+“”,
+“✊ !rps <rock|paper|scissors>”,
+“  Play Rock, Paper, Scissors.”,
+“”,
+“🎲 !roll ”,
+“  Roll the generated range.”,
+“”,
+“🎯 !guess ”,
+“  Guess the secret number.”,
+“”,
+“🪙 !coinflip  <heads|tails>”,
+“  Bet on heads or tails.”,
+“”,
+“🎰 !slots ”,
+“  Spin the slot machine.”,
+“”,
+“🃏 !blackjack”,
+“  Start Blackjack.”,
+“  Use !hit or !stand.”,
+“”,
+“🧮 !math”,
+“  Solve the generated problem.”,
+“”,
+“🧩 !riddle”,
+“  Solve the generated riddle.”,
+“”,
+“🔮 !8ball ”,
+“  Ask the Magic 8-Ball.”,
+“”,
+“━━━━━━━━━━━━━━━━━━━━━━”,
+“🌑 Explore ECLIPSE RPG”,
+“   to discover more systems.”,
+“━━━━━━━━━━━━━━━━━━━━━━”,
+].join(”\n”),
+threadID
+);
+
+return;
+
+}
+
+// ———————————————————————––
+// MUSIC
+// ———————————————————————––
+
+if (
+text === “!play” ||
+text.startsWith(”!play “)
+) {
+const requestedSong =
+originalText
+.slice(”!play”.length)
+.trim();
+
+void sendAudioTrack(
+  api,
+  requestedSong,
+  threadID
+);
+return;
+
+}
+
+// ———————————————————————––
+// BROADCAST
+//
+// Admin-only.
+// Hidden from public help.
+// ———————————————————————––
+
+if (
+text.startsWith(”!broadcast “)
+) {
+if (
+!ADMIN_IDS.includes(senderId)
+) {
+sendReplyWithTyping(
+api,
+“❌ Admin only.”,
+threadID
+);
+
+  return;
+}
+const message =
+  originalText
+    .slice("!broadcast ".length)
+    .trim();
+if (!message) {
+  sendReplyWithTyping(
+    api,
+    "📢 Usage: !broadcast <message>",
+    threadID
+  );
+  return;
+}
+broadcastToAllThreads(
+  api,
+  message
+);
+sendReplyWithTyping(
+  api,
+  `📢 Broadcast queued for ${activeThreads.size} active thread(s).`,
+  threadID
+);
+return;
+
+}
+
+// ———————————————————————––
+// MODERATION
+// ———————————————————————––
+
+try {
+if (
+await handleModerationMessage(
+api,
+event,
+text,
+originalText
+)
+) {
+return;
+}
+} catch (error) {
+console.error(
+“Moderation handler failed:”,
+error
+);
+}
+
+// ———————————————————————––
+// AI
+// ———————————————————————––
+
+try {
+if (
+await handleAiMessage(
+api,
+event,
+text,
+originalText
+)
+) {
+return;
+}
+} catch (error) {
+console.error(
+“AI message handler failed:”,
+error
+);
+}
+
+// ———————————————————————––
+// RPG CHARACTER AI
+// ———————————————————————––
+
+try {
+if (
+await handleRpgCharacterMessage(
+api,
+event,
+text,
+originalText
+)
+) {
+return;
+}
+} catch (error) {
+console.error(
+“RPG character handler failed:”,
+error
+);
+}
+
+// ———————————————————————––
+// ACTIVE GAME RESPONSES
+//
+// IMPORTANT:
+// This must happen BEFORE normal game commands.
+// ———————————————————————––
+
+try {
+if (
+await handleGameResponse(
+api,
+event,
+text,
+originalText
+)
+) {
+return;
+}
+} catch (error) {
+console.error(
+“Game response failed:”,
+error
+);
+}
+
+// ———————————————————————––
+// RPG / GAME / ECONOMY COMMANDS
+// ———————————————————————––
+
+try {
+
+// -----------------------------------------------------------------------
+// RPG
+// -----------------------------------------------------------------------
+if (
+  /^!rpg(?:\s|$)/i.test(
+    originalText
+  )
+) {
+  const rpgParts =
+    originalText
+      .trim()
+      .split(/\s+/);
+  const rpgArgs =
+    rpgParts.slice(1);
+  // =====================================================================
+  // SECRET LOVE QUEST COMMANDS
+  // =====================================================================
   //
-  // !shutdown
-  // !startup
+  // Only the special player can access THE LAST STAR.
   //
-  // These remain functional but are NOT shown in public !help.
-  // -------------------------------------------------------------------------
-
-  if (
-    /^!(shutdown|startup)$/i.test(
-      originalText
-    )
-  ) {
-    if (
-      !ADMIN_IDS.includes(senderId)
-    ) {
-      sendReplyWithTyping(
-        api,
-        "❌ Only the bot admin can use this command.",
-        threadID
-      );
-
-      return;
-    }
-
-    const controlCommand =
-      originalText
-        .slice(1)
-        .toLowerCase();
-
-    if (
-      controlCommand === "shutdown"
-    ) {
-      global.botDisabled = true;
-
-      sendReplyWithTyping(
-        api,
-        "🛑 Bot shutdown enabled. The bot is now OFF in all groups.",
-        threadID
-      );
-
-      return;
-    }
-
-    if (
-      controlCommand === "startup"
-    ) {
-      global.botDisabled = false;
-
-      sendReplyWithTyping(
-        api,
-        "🟢 Bot startup enabled. The bot is now ON.",
-        threadID
-      );
-
-      return;
-    }
-  }
-
-
-  // -------------------------------------------------------------------------
-  // GLOBAL BOT DISABLED STATE
-  // -------------------------------------------------------------------------
-
-  if (
-    global.botDisabled === true
-  ) {
-    return;
-  }
-
-
-  // -------------------------------------------------------------------------
-  // SIMPLE DIRECT COMMANDS
-  // -------------------------------------------------------------------------
-
-  if (text === "!ping") {
-    sendReplyWithTyping(
-      api,
-      "🏓 Pong!",
-      threadID
-    );
-
-    return;
-  }
-
-
-  // -------------------------------------------------------------------------
-  // PUBLIC HELP
+  // These commands are intercepted BEFORE the normal RPG router:
   //
-  // Admin-only controls are deliberately NOT advertised here.
-  // -------------------------------------------------------------------------
-
-  if (text === "!help") {
-    sendReplyWithTyping(
-      api,
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "          🌑 ECLIPSE",
-        "        PUBLIC MENU",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "⚡ GENERAL",
-        "• !ping",
-        "  Check if the bot is online.",
-        "",
-        "• !help",
-        "  Show this public command menu.",
-        "",
-        "🎵 MUSIC",
-        "• !play <song>",
-        "  Search YouTube and send the audio.",
-        "  Example: !play Die With A Smile",
-        "",
-        "🌑 ECLIPSE RPG",
-        "• !rpg help",
-        "  Open the persistent RPG system.",
-        "",
-        "• !rpg profile",
-        "  View your character and progression.",
-        "",
-        "• !rpg kingdom",
-        "  View your kingdom and domain.",
-        "",
-        "• !rpg property",
-        "  Manage your property.",
-        "",
-        "• !rpg train <unit> <amount>",
-        "  Train troops using your wallet.",
-        "",
-        "• !rpg march <region>",
-        "  Travel through the world map.",
-        "",
-        "🎭 LUCIEN AI",
-        "• !lucien",
-        "  Start Lucien for Alaiza only.",
-        "",
-        "• !lucien reset",
-        "  Reset the private session.",
-        "",
-        "• !lucien off",
-        "  End the private session.",
-        "",
-        "💰 ECONOMY",
-        "• !balance / !bal",
-        "  Check your coins.",
-        "",
-        "• !daily",
-        "  Claim your daily reward.",
-        "",
-        "• !work",
-        "  Work for coins.",
-        "",
-        "• !pay <amount>",
-        "  Pay someone by replying to them.",
-        "",
-        "• !leaderboard / !lb",
-        "  View the richest players.",
-        "",
-        "• !shop",
-        "  View available items.",
-        "",
-        "• !buy <item>",
-        "  Purchase an item.",
-        "",
-        "• !inventory / !inv",
-        "  View your items.",
-        "",
-        "🎮 GAMES",
-        "• !games",
-        "  Open the ECLIPSE Game Center.",
-        "",
-        "• !games rules",
-        "  View detailed game rules.",
-        "",
-        "• !games status",
-        "  View your game status.",
-        "",
-        "🧠 !trivia",
-        "  Answer the generated question.",
-        "",
-        "✊ !rps <rock|paper|scissors>",
-        "  Play Rock, Paper, Scissors.",
-        "",
-        "🎲 !roll <bet>",
-        "  Roll the generated range.",
-        "",
-        "🎯 !guess <number>",
-        "  Guess the secret number.",
-        "",
-        "🪙 !coinflip <bet> <heads|tails>",
-        "  Bet on heads or tails.",
-        "",
-        "🎰 !slots <bet>",
-        "  Spin the slot machine.",
-        "",
-        "🃏 !blackjack",
-        "  Start Blackjack.",
-        "  Use !hit or !stand.",
-        "",
-        "🧮 !math",
-        "  Solve the generated problem.",
-        "",
-        "🧩 !riddle",
-        "  Solve the generated riddle.",
-        "",
-        "🔮 !8ball <question>",
-        "  Ask the Magic 8-Ball.",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "🌑 Explore ECLIPSE RPG",
-        "   to discover more systems.",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-      ].join("\n"),
-      threadID
-    );
-
-    return;
-  }
-
-
-  // -------------------------------------------------------------------------
-  // MUSIC
-  // -------------------------------------------------------------------------
-
-  if (
-    text === "!play" ||
-    text.startsWith("!play ")
-  ) {
-    const requestedSong =
-      originalText
-        .slice("!play".length)
-        .trim();
-
-    void sendAudioTrack(
-      api,
-      requestedSong,
-      threadID
-    );
-
-    return;
-  }
-
-
-  // -------------------------------------------------------------------------
-  // BROADCAST
+  // !rpg laststar
+  // !rpg laststar follow
+  // !rpg laststar continue
+  // !rpg laststar read
+  // !rpg laststar choose ...
   //
-  // Admin-only.
-  // Hidden from public help.
-  // -------------------------------------------------------------------------
-
+  // Normal players never reach the Love Quest handler.
+  // =====================================================================
   if (
-    text.startsWith("!broadcast ")
+    isSpecialPlayer(senderId)
   ) {
-    if (
-      !ADMIN_IDS.includes(senderId)
-    ) {
-      sendReplyWithTyping(
-        api,
-        "❌ Admin only.",
-        threadID
-      );
-
-      return;
-    }
-
-    const message =
-      originalText
-        .slice("!broadcast ".length)
-        .trim();
-
-    if (!message) {
-      sendReplyWithTyping(
-        api,
-        "📢 Usage: !broadcast <message>",
-        threadID
-      );
-
-      return;
-    }
-
-    broadcastToAllThreads(
-      api,
-      message
-    );
-
-    sendReplyWithTyping(
-      api,
-      `📢 Broadcast queued for ${activeThreads.size} active thread(s).`,
-      threadID
-    );
-
-    return;
-  }
-
-
-  // -------------------------------------------------------------------------
-  // MODERATION
-  // -------------------------------------------------------------------------
-
-  try {
-    if (
-      await handleModerationMessage(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "Moderation handler failed:",
-      error
-    );
-  }
-
-
-  // -------------------------------------------------------------------------
-  // AI
-  // -------------------------------------------------------------------------
-
-  try {
-    if (
-      await handleAiMessage(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "AI message handler failed:",
-      error
-    );
-  }
-
-
-  // -------------------------------------------------------------------------
-  // RPG CHARACTER AI
-  // -------------------------------------------------------------------------
-
-  try {
-    if (
-      await handleRpgCharacterMessage(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "RPG character handler failed:",
-      error
-    );
-  }
-
-
-  // -------------------------------------------------------------------------
-  // ACTIVE GAME RESPONSES
-  //
-  // IMPORTANT:
-  // This must happen BEFORE normal game commands.
-  // -------------------------------------------------------------------------
-
-  try {
-    if (
-      await handleGameResponse(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "Game response failed:",
-      error
-    );
-  }
-
-
-  // -------------------------------------------------------------------------
-  // RPG / GAME / ECONOMY COMMANDS
-  // -------------------------------------------------------------------------
-
-  try {
-
-    // -----------------------------------------------------------------------
-    // RPG
-    // -----------------------------------------------------------------------
-
-    if (
-      /^!rpg(?:\s|$)/i.test(
-        originalText
-      )
-    ) {
-
-      const isRpgExplore =
-        /^!rpg\s+explore(?:\s|$)/i.test(
-          originalText
-        );
-
-      const rpgHandled =
-        await handleRpgCommand(
+    try {
+      const loveQuestHandled =
+        await handleLoveQuestCommand(
           api,
-          event,
-          text,
-          originalText
-        );
-
-      if (rpgHandled) {
-
-        /*
-         * ================================================================
-         * SECRET LOVE QUEST DISCOVERY
-         * ================================================================
-         *
-         * Only check discovery after a normal !rpg explore command.
-         *
-         * The normal exploration result is handled FIRST.
-         *
-         * Then the secret quest gets its own message.
-         *
-         * Normal players are ignored immediately by isSpecialPlayer().
-         * ================================================================
-         */
-
-        if (
-          isRpgExplore &&
-          isSpecialPlayer(senderId)
-        ) {
-          try {
-            await discoverLoveQuest(
-              api,
-              threadID,
-              senderId
-            );
-          } catch (loveQuestError) {
-            console.error(
-              "Love quest discovery failed:",
-              loveQuestError
-            );
-          }
-        }
-
-        return;
-      }
-    }
-
-
-    // -----------------------------------------------------------------------
-    // GAME TOGGLE
-    //
-    // !game on
-    // !game off
-    //
-    // Admin-only.
-    // Hidden from public help.
-    // -----------------------------------------------------------------------
-
-    const gameToggleMatch =
-      text.match(
-        /^!game\s+(on|off)$/i
-      );
-
-    if (gameToggleMatch) {
-      if (
-        !ADMIN_IDS.includes(senderId)
-      ) {
-        sendReplyWithTyping(
-          api,
-          "❌ Only the bot admin can turn games on or off.",
-          threadID
-        );
-
-        return;
-      }
-
-      const enabled =
-        gameToggleMatch[1]
-          .toLowerCase() === "on";
-
-      try {
-        await db.setGameEnabled(
           threadID,
-          enabled
+          senderId,
+          rpgArgs
         );
-
-        sendReplyWithTyping(
-          api,
-          enabled
-            ? "🎮 Games are now ON in this group."
-            : "🎮 Games are now OFF in this group.",
-          threadID
-        );
-      } catch (error) {
-        console.error(
-          "[game toggle] Error:",
-          error
-        );
-
-        sendReplyWithTyping(
-          api,
-          "❌ Failed to change the game setting.",
-          threadID
-        );
+      if (
+        loveQuestHandled
+      ) {
+        return;
       }
-
+    } catch (loveQuestError) {
+      console.error(
+        "[LOVE QUEST] Command failed:",
+        loveQuestError
+      );
+      sendReplyWithTyping(
+        api,
+        "❌ The Last Star quest encountered an error.",
+        threadID
+      );
       return;
     }
-
-
-    // -----------------------------------------------------------------------
-    // CURRENT games.js COMMAND ROUTER
-    // -----------------------------------------------------------------------
-
-    const gameMatch =
-      text.match(
-        /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
-      );
-
-    if (gameMatch) {
-      const gameCommand =
-        gameMatch[1].toLowerCase();
-
-      const gameArgs =
-        gameMatch[2]
-          ? gameMatch[2]
-              .trim()
-              .split(/\s+/)
-          : [];
-
-
-      // ---------------------------------------------------------------------
-      // !games
-      // !games rules
-      // !games status
-      // ---------------------------------------------------------------------
-
-      if (
-        gameCommand === "games"
-      ) {
-        const subcommand =
-          (
-            gameArgs[0] || ""
-          ).toLowerCase();
-
-        if (
-          subcommand === "rules" ||
-          subcommand === "status"
-        ) {
-          const handled =
-            await handleGamesCommand(
-              api,
-              event,
-              gameCommand,
-              gameArgs
-            );
-
-          if (handled) {
-            return;
-          }
-        }
-
-        const handled =
-          await handleGamesCommand(
-            api,
-            event,
-            gameCommand,
-            gameArgs
-          );
-
-        if (handled) {
-          return;
-        }
-
-        sendGameCenter(
+  }
+  // =====================================================================
+  // NORMAL RPG
+  // =====================================================================
+  const isRpgExplore =
+    /^!rpg\s+explore(?:\s|$)/i.test(
+      originalText
+    );
+  const rpgHandled =
+    await handleRpgCommand(
+      api,
+      event,
+      text,
+      originalText
+    );
+  if (
+    rpgHandled
+  ) {
+    // ================================================================
+    // SECRET LOVE QUEST DISCOVERY
+    // ================================================================
+    //
+    // Normal exploration happens FIRST.
+    //
+    // Only after the normal RPG router successfully handles
+    // !rpg explore do we attempt the hidden discovery.
+    //
+    // Only the special player can discover THE LAST STAR.
+    // ================================================================
+    if (
+      isRpgExplore &&
+      isSpecialPlayer(senderId)
+    ) {
+      try {
+        await discoverLoveQuest(
           api,
-          threadID
+          threadID,
+          senderId
         );
-
-        return;
+      } catch (loveQuestError) {
+        console.error(
+          "[LOVE QUEST] Discovery failed:",
+          loveQuestError
+        );
       }
-
-
-      // ---------------------------------------------------------------------
-      // GAMEPLAY ENABLE/DISABLE CHECK
-      // ---------------------------------------------------------------------
-
-      const gamesEnabled =
-        await db.isGameEnabled(
-          threadID
-        );
-
-      if (!gamesEnabled) {
-        sendReplyWithTyping(
-          api,
-          [
-            "🎮 Games are currently OFF in this group.",
-            "",
-            "An admin can enable them with !game on.",
-          ].join("\n"),
-          threadID
-        );
-
-        return;
-      }
-
-
-      // ---------------------------------------------------------------------
-      // ACTUAL GAMEPLAY
-      // ---------------------------------------------------------------------
-
-      if (
+    }
+    return;
+  }
+}
+// -----------------------------------------------------------------------
+// GAME TOGGLE
+//
+// !game on
+// !game off
+//
+// Admin-only.
+// Hidden from public help.
+// -----------------------------------------------------------------------
+const gameToggleMatch =
+  text.match(
+    /^!game\s+(on|off)$/i
+  );
+if (gameToggleMatch) {
+  if (
+    !ADMIN_IDS.includes(senderId)
+  ) {
+    sendReplyWithTyping(
+      api,
+      "❌ Only the bot admin can turn games on or off.",
+      threadID
+    );
+    return;
+  }
+  const enabled =
+    gameToggleMatch[1]
+      .toLowerCase() === "on";
+  try {
+    await db.setGameEnabled(
+      threadID,
+      enabled
+    );
+    sendReplyWithTyping(
+      api,
+      enabled
+        ? "🎮 Games are now ON in this group."
+        : "🎮 Games are now OFF in this group.",
+      threadID
+    );
+  } catch (error) {
+    console.error(
+      "[game toggle] Error:",
+      error
+    );
+    sendReplyWithTyping(
+      api,
+      "❌ Failed to change the game setting.",
+      threadID
+    );
+  }
+  return;
+}
+// -----------------------------------------------------------------------
+// CURRENT games.js COMMAND ROUTER
+// -----------------------------------------------------------------------
+const gameMatch =
+  text.match(
+    /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
+  );
+if (gameMatch) {
+  const gameCommand =
+    gameMatch[1].toLowerCase();
+  const gameArgs =
+    gameMatch[2]
+      ? gameMatch[2]
+          .trim()
+          .split(/\s+/)
+      : [];
+  // ---------------------------------------------------------------------
+  // !games
+  // !games rules
+  // !games status
+  // ---------------------------------------------------------------------
+  if (
+    gameCommand === "games"
+  ) {
+    const subcommand =
+      (
+        gameArgs[0] || ""
+      ).toLowerCase();
+    if (
+      subcommand === "rules" ||
+      subcommand === "status"
+    ) {
+      const handled =
         await handleGamesCommand(
           api,
           event,
           gameCommand,
           gameArgs
-        )
-      ) {
+        );
+      if (handled) {
         return;
       }
     }
-
-
-    // -----------------------------------------------------------------------
-    // ECONOMY
-    // -----------------------------------------------------------------------
-
-    if (
-      await handleEconomyCommand(
+    const handled =
+      await handleGamesCommand(
         api,
         event,
-        text,
-        originalText
-      )
-    ) {
+        gameCommand,
+        gameArgs
+      );
+    if (handled) {
       return;
     }
-
-  } catch (error) {
-    console.error(
-      "RPG/economy/games command failed:",
-      error
+    sendGameCenter(
+      api,
+      threadID
     );
-
-    /*
-     * Do NOT return here.
-     *
-     * If an optional handler fails, trigger/roast systems below
-     * are still allowed to run.
-     */
-  }
-
-
-  // -------------------------------------------------------------------------
-  // BANAT CONTROL
-  //
-  // Admin-only.
-  // Hidden from public help.
-  // -------------------------------------------------------------------------
-
-  if (
-    text === "!banat on" ||
-    text === "!banat off"
-  ) {
-    if (
-      !ADMIN_IDS.includes(senderId)
-    ) {
-      sendReplyWithTyping(
-        api,
-        "❌ Only the bot admin can turn banat on or off.",
-        threadID
-      );
-
-      return;
-    }
-
-    const enabled =
-      text === "!banat on";
-
-    try {
-      await db.setRoastEnabled(
-        threadId,
-        enabled
-      );
-
-      if (!enabled) {
-        lastRandomRoastByThread.delete(
-          threadId
-        );
-      }
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭━━━━━━━━━━━━━━╮",
-          "      🔥 BANAT",
-          "╰━━━━━━━━━━━━━━╯",
-          "",
-          enabled
-            ? "🟢 Status: ON"
-            : "🔴 Status: OFF",
-          "",
-          enabled
-            ? "Automatic banat has been enabled for this group."
-            : "Automatic banat has been disabled for this group.",
-        ].join("\n"),
-        threadID
-      );
-    } catch (error) {
-      console.error(
-        enabled
-          ? "Failed to enable banat:"
-          : "Failed to disable banat:",
-        error
-      );
-
-      sendReplyWithTyping(
-        api,
-        "❌ Failed to update banat setting.",
-        threadID
-      );
-    }
-
     return;
   }
-
-
-  // -------------------------------------------------------------------------
-  // TARGETED TRIGGER / ROAST
-  // -------------------------------------------------------------------------
-
-  try {
-    const triggerReply =
-      await getTriggerReply(
-        body,
-        senderId,
-        threadId
-      );
-
-    if (triggerReply) {
-      sendReplyWithTyping(
-        api,
-        triggerReply,
-        threadID,
-        true
-      );
-
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "Trigger system failed:",
-      error
+  // ---------------------------------------------------------------------
+  // GAMEPLAY ENABLE/DISABLE CHECK
+  // ---------------------------------------------------------------------
+  const gamesEnabled =
+    await db.isGameEnabled(
+      threadID
     );
-  }
-
-
-  // -------------------------------------------------------------------------
-  // PUBLIC RANDOM ROAST
-  // -------------------------------------------------------------------------
-
-  if (
-    !RANDOM_ROAST_ENABLED
-  ) {
+  if (!gamesEnabled) {
+    sendReplyWithTyping(
+      api,
+      [
+        "🎮 Games are currently OFF in this group.",
+        "",
+        "An admin can enable them with !game on.",
+      ].join("\n"),
+      threadID
+    );
     return;
   }
-
-  try {
-    const roastEnabled =
-      await db.isRoastEnabled(
-        threadId
-      );
-
-    if (!roastEnabled) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "Could not check roast setting:",
-      error
-    );
-
-    return;
-  }
-
+  // ---------------------------------------------------------------------
+  // ACTUAL GAMEPLAY
+  // ---------------------------------------------------------------------
   if (
-    canRandomRoastThread(
-      threadId
+    await handleGamesCommand(
+      api,
+      event,
+      gameCommand,
+      gameArgs
     )
   ) {
-    const publicReply =
-      getNextPublicReply();
-
-    if (publicReply) {
-      lastRandomRoastByThread.set(
-        threadId,
-        Date.now()
-      );
-
-      sendReplyWithTyping(
-        api,
-        publicReply,
-        threadID,
-        true
-      );
-    }
+    return;
   }
 }
-
-
-// ---------------------------------------------------------------------------
-// Game Center fallback
-// ---------------------------------------------------------------------------
-
-function sendGameCenter(
-  api,
-  threadID
+// -----------------------------------------------------------------------
+// ECONOMY
+// -----------------------------------------------------------------------
+if (
+  await handleEconomyCommand(
+    api,
+    event,
+    text,
+    originalText
+  )
 ) {
+  return;
+}
+
+} catch (error) {
+console.error(
+“RPG/economy/games command failed:”,
+error
+);
+
+/*
+ * Do NOT return here.
+ *
+ * If an optional handler fails, trigger/roast systems below
+ * are still allowed to run.
+ */
+
+}
+
+// ———————————————————————––
+// BANAT CONTROL
+//
+// Admin-only.
+// Hidden from public help.
+// ———————————————————————––
+
+if (
+text === “!banat on” ||
+text === “!banat off”
+) {
+if (
+!ADMIN_IDS.includes(senderId)
+) {
+sendReplyWithTyping(
+api,
+“❌ Only the bot admin can turn banat on or off.”,
+threadID
+);
+
+  return;
+}
+const enabled =
+  text === "!banat on";
+try {
+  await db.setRoastEnabled(
+    threadId,
+    enabled
+  );
+  if (!enabled) {
+    lastRandomRoastByThread.delete(
+      threadId
+    );
+  }
   sendReplyWithTyping(
     api,
     [
-      "╭━━━━━━━━━━━━━━━━━━━━╮",
-      "          🌑 ECLIPSE",
-      "        GAME CENTER",
-      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "╭━━━━━━━━━━━━━━╮",
+      "      🔥 BANAT",
+      "╰━━━━━━━━━━━━━━╯",
       "",
-      "🧠 TRIVIA",
-      "!trivia",
-      "Answer the generated question.",
+      enabled
+        ? "🟢 Status: ON"
+        : "🔴 Status: OFF",
       "",
-      "✊ ROCK • PAPER • SCISSORS",
-      "!rps rock",
-      "!rps paper",
-      "!rps scissors",
-      "",
-      "🎲 ROLL",
-      "!roll 100",
-      "",
-      "🎯 GUESS",
-      "!guess 7",
-      "",
-      "🪙 COINFLIP",
-      "!coinflip 100 heads",
-      "",
-      "🎰 SLOTS",
-      "!slots 100",
-      "",
-      "🃏 BLACKJACK",
-      "!blackjack",
-      "!hit",
-      "!stand",
-      "",
-      "🧮 MATH",
-      "!math",
-      "",
-      "🧩 RIDDLE",
-      "!riddle",
-      "",
-      "🔮 8-BALL",
-      "!8ball Will I win?",
-      "",
-      "━━━━━━━━━━━━━━━━━━━━━━",
-      "📜 !games rules",
-      "📊 !games status",
-      "━━━━━━━━━━━━━━━━━━━━━━",
+      enabled
+        ? "Automatic banat has been enabled for this group."
+        : "Automatic banat has been disabled for this group.",
     ].join("\n"),
     threadID
   );
+} catch (error) {
+  console.error(
+    enabled
+      ? "Failed to enable banat:"
+      : "Failed to disable banat:",
+    error
+  );
+  sendReplyWithTyping(
+    api,
+    "❌ Failed to update banat setting.",
+    threadID
+  );
+}
+return;
+
 }
 
+// ———————————————————————––
+// TARGETED TRIGGER / ROAST
+// ———————————————————————––
 
-// ---------------------------------------------------------------------------
+try {
+const triggerReply =
+await getTriggerReply(
+body,
+senderId,
+threadId
+);
+
+if (triggerReply) {
+  sendReplyWithTyping(
+    api,
+    triggerReply,
+    threadID,
+    true
+  );
+  return;
+}
+
+} catch (error) {
+console.error(
+“Trigger system failed:”,
+error
+);
+}
+
+// ———————————————————————––
+// PUBLIC RANDOM ROAST
+// ———————————————————————––
+
+if (
+!RANDOM_ROAST_ENABLED
+) {
+return;
+}
+
+try {
+const roastEnabled =
+await db.isRoastEnabled(
+threadId
+);
+
+if (!roastEnabled) {
+  return;
+}
+
+} catch (error) {
+console.error(
+“Could not check roast setting:”,
+error
+);
+
+return;
+
+}
+
+if (
+canRandomRoastThread(
+threadId
+)
+) {
+const publicReply =
+getNextPublicReply();
+
+if (publicReply) {
+  lastRandomRoastByThread.set(
+    threadId,
+    Date.now()
+  );
+  sendReplyWithTyping(
+    api,
+    publicReply,
+    threadID,
+    true
+  );
+}
+
+}
+}
+
+// —————————————————————————
+// Game Center fallback
+// —————————————————————————
+
+function sendGameCenter(
+api,
+threadID
+) {
+sendReplyWithTyping(
+api,
+[
+“╭━━━━━━━━━━━━━━━━━━━━╮”,
+“          🌑 ECLIPSE”,
+“        GAME CENTER”,
+“╰━━━━━━━━━━━━━━━━━━━━╯”,
+“”,
+“🧠 TRIVIA”,
+“!trivia”,
+“Answer the generated question.”,
+“”,
+“✊ ROCK • PAPER • SCISSORS”,
+“!rps rock”,
+“!rps paper”,
+“!rps scissors”,
+“”,
+“🎲 ROLL”,
+“!roll 100”,
+“”,
+“🎯 GUESS”,
+“!guess 7”,
+“”,
+“🪙 COINFLIP”,
+“!coinflip 100 heads”,
+“”,
+“🎰 SLOTS”,
+“!slots 100”,
+“”,
+“🃏 BLACKJACK”,
+“!blackjack”,
+“!hit”,
+“!stand”,
+“”,
+“🧮 MATH”,
+“!math”,
+“”,
+“🧩 RIDDLE”,
+“!riddle”,
+“”,
+“🔮 8-BALL”,
+“!8ball Will I win?”,
+“”,
+“━━━━━━━━━━━━━━━━━━━━━━”,
+“📜 !games rules”,
+“📊 !games status”,
+“━━━━━━━━━━━━━━━━━━━━━━”,
+].join(”\n”),
+threadID
+);
+}
+
+// —————————————————————————
 // Random roast cooldown
-// ---------------------------------------------------------------------------
+// —————————————————————————
 
 function canRandomRoastThread(
-  threadID
+threadID
 ) {
-  const now = Date.now();
+const now = Date.now();
 
-  const lastRoastAt =
-    lastRandomRoastByThread.get(
-      threadID
-    ) || 0;
+const lastRoastAt =
+lastRandomRoastByThread.get(
+threadID
+) || 0;
 
+if (
+now - lastRoastAt <
+RANDOM_ROAST_COOLDOWN_MS
+) {
+return false;
+}
+
+if (
+lastRandomRoastByThread.size >
+1000
+) {
+const expiry =
+Math.max(
+RANDOM_ROAST_COOLDOWN_MS * 2,
+60_000
+);
+
+for (
+  const [
+    knownThreadID,
+    roastAt,
+  ] of lastRandomRoastByThread.entries()
+) {
   if (
-    now - lastRoastAt <
-    RANDOM_ROAST_COOLDOWN_MS
+    now - roastAt > expiry
   ) {
-    return false;
+    lastRandomRoastByThread.delete(
+      knownThreadID
+    );
   }
+}
 
-  if (
-    lastRandomRoastByThread.size >
-    1000
-  ) {
-    const expiry =
-      Math.max(
-        RANDOM_ROAST_COOLDOWN_MS * 2,
-        60_000
-      );
+}
 
-    for (
-      const [
-        knownThreadID,
-        roastAt,
-      ] of lastRandomRoastByThread.entries()
-    ) {
-      if (
-        now - roastAt > expiry
-      ) {
-        lastRandomRoastByThread.delete(
-          knownThreadID
+return true;
+}
+
+// —————————————————————————
+// Broadcast
+// —————————————————————————
+
+function broadcastToAllThreads(
+api,
+message
+) {
+if (
+!message ||
+!message.trim()
+) {
+console.log(
+“[Broadcast] No message to broadcast.”
+);
+
+return;
+
+}
+
+const threads =
+Array.from(activeThreads);
+
+if (
+threads.length === 0
+) {
+console.log(
+“[Broadcast] No active threads.”
+);
+
+return;
+
+}
+
+console.log(
+[Broadcast] Broadcasting to ${threads.length} threads.
+);
+
+const broadcastMessage = [
+“╭━━━━━━━━━━━━━━━━╮”,
+“        📢 ANNOUNCEMENT”,
+“╰━━━━━━━━━━━━━━━━╯”,
+“”,
+message.trim(),
+].join(”\n”);
+
+threads.forEach(
+(threadID, index) => {
+setTimeout(() => {
+api.sendMessage(
+broadcastMessage,
+threadID,
+(sendError) => {
+if (sendError) {
+console.error(
+[Broadcast] Failed for ${threadID}:,
+sendError
+);
+} else {
+console.log(
+[Broadcast] Sent to ${threadID}
+);
+}
+}
+);
+}, index * 500);
+}
+);
+}
+
+// —————————————————————————
+// Safe reply helper
+// —————————————————————————
+
+function sendReplyWithTyping(
+api,
+message,
+threadID,
+attachMeme = false
+) {
+const typingDelayMs = 1200;
+
+try {
+if (
+typeof api.sendTypingIndicator ===
+“function”
+) {
+api.sendTypingIndicator(
+threadID,
+(typingError) => {
+if (typingError) {
+console.error(
+“Typing indicator failed:”,
+typingError
+);
+}
+}
+);
+}
+} catch (typingError) {
+console.error(
+“Typing indicator error:”,
+typingError
+);
+}
+
+setTimeout(() => {
+try {
+const memePath =
+attachMeme
+? getRandomMemePath()
+: null;
+
+  const outgoingMessage =
+    memePath
+      ? {
+          body: message,
+          attachment:
+            fs.createReadStream(
+              memePath
+            ),
+        }
+      : message;
+  api.sendMessage(
+    outgoingMessage,
+    threadID,
+    (sendError) => {
+      if (sendError) {
+        console.error(
+          "Reply failed:",
+          sendError
         );
       }
     }
-  }
-
-  return true;
-}
-
-
-// ---------------------------------------------------------------------------
-// Broadcast
-// ---------------------------------------------------------------------------
-
-function broadcastToAllThreads(
-  api,
-  message
-) {
-  if (
-    !message ||
-    !message.trim()
-  ) {
-    console.log(
-      "[Broadcast] No message to broadcast."
-    );
-
-    return;
-  }
-
-  const threads =
-    Array.from(activeThreads);
-
-  if (
-    threads.length === 0
-  ) {
-    console.log(
-      "[Broadcast] No active threads."
-    );
-
-    return;
-  }
-
-  console.log(
-    `[Broadcast] Broadcasting to ${threads.length} threads.`
   );
-
-  const broadcastMessage = [
-    "╭━━━━━━━━━━━━━━━━╮",
-    "        📢 ANNOUNCEMENT",
-    "╰━━━━━━━━━━━━━━━━╯",
-    "",
-    message.trim(),
-  ].join("\n");
-
-  threads.forEach(
-    (threadID, index) => {
-      setTimeout(() => {
-        api.sendMessage(
-          broadcastMessage,
-          threadID,
-          (sendError) => {
-            if (sendError) {
-              console.error(
-                `[Broadcast] Failed for ${threadID}:`,
-                sendError
-              );
-            } else {
-              console.log(
-                `[Broadcast] Sent to ${threadID}`
-              );
-            }
-          }
-        );
-      }, index * 500);
-    }
+} catch (sendError) {
+  console.error(
+    "Reply error:",
+    sendError
   );
 }
 
-
-// ---------------------------------------------------------------------------
-// Safe reply helper
-// ---------------------------------------------------------------------------
-
-function sendReplyWithTyping(
-  api,
-  message,
-  threadID,
-  attachMeme = false
-) {
-  const typingDelayMs = 1200;
-
-  try {
-    if (
-      typeof api.sendTypingIndicator ===
-      "function"
-    ) {
-      api.sendTypingIndicator(
-        threadID,
-        (typingError) => {
-          if (typingError) {
-            console.error(
-              "Typing indicator failed:",
-              typingError
-            );
-          }
-        }
-      );
-    }
-  } catch (typingError) {
-    console.error(
-      "Typing indicator error:",
-      typingError
-    );
-  }
-
-  setTimeout(() => {
-    try {
-      const memePath =
-        attachMeme
-          ? getRandomMemePath()
-          : null;
-
-      const outgoingMessage =
-        memePath
-          ? {
-              body: message,
-              attachment:
-                fs.createReadStream(
-                  memePath
-                ),
-            }
-          : message;
-
-      api.sendMessage(
-        outgoingMessage,
-        threadID,
-        (sendError) => {
-          if (sendError) {
-            console.error(
-              "Reply failed:",
-              sendError
-            );
-          }
-        }
-      );
-    } catch (sendError) {
-      console.error(
-        "Reply error:",
-        sendError
-      );
-    }
-  }, typingDelayMs);
+}, typingDelayMs);
 }
 
-
-// ---------------------------------------------------------------------------
+// —————————————————————————
 // Meme helper
-// ---------------------------------------------------------------------------
+// —————————————————————————
 
 function getRandomMemePath() {
-  const memeDirectory =
-    path.join(
-      __dirname,
-      "memes"
-    );
+const memeDirectory =
+path.join(
+__dirname,
+“memes”
+);
 
-  const supportedExtensions =
-    new Set([
-      ".jpg",
-      ".jpeg",
-      ".png",
-      ".gif",
-      ".webp",
-    ]);
+const supportedExtensions =
+new Set([
+“.jpg”,
+“.jpeg”,
+“.png”,
+“.gif”,
+“.webp”,
+]);
 
-  try {
-    if (
-      !fs.existsSync(
-        memeDirectory
-      )
-    ) {
-      return null;
-    }
+try {
+if (
+!fs.existsSync(
+memeDirectory
+)
+) {
+return null;
+}
 
-    const files =
-      fs
-        .readdirSync(
-          memeDirectory
+const files =
+  fs
+    .readdirSync(
+      memeDirectory
+    )
+    .filter(
+      (fileName) =>
+        supportedExtensions.has(
+          path
+            .extname(fileName)
+            .toLowerCase()
         )
-        .filter(
-          (fileName) =>
-            supportedExtensions.has(
-              path
-                .extname(fileName)
-                .toLowerCase()
-            )
-        );
-
-    if (
-      files.length === 0
-    ) {
-      return null;
-    }
-
-    const randomFile =
-      files[
-        Math.floor(
-          Math.random() *
-          files.length
-        )
-      ];
-
-    return path.join(
-      memeDirectory,
-      randomFile
     );
-  } catch (error) {
-    console.error(
-      "Could not load memes:",
-      error
-    );
+if (
+  files.length === 0
+) {
+  return null;
+}
+const randomFile =
+  files[
+    Math.floor(
+      Math.random() *
+      files.length
+    )
+  ];
+return path.join(
+  memeDirectory,
+  randomFile
+);
 
-    return null;
-  }
+} catch (error) {
+console.error(
+“Could not load memes:”,
+error
+);
+
+return null;
+
+}
 }
