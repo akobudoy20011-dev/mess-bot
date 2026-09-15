@@ -815,12 +815,28 @@ async function handleMessage(api, event) {
   }
   
   // -------------------------------------------------------------------------
-  // BANAT ON
+  // BANAT CONTROL — ADMIN ONLY
   // -------------------------------------------------------------------------
 
-  if (text === "!banat on") {
+  if (text === "!banat on" || text === "!banat off") {
+    // BANAT CONTROL IS ADMIN-ONLY
+    if (!ADMIN_IDS.includes(senderId)) {
+      sendReplyWithTyping(
+        api,
+        "❌ Only the bot admin can turn banat on or off.",
+        threadID
+      );
+      return;
+    }
+
+    const enabled = text === "!banat on";
+
     try {
-      await db.setRoastEnabled(threadId, true);
+      await db.setRoastEnabled(threadId, enabled);
+
+      if (!enabled) {
+        lastRandomRoastByThread.delete(threadId);
+      }
 
       sendReplyWithTyping(
         api,
@@ -829,15 +845,23 @@ async function handleMessage(api, event) {
           "      🔥 BANAT",
           "╰━━━━━━━━━━━━━━╯",
           "",
-          "🟢 Status: ON",
+          enabled
+            ? "🟢 Status: ON"
+            : "🔴 Status: OFF",
           "",
-          "Automatic banat has been",
-          "enabled for this group.",
+          enabled
+            ? "Automatic banat has been enabled for this group."
+            : "Automatic banat has been disabled for this group.",
         ].join("\n"),
         threadID
       );
     } catch (error) {
-      console.error("Failed to enable banat:", error);
+      console.error(
+        enabled
+          ? "Failed to enable banat:"
+          : "Failed to disable banat:",
+        error
+      );
 
       sendReplyWithTyping(
         api,
@@ -848,45 +872,7 @@ async function handleMessage(api, event) {
 
     return;
   }
-
-
-  // -------------------------------------------------------------------------
-  // BANAT OFF
-  // -------------------------------------------------------------------------
-
-  if (text === "!banat off") {
-    try {
-      await db.setRoastEnabled(threadId, false);
-
-      lastRandomRoastByThread.delete(threadId);
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭━━━━━━━━━━━━━━╮",
-          "      🛑 BANAT",
-          "╰━━━━━━━━━━━━━━╯",
-          "",
-          "🔴 Status: OFF",
-          "",
-          "Automatic banat has been",
-          "disabled for this group.",
-        ].join("\n"),
-        threadID
-      );
-    } catch (error) {
-      console.error("Failed to disable banat:", error);
-
-      sendReplyWithTyping(
-        api,
-        "❌ Failed to update banat setting.",
-        threadID
-      );
-    }
-
-    return;
-  }
-
+  
 
   // -------------------------------------------------------------------------
   // TARGETED TRIGGER / ROAST
