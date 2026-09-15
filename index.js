@@ -68,6 +68,19 @@ const RANDOM_ROAST_COOLDOWN_MS =
 const lastRandomRoastByThread = new Map();
 const activeThreads = new Set();
 
+// ===============================
+// MEMORY MONITOR
+// ===============================
+setInterval(() => {
+  const m = process.memoryUsage();
+
+  console.log(
+    `[MEMORY] RSS: ${Math.round(m.rss / 1024 / 1024)} MB | ` +
+    `Heap: ${Math.round(m.heapUsed / 1024 / 1024)} / ` +
+    `${Math.round(m.heapTotal / 1024 / 1024)} MB | ` +
+    `External: ${Math.round(m.external / 1024 / 1024)} MB`
+  );
+}, 60_000);
 
 // ---------------------------------------------------------------------------
 // Global bot state
