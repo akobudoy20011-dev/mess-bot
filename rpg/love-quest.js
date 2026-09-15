@@ -3,39 +3,6 @@
 const db = require("../db");
 const { reply } = require("../util");
 
-/*
- * ============================================================
- * THE LAST STAR
- * Secret personal quest
- * ============================================================
- *
- * This quest is ONLY available to the player whose Messenger
- * sender ID matches SPECIAL_PLAYER_ID in the Render environment.
- *
- * Example Render environment variable:
- *
- * SPECIAL_PLAYER_ID=123456789012345
- *
- * Optional:
- *
- * LOVE_QUEST_ID=the_last_star
- *
- * IMPORTANT:
- * - This file does NOT replace the normal RPG system.
- * - Normal !rpg commands still work for the special player.
- * - Only these actions are intercepted:
- *
- *     !rpg laststar
- *     !rpg laststar follow
- *     !rpg laststar continue
- *     !rpg laststar choose ...
- *     !rpg laststar read
- *
- * The quest is persisted in PostgreSQL so Render restarts
- * do not erase the player's progress.
- * ============================================================
- */
-
 const QUEST_ID =
   process.env.LOVE_QUEST_ID || "the_last_star";
 
@@ -55,9 +22,9 @@ const CHAPTERS = {
 };
 
 /*
- * ------------------------------------------------------------
- * Helpers
- * ------------------------------------------------------------
+ * ============================================================
+ * HELPERS
+ * ============================================================
  */
 
 function isSpecialPlayer(senderID) {
@@ -92,18 +59,9 @@ function formatQuestProgress(quest) {
 }
 
 /*
- * ------------------------------------------------------------
- * Database
- * ------------------------------------------------------------
- *
- * db.js creates rpg_special_quests during connect().
- *
- * This function remains here as a safe compatibility check.
- * It does not hurt if the table already exists.
- *
- * If you already added the table to db.js, this function simply
- * confirms it exists.
- * ------------------------------------------------------------
+ * ============================================================
+ * DATABASE
+ * ============================================================
  */
 
 let tableReady = false;
@@ -118,11 +76,6 @@ async function ensureTable() {
   }
 
   tablePromise = (async () => {
-    /*
-     * This mirrors the table created in db.js.
-     *
-     * If db.js already created it, IF NOT EXISTS makes this safe.
-     */
     await db.query(`
       CREATE TABLE IF NOT EXISTS rpg_special_quests (
         thread_id     TEXT NOT NULL,
@@ -155,9 +108,9 @@ async function ensureTable() {
 }
 
 /*
- * ------------------------------------------------------------
- * Quest retrieval
- * ------------------------------------------------------------
+ * ============================================================
+ * QUEST RETRIEVAL
+ * ============================================================
  */
 
 async function getQuest(threadID, playerID) {
@@ -185,16 +138,20 @@ async function getQuest(threadID, playerID) {
         AND quest_id = $3
       LIMIT 1
     `,
-    [String(threadID), String(playerID), QUEST_ID]
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+    ]
   );
 
   return result.rows[0] || null;
 }
 
 /*
- * ------------------------------------------------------------
- * Start quest
- * ------------------------------------------------------------
+ * ============================================================
+ * START QUEST
+ * ============================================================
  */
 
 async function startQuest(threadID, playerID) {
@@ -246,9 +203,9 @@ async function startQuest(threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Update quest
- * ------------------------------------------------------------
+ * ============================================================
+ * UPDATE QUEST
+ * ============================================================
  */
 
 async function updateQuest(
@@ -329,9 +286,9 @@ async function updateQuest(
 }
 
 /*
- * ------------------------------------------------------------
- * Messaging
- * ------------------------------------------------------------
+ * ============================================================
+ * MESSAGING
+ * ============================================================
  */
 
 async function send(api, threadID, text) {
@@ -339,10 +296,9 @@ async function send(api, threadID, text) {
 }
 
 /*
- * ------------------------------------------------------------
- * Chapter 1
- * Another Day, Another Night
- * ------------------------------------------------------------
+ * ============================================================
+ * CHAPTER 1
+ * ============================================================
  */
 
 async function chapterOne(api, threadID, playerID) {
@@ -389,10 +345,9 @@ async function chapterOne(api, threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Chapter 2
- * The Distant Star
- * ------------------------------------------------------------
+ * ============================================================
+ * CHAPTER 2
+ * ============================================================
  */
 
 async function chapterTwo(api, threadID, playerID) {
@@ -430,10 +385,9 @@ async function chapterTwo(api, threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Chapter 3
- * Two Kingdoms
- * ------------------------------------------------------------
+ * ============================================================
+ * CHAPTER 3
+ * ============================================================
  */
 
 async function chapterThree(api, threadID, playerID) {
@@ -474,10 +428,9 @@ async function chapterThree(api, threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Chapter 4
- * The River
- * ------------------------------------------------------------
+ * ============================================================
+ * CHAPTER 4
+ * ============================================================
  */
 
 async function chapterFour(api, threadID, playerID) {
@@ -519,10 +472,9 @@ async function chapterFour(api, threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Chapter 5
- * The Home
- * ------------------------------------------------------------
+ * ============================================================
+ * CHAPTER 5
+ * ============================================================
  */
 
 async function chapterFive(api, threadID, playerID) {
@@ -566,10 +518,9 @@ async function chapterFive(api, threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Chapter 6
- * Everything
- * ------------------------------------------------------------
+ * ============================================================
+ * CHAPTER 6
+ * ============================================================
  */
 
 async function chapterSix(api, threadID, playerID) {
@@ -624,20 +575,12 @@ async function chapterSix(api, threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Chapter 7
- * Eternal
- * ------------------------------------------------------------
+ * ============================================================
+ * CHAPTER 7
+ * ============================================================
  */
 
 async function chapterSeven(api, threadID, playerID) {
-  /*
-   * The final chapter intentionally uses several messages.
-   *
-   * This creates the feeling that the world itself is
-   * disappearing instead of dumping everything into one block.
-   */
-
   await send(
     api,
     threadID,
@@ -657,7 +600,9 @@ async function chapterSeven(api, threadID, playerID) {
     ].join("\n")
   );
 
-  await new Promise((resolve) => setTimeout(resolve, 1200));
+  await new Promise((resolve) =>
+    setTimeout(resolve, 1200)
+  );
 
   await send(
     api,
@@ -676,7 +621,9 @@ async function chapterSeven(api, threadID, playerID) {
     ].join("\n")
   );
 
-  await new Promise((resolve) => setTimeout(resolve, 1200));
+  await new Promise((resolve) =>
+    setTimeout(resolve, 1200)
+  );
 
   await send(
     api,
@@ -691,7 +638,9 @@ async function chapterSeven(api, threadID, playerID) {
     ].join("\n")
   );
 
-  await new Promise((resolve) => setTimeout(resolve, 1200));
+  await new Promise((resolve) =>
+    setTimeout(resolve, 1200)
+  );
 
   await send(
     api,
@@ -706,7 +655,9 @@ async function chapterSeven(api, threadID, playerID) {
     ].join("\n")
   );
 
-  await new Promise((resolve) => setTimeout(resolve, 1400));
+  await new Promise((resolve) =>
+    setTimeout(resolve, 1400)
+  );
 
   await send(
     api,
@@ -720,7 +671,9 @@ async function chapterSeven(api, threadID, playerID) {
     ].join("\n")
   );
 
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await new Promise((resolve) =>
+    setTimeout(resolve, 1500)
+  );
 
   await send(
     api,
@@ -744,9 +697,9 @@ async function chapterSeven(api, threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Continue current chapter
- * ------------------------------------------------------------
+ * ============================================================
+ * CONTINUE QUEST
+ * ============================================================
  */
 
 async function continueQuest(api, threadID, playerID) {
@@ -820,17 +773,17 @@ async function continueQuest(api, threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Discover hidden quest
- * ------------------------------------------------------------
+ * ============================================================
+ * DISCOVER HIDDEN QUEST
+ * ============================================================
  *
- * Called after the special player successfully uses normal
- * !rpg explore.
+ * FIRST SUCCESSFUL !rpg explore = GUARANTEED DISCOVERY.
  *
- * IMPORTANT:
- * Discovery is silent until the normal exploration result
- * has already been shown.
- * ------------------------------------------------------------
+ * After discovery, this function does nothing because the quest
+ * already exists in PostgreSQL.
+ *
+ * No random 1% roll is used here.
+ * ============================================================
  */
 
 async function discover(api, threadID, playerID) {
@@ -838,18 +791,27 @@ async function discover(api, threadID, playerID) {
     return false;
   }
 
-  const existing = await getQuest(threadID, playerID);
+  const existing = await getQuest(
+    threadID,
+    playerID
+  );
 
+  /*
+   * Already discovered.
+   * Never trigger the discovery message again.
+   */
   if (existing) {
     return false;
   }
 
-  await ensureTable();
-
   /*
-   * Start the quest only when it is actually discovered.
+   * FIRST successful !rpg explore:
+   * 100% guaranteed discovery.
    */
-  await startQuest(threadID, playerID);
+  await startQuest(
+    threadID,
+    playerID
+  );
 
   await send(
     api,
@@ -885,20 +847,30 @@ async function discover(api, threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Follow hidden quest
- * ------------------------------------------------------------
+ * ============================================================
+ * FOLLOW QUEST
+ * ============================================================
  */
 
-async function followQuest(api, threadID, playerID) {
+async function followQuest(
+  api,
+  threadID,
+  playerID
+) {
   if (!isSpecialPlayer(playerID)) {
     return false;
   }
 
-  let quest = await getQuest(threadID, playerID);
+  let quest = await getQuest(
+    threadID,
+    playerID
+  );
 
   if (!quest) {
-    quest = await startQuest(threadID, playerID);
+    quest = await startQuest(
+      threadID,
+      playerID
+    );
   }
 
   if (!quest) {
@@ -921,23 +893,34 @@ async function followQuest(api, threadID, playerID) {
     return true;
   }
 
-  await continueQuest(api, threadID, playerID);
+  await continueQuest(
+    api,
+    threadID,
+    playerID
+  );
 
   return true;
 }
 
 /*
- * ------------------------------------------------------------
- * Read quest status
- * ------------------------------------------------------------
+ * ============================================================
+ * READ QUEST STATUS
+ * ============================================================
  */
 
-async function readQuest(api, threadID, playerID) {
+async function readQuest(
+  api,
+  threadID,
+  playerID
+) {
   if (!isSpecialPlayer(playerID)) {
     return false;
   }
 
-  const quest = await getQuest(threadID, playerID);
+  const quest = await getQuest(
+    threadID,
+    playerID
+  );
 
   if (!quest) {
     await send(
@@ -965,7 +948,11 @@ async function readQuest(api, threadID, playerID) {
     [
       "✦ THE LAST STAR ✦",
       "",
-      `Status: ${quest.status === "completed" ? "COMPLETED" : "ACTIVE"}`,
+      `Status: ${
+        quest.status === "completed"
+          ? "COMPLETED"
+          : "ACTIVE"
+      }`,
       `Chapter: ${chapter}/${MAX_CHAPTER}`,
       `Title: ${chapterName}`,
       `Stage: ${Number(quest.stage || 0)}`,
@@ -978,17 +965,15 @@ async function readQuest(api, threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Reset quest
- * ------------------------------------------------------------
- *
- * Not exposed as a normal command.
- *
- * Useful for testing from code if needed.
- * ------------------------------------------------------------
+ * ============================================================
+ * RESET QUEST
+ * ============================================================
  */
 
-async function resetQuest(threadID, playerID) {
+async function resetQuest(
+  threadID,
+  playerID
+) {
   if (!isSpecialPlayer(playerID)) {
     return false;
   }
@@ -1013,25 +998,15 @@ async function resetQuest(threadID, playerID) {
 }
 
 /*
- * ------------------------------------------------------------
- * Main command handler
- * ------------------------------------------------------------
+ * ============================================================
+ * MAIN COMMAND HANDLER
+ * ============================================================
  *
- * CRITICAL:
+ * IMPORTANT:
+ * This MUST return false for normal RPG commands.
  *
- * This function MUST return false for normal RPG commands.
- *
- * Example:
- *
- * !rpg profile
- * !rpg explore
- * !rpg army
- * !rpg inventory
- *
- * These should continue to the normal RPG router.
- *
- * Only special quest actions are intercepted.
- * ------------------------------------------------------------
+ * Only !rpg laststar ... is intercepted.
+ * ============================================================
  */
 
 async function handleLoveQuestCommand(
@@ -1054,18 +1029,10 @@ async function handleLoveQuestCommand(
   }
 
   /*
-   * The first argument must explicitly be "laststar".
-   *
-   * This is what prevents:
-   *
-   * !rpg profile
-   * !rpg explore
-   * !rpg kingdom
-   * !rpg army
-   *
-   * from being intercepted.
+   * Only intercept the Last Star command.
    */
-  const root = parts[0].toLowerCase();
+  const root =
+    parts[0].toLowerCase();
 
   if (
     root !== "laststar" &&
@@ -1106,9 +1073,6 @@ async function handleLoveQuestCommand(
         senderID
       );
 
-    /*
-     * Reserved for future choice-based chapters.
-     */
     case "choose": {
       const choice = parts
         .slice(2)
@@ -1116,10 +1080,6 @@ async function handleLoveQuestCommand(
         .trim()
         .toLowerCase();
 
-      /*
-       * At the moment there are no destructive choices.
-       * Keeping the handler here makes future branching easy.
-       */
       if (!choice) {
         await send(
           api,
@@ -1172,9 +1132,9 @@ async function handleLoveQuestCommand(
 }
 
 /*
- * ------------------------------------------------------------
- * Exports
- * ------------------------------------------------------------
+ * ============================================================
+ * EXPORTS
+ * ============================================================
  */
 
 module.exports = {
