@@ -626,6 +626,49 @@ async function connect() {
   `);
 
   // ---------------------------------------------------------------------------
+  // SECRET LOVE QUEST — THE LAST STAR
+  //
+  // Persistent special quest for SPECIAL_PLAYER_ID.
+  // Progress survives Render restarts because it is stored in Neon.
+  // ---------------------------------------------------------------------------
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS rpg_special_quests (
+      thread_id     TEXT NOT NULL,
+      player_id     TEXT NOT NULL,
+      quest_id      TEXT NOT NULL,
+
+      chapter       INTEGER NOT NULL DEFAULT 1,
+      stage         INTEGER NOT NULL DEFAULT 0,
+
+      status        TEXT NOT NULL DEFAULT 'active',
+
+      started_at    BIGINT NOT NULL,
+      updated_at    BIGINT NOT NULL,
+      completed_at  BIGINT,
+
+      PRIMARY KEY (
+        thread_id,
+        player_id,
+        quest_id
+      )
+    );
+
+    CREATE INDEX IF NOT EXISTS rpg_special_quests_player_idx
+      ON rpg_special_quests (
+        player_id,
+        quest_id,
+        status
+      );
+
+    CREATE INDEX IF NOT EXISTS rpg_special_quests_thread_idx
+      ON rpg_special_quests (
+        thread_id,
+        player_id
+      );
+  `);
+  
+  // ---------------------------------------------------------------------------
   // CHARACTER AI
   // ---------------------------------------------------------------------------
 
