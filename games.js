@@ -89,110 +89,100 @@ function validBet(bet) {
 }
 
 // ============================================================
-// AESTHETIC SYSTEM
+// THE VEIL — VISUAL SYSTEM
 // ============================================================
 
 const GAME_STYLE = {
   trivia: {
     icon: "🧠",
-    name: "TRIVIA",
-    accent: "✦",
+    name: "THE VEIL • TRIVIA",
   },
 
   rps: {
     icon: "⚔️",
-    name: "ROCK • PAPER • SCISSORS",
-    accent: "✦",
+    name: "THE VEIL • DUEL",
   },
 
   roll: {
     icon: "🎲",
-    name: "DICE ROLL",
-    accent: "✦",
+    name: "THE VEIL • DICE",
   },
 
   guess: {
     icon: "🎯",
-    name: "NUMBER GUESS",
-    accent: "✦",
+    name: "THE VEIL • GUESS",
   },
 
   coinflip: {
     icon: "🪙",
-    name: "COIN FLIP",
-    accent: "✦",
+    name: "THE VEIL • FATE",
   },
 
   blackjack: {
     icon: "♠️",
-    name: "BLACKJACK",
-    accent: "✦",
+    name: "THE VEIL • BLACKJACK",
   },
 
   slots: {
     icon: "🎰",
-    name: "SLOTS",
-    accent: "✦",
+    name: "THE VEIL • REELS",
   },
 
   math: {
     icon: "🧮",
-    name: "MATH",
-    accent: "✦",
+    name: "THE VEIL • PRECISION",
   },
 
   riddle: {
     icon: "🧩",
-    name: "RIDDLE",
-    accent: "✦",
+    name: "THE VEIL • RIDDLE",
   },
 
   "8ball": {
-    icon: "🎱",
-    name: "8-BALL",
-    accent: "✦",
+    icon: "🔮",
+    name: "THE VEIL • ORACLE",
   },
 
   daily: {
-    icon: "🎁",
-    name: "DAILY REWARD",
-    accent: "✦",
+    icon: "✦",
+    name: "THE VEIL • OFFERING",
   },
 
   work: {
-    icon: "💼",
-    name: "WORK",
-    accent: "✦",
+    icon: "◈",
+    name: "THE VEIL • CONTRACT",
   },
 };
 
 function gameHeader(type, subtitle = "") {
   const style = GAME_STYLE[type] || {
-    icon: "🎮",
-    name: "GAME",
-    accent: "✦",
+    icon: "🌑",
+    name: "THE VEIL",
   };
 
   return [
-    `╭────────── ${style.icon} ${style.name} ──────────╮`,
-    subtitle ? `│  ${subtitle}` : "│",
-    "╰────────────────────────────────────╯",
-  ].join("\n");
+    `╭────────────────────────────╮`,
+    `       ${style.icon} ${style.name}`,
+    `╰────────────────────────────╯`,
+    subtitle ? `♙ ${subtitle}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function divider() {
-  return "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄";
+  return "────────────────────────────";
+}
+
+function thinDivider() {
+  return "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄";
 }
 
 function playerLine(event) {
-  return `♙ ${getPlayerName(event)}`;
+  return getPlayerName(event);
 }
 
-function rewardLine(
-  reward,
-  balanceText,
-  won = true
-) {
+function rewardLine(reward, balanceText, won = true) {
   const xpSign = won ? "+" : "-";
 
   const xpValue = Math.abs(
@@ -205,15 +195,13 @@ function rewardLine(
 
   const coinText =
     won && coinValue > 0
-      ? "+" + formatNumber(coinValue)
+      ? `+${formatNumber(coinValue)}`
       : "0";
 
   return [
     divider(),
-    "⭐ XP   " +
-      xpSign +
-      formatNumber(xpValue),
-    "💰 Coins " + coinText,
+    `⭐ XP       ${xpSign}${formatNumber(xpValue)}`,
+    `💰 Coins    ${coinText}`,
     "",
     balanceText,
   ].join("\n");
@@ -472,27 +460,7 @@ async function editMessageWithRetry(
 }
 
 // ============================================================
-// IMPORTANT DUPLICATE FIX
-// ============================================================
-//
-// If editing fails, DO NOT send another message.
-//
-// Previously:
-//
-//   edit failed
-//       ↓
-//   send new message
-//
-// That created duplicate game messages.
-//
-// Now:
-//
-//   edit failed
-//       ↓
-//   log warning
-//       ↓
-//   no duplicate
-//
+// DUPLICATE MESSAGE PROTECTION
 // ============================================================
 
 async function updateGameMessage(
@@ -599,9 +567,6 @@ function setSession(
     setTimeout(() => {
       sessions.delete(key);
       sessionTimers.delete(key);
-
-      // Release game lock when
-      // the session expires.
       activeGames.delete(key);
     }, SESSION_TIMEOUT_MS)
   );
@@ -726,10 +691,14 @@ async function handleDaily(
         api,
         event,
         [
-          "🎁 DAILY REWARD",
+          "╭────────────────────────────╮",
+          "       ✦ THE VEIL",
+          "       DAILY OFFERING",
+          "╰────────────────────────────╯",
           "",
-          `⏳ You already claimed today's reward.`,
-          `Come back in ${hours}h ${minutes}m.`,
+          "🌑 The offering has already been claimed.",
+          "",
+          `⏳ Return in ${hours}h ${minutes}m.`,
         ].join("\n")
       );
 
@@ -798,13 +767,11 @@ async function handleDaily(
           playerLine(event)
         ),
         "",
-        "╭──────── 🏆 CLAIMED ────────╮",
-        "│  Your daily reward is ready!",
-        "╰────────────────────────────╯",
+        "The Veil opens its hand.",
         "",
-        `💰 Base reward  +${formatNumber(baseReward)}`,
-        `🔥 Streak bonus +${formatNumber(streakBonus)}`,
-        `💎 Total        +${formatNumber(totalReward)}`,
+        `💰 Base        +${formatNumber(baseReward)}`,
+        `🔥 Streak      +${formatNumber(streakBonus)}`,
+        `✦ Total        +${formatNumber(totalReward)}`,
         `⭐ XP           +50`,
         "",
         `🔥 Daily streak: ${streak}`,
@@ -823,7 +790,7 @@ async function handleDaily(
     await safeReply(
       api,
       event,
-      "❌ Daily reward failed."
+      "🌑 The Veil could not release today's offering."
     );
 
     return true;
@@ -937,10 +904,14 @@ async function handleWork(
         api,
         event,
         [
-          "💼 WORK",
+          "╭────────────────────────────╮",
+          "       ◈ THE VEIL",
+          "          CONTRACT",
+          "╰────────────────────────────╯",
           "",
-          "⏳ You're still on cooldown.",
-          `Come back in ${minutes}m ${seconds}s.`,
+          "⏳ Your current contract is still cooling down.",
+          "",
+          `Return in ${minutes}m ${seconds}s.`,
         ].join("\n")
       );
 
@@ -996,12 +967,13 @@ async function handleWork(
           playerLine(event)
         ),
         "",
-        "╭──────── 💼 SHIFT COMPLETE ────────╮",
-        `│  Job: ${job.job}`,
-        "╰────────────────────────────────────╯",
+        "A contract has found you.",
         "",
+        `💼 ${job.job}`,
         `💰 Earned: +${formatNumber(earned)} coins`,
         `⭐ XP: +${formatNumber(job.xp)}`,
+        "",
+        "The shift is complete.",
         "",
         balanceText,
       ].join("\n")
@@ -1017,7 +989,7 @@ async function handleWork(
     await safeReply(
       api,
       event,
-      "❌ Work failed."
+      "🌑 The Veil could not assign a contract."
     );
 
     return true;
@@ -1047,7 +1019,7 @@ async function handleTrivia(
     await safeReply(
       api,
       event,
-      "⏳ You already have a game in progress."
+      "🌑 The Veil is already occupied.\n\nFinish your current challenge first."
     );
 
     return;
@@ -1068,7 +1040,7 @@ async function handleTrivia(
       await safeReply(
         api,
         event,
-        "❌ No trivia questions are available."
+        "🌑 The Veil has no unanswered questions available."
       );
 
       return;
@@ -1080,7 +1052,7 @@ async function handleTrivia(
         playerLine(event)
       ),
       "",
-      divider(),
+      "KNOWLEDGE IS POWER",
       "",
       `❓ ${q.question}`,
       "",
@@ -1089,8 +1061,8 @@ async function handleTrivia(
       `〔 C 〕 ${q.options[2]}`,
       `〔 D 〕 ${q.options[3]}`,
       "",
-      divider(),
-      "⭐ +50 XP   •   💰 +150 coins",
+      thinDivider(),
+      "✦ Correct  +50 XP  •  +150 coins",
       "",
       "↳ Reply with A, B, C or D",
     ].join("\n");
@@ -1127,7 +1099,7 @@ async function handleTrivia(
     await safeReply(
       api,
       event,
-      "❌ Trivia failed."
+      "🌑 The Veil could not reveal a question."
     );
   }
 }
@@ -1158,7 +1130,7 @@ function parseNumericAnswer(
 ) {
   const match =
     String(value || "").match(
-      /[-+]?\d+(?:\.\d+)?/
+      /[-+]?\d+(?:\.\d+)*/
     );
 
   return match
@@ -1272,14 +1244,14 @@ async function resolveTrivia(
       gameHeader("trivia"),
       "",
       correct
-        ? "╭──── 🏆 CORRECT ────╮"
-        : "╭──── ❌ INCORRECT ──╮",
-      correct
-        ? "│  Excellent answer!"
-        : "│  Better luck next time.",
-      "╰────────────────────╯",
+        ? "🏆 KNOWLEDGE PREVAILS"
+        : "❌ THE VEIL REMAINS",
       "",
       `✓ Correct answer: ${correctLetter}`,
+      "",
+      correct
+        ? "✦ Your answer pierced the Veil."
+        : "✦ The answer remains beyond your grasp.",
       "",
       rewardLine(
         reward,
@@ -1333,7 +1305,7 @@ async function handleRPS(
     await safeReply(
       api,
       event,
-      "⏳ You already have a game in progress."
+      "🌑 The Veil is already occupied.\n\nFinish your current challenge first."
     );
 
     return;
@@ -1372,7 +1344,7 @@ async function handleRPS(
       await safeReply(
         api,
         event,
-        "❌ Choose rock, paper, or scissors."
+        "⚔️ Choose rock, paper, or scissors."
       );
 
       return;
@@ -1423,13 +1395,13 @@ async function handleRPS(
             playerLine(event)
           ),
           "",
-          divider(),
+          "CHALLENGE ACCEPTED",
           "",
           "⚔️ The opponent is choosing...",
           "",
           "      ⟡  ⟡  ⟡",
           "",
-          "          WAIT",
+          "       FATE DECIDES",
         ].join("\n"),
         "rps"
       );
@@ -1471,10 +1443,16 @@ async function handleRPS(
       "",
       `${resultEmoji} ${resultText}`,
       "",
-      divider(),
+      thinDivider(),
       "",
-      `♙ YOU      ${normalizedChoice.toUpperCase()}`,
-      `♟ OPPONENT ${botChoice.toUpperCase()}`,
+      `♙ YOU       ${normalizedChoice.toUpperCase()}`,
+      `♟ OPPONENT  ${botChoice.toUpperCase()}`,
+      "",
+      result === "win"
+        ? "✦ The Veil favors you."
+        : result === "loss"
+          ? "✦ The Veil favors your opponent."
+          : "✦ Neither warrior prevails.",
       "",
       rewardLine(
         reward,
@@ -1498,7 +1476,7 @@ async function handleRPS(
     await safeReply(
       api,
       event,
-      "❌ RPS failed."
+      "🌑 The duel was interrupted."
     );
   } finally {
     unlockGame(
@@ -1532,7 +1510,7 @@ async function handleRoll(
     await safeReply(
       api,
       event,
-      "⏳ You already have a game in progress."
+      "🌑 The Veil is already occupied.\n\nFinish your current challenge first."
     );
 
     return;
@@ -1560,7 +1538,7 @@ async function handleRoll(
       await safeReply(
         api,
         event,
-        `❌ Your roll bet must be between 1 and ${formatNumber(MAX_BET)} coins.`
+        `🎲 Invalid wager.\n\nMinimum: 1\nMaximum: ${formatNumber(MAX_BET)} coins`
       );
 
       return;
@@ -1578,7 +1556,7 @@ async function handleRoll(
       await safeReply(
         api,
         event,
-        "❌ Die sides must be between 2 and 1000."
+        "🎲 Die sides must be between 2 and 1000."
       );
 
       return;
@@ -1594,10 +1572,10 @@ async function handleRoll(
             playerLine(event)
           ),
           "",
-          divider(),
+          "THE DIE HAS BEEN CAST",
           "",
           `🎲 Rolling a ${sides}-sided die...`,
-          `💰 Bet: ${formatNumber(bet)} coins`,
+          `💰 Wager: ${formatNumber(bet)} coins`,
           "",
           "       ⚄",
           "",
@@ -1623,7 +1601,8 @@ async function handleRoll(
         [
           gameHeader("roll"),
           "",
-          "❌ Roll cancelled.",
+          "🌑 WAGER REJECTED",
+          "",
           error.message ||
             "Not enough wallet coins.",
         ].join("\n")
@@ -1676,15 +1655,15 @@ async function handleRoll(
       gameHeader("roll"),
       "",
       won
-        ? "╭──────── 🏆 HIGH HIT ────────╮"
-        : "╭──────── ❌ LOW ROLL ─────────╮",
-      `│        🎲 ${result} / ${sides}`,
-      "╰──────────────────────────────╯",
+        ? "🏆 HIGH HIT"
+        : "❌ LOW ROLL",
       "",
-      `High starts at ${highThreshold}+`,
+      `🎲 Result: ${result} / ${sides}`,
+      `✦ High starts at: ${highThreshold}+`,
+      "",
       won
-        ? `🏆 Payout: +${formatNumber(payout)} coins (2× bet)`
-        : `💸 Lost bet: -${formatNumber(bet)} coins`,
+        ? `💰 Payout: +${formatNumber(payout)} coins`
+        : `💸 Lost wager: -${formatNumber(bet)} coins`,
       "",
       balanceText,
     ].join("\n");
@@ -1722,7 +1701,7 @@ async function handleRoll(
     await safeReply(
       api,
       event,
-      "❌ Roll failed."
+      "🌑 The die could not complete its judgment."
     );
   } finally {
     unlockGame(
@@ -1756,7 +1735,7 @@ async function handleGuess(
     await safeReply(
       api,
       event,
-      "⏳ You already have a game in progress."
+      "🌑 The Veil is already occupied.\n\nFinish your current challenge first."
     );
 
     return;
@@ -1786,7 +1765,7 @@ async function handleGuess(
       await safeReply(
         api,
         event,
-        "❌ Minimum must be lower than maximum."
+        "🎯 Minimum must be lower than maximum."
       );
 
       return;
@@ -1808,12 +1787,13 @@ async function handleGuess(
             playerLine(event)
           ),
           "",
-          divider(),
+          "THE NUMBER IS HIDDEN",
           "",
-          "🎯 Find the number between",
-          `   ${min} and ${max}`,
+          `Range: ${min} ───────── ${max}`,
           "",
-          "You have 3 attempts.",
+          "Attempt: 0 / 3",
+          "",
+          "✦ Trust your intuition.",
           "",
           "↳ Send your first guess.",
         ].join("\n"),
@@ -1847,7 +1827,7 @@ async function handleGuess(
     await safeReply(
       api,
       event,
-      "❌ Guess failed."
+      "🌑 The Veil could not hide a number."
     );
   }
 }
@@ -1887,7 +1867,7 @@ async function resolveGuess(
     await safeReply(
       api,
       event,
-      "❌ Enter a number."
+      "🎯 Enter a number."
     );
 
     return true;
@@ -1906,21 +1886,21 @@ async function resolveGuess(
     isCorrect = true;
 
     resultMessage =
-      `🏆 Correct! You found ${session.secretNumber} in ${tries} attempt${tries === 1 ? "" : "s"}.`;
+      `🏆 Correct. You found ${session.secretNumber} in ${tries} attempt${tries === 1 ? "" : "s"}.`;
   } else if (
     tries >= 3
   ) {
     resultMessage =
-      `❌ The number was ${session.secretNumber}.`;
+      `❌ The hidden number was ${session.secretNumber}.`;
   } else if (
     guess <
     session.secretNumber
   ) {
     resultMessage =
-      `📈 Too low. Go higher. • ${3 - tries} attempt${3 - tries === 1 ? "" : "s"} left`;
+      `📈 Too low. The number is higher. • ${3 - tries} attempt${3 - tries === 1 ? "" : "s"} left`;
   } else {
     resultMessage =
-      `📉 Too high. Go lower. • ${3 - tries} attempt${3 - tries === 1 ? "" : "s"} left`;
+      `📉 Too high. The number is lower. • ${3 - tries} attempt${3 - tries === 1 ? "" : "s"} left`;
   }
 
   const terminal =
@@ -1954,8 +1934,8 @@ async function resolveGuess(
         resultMessage,
         "",
         isCorrect
-          ? "✦ Your intuition was correct."
-          : "✦ The number remains hidden no longer.",
+          ? "✦ Your intuition pierced the Veil."
+          : "✦ The hidden number remains victorious.",
         "",
         rewardLine(
           reward,
@@ -1979,7 +1959,7 @@ async function resolveGuess(
       await safeReply(
         api,
         event,
-        "❌ Guess ended, but the final reward update failed."
+        "🌑 Guess ended, but the reward update failed."
       );
     } finally {
       unlockGame(
@@ -2042,7 +2022,7 @@ async function handleCoinFlip(
     await safeReply(
       api,
       event,
-      "⏳ You already have a game in progress."
+      "🌑 The Veil is already occupied.\n\nFinish your current challenge first."
     );
 
     return;
@@ -2111,7 +2091,7 @@ async function handleCoinFlip(
       await safeReply(
         api,
         event,
-        `❌ Usage: !coinflip <bet> <heads|tails>\nExample: !coinflip 100 heads`
+        "🪙 Usage: !coinflip <bet> <heads|tails>\nExample: !coinflip 100 heads"
       );
 
       return;
@@ -2127,10 +2107,10 @@ async function handleCoinFlip(
             playerLine(event)
           ),
           "",
-          divider(),
+          "FATE CHOOSES",
           "",
           `🪙 Your call: ${choice.toUpperCase()}`,
-          `💰 Bet: ${formatNumber(bet)} coins`,
+          `💰 Wager: ${formatNumber(bet)} coins`,
           "",
           "       ◉",
           "",
@@ -2158,7 +2138,8 @@ async function handleCoinFlip(
             "coinflip"
           ),
           "",
-          "❌ Coinflip cancelled.",
+          "🌑 WAGER REJECTED",
+          "",
           error.message ||
             "Not enough wallet coins.",
         ].join("\n")
@@ -2205,15 +2186,17 @@ async function handleCoinFlip(
         "coinflip"
       ),
       "",
-      `🪙 ${result.toUpperCase()}`,
+      won
+        ? "🏆 THE CALL WAS CORRECT"
+        : "❌ THE CALL FAILED",
       "",
       `Your call  •  ${choice.toUpperCase()}`,
       `Result     •  ${result.toUpperCase()}`,
-      `Bet        •  ${formatNumber(bet)} coins`,
+      `Wager      •  ${formatNumber(bet)} coins`,
       "",
       won
-        ? `🏆 You win ${formatNumber(payout)} coins (2× payout).`
-        : `❌ You lose ${formatNumber(bet)} coins.`,
+        ? `💰 Payout: +${formatNumber(payout)} coins`
+        : `💸 Lost wager: -${formatNumber(bet)} coins`,
       "",
       balanceText,
     ].join("\n");
@@ -2264,7 +2247,7 @@ async function handleCoinFlip(
     await safeReply(
       api,
       event,
-      "❌ Coinflip failed."
+      "🌑 Fate could not complete the coin toss."
     );
   } finally {
     unlockGame(
@@ -2408,7 +2391,7 @@ async function handleBlackjack(
     await safeReply(
       api,
       event,
-      "⏳ You already have a game in progress."
+      "🌑 The Veil is already occupied.\n\nFinish your current challenge first."
     );
 
     return;
@@ -2443,7 +2426,7 @@ async function handleBlackjack(
             playerLine(event)
           ),
           "",
-          divider(),
+          "THE TABLE IS OPEN",
           "",
           `♙ YOU     ${playerHand.join("  ")}`,
           `          Total: ${playerValue}`,
@@ -2451,10 +2434,10 @@ async function handleBlackjack(
           `♟ DEALER  ${botHand[0]}  ▣`,
           "          Total: ?",
           "",
-          divider(),
+          thinDivider(),
           "",
-          "↳ hit   •   draw another card",
-          "↳ stand •   hold your hand",
+          "↳ !hit   Draw another card",
+          "↳ !stand Hold your hand",
         ].join("\n"),
         "blackjack"
       );
@@ -2485,7 +2468,7 @@ async function handleBlackjack(
     await safeReply(
       api,
       event,
-      "❌ Blackjack failed."
+      "🌑 The blackjack table could not open."
     );
   }
 }
@@ -2531,17 +2514,13 @@ async function resolveBlackjack(
     await safeReply(
       api,
       event,
-      "❌ Use `hit` or `stand`."
+      "♠️ Use !hit or !stand."
     );
 
     return true;
   }
 
   try {
-    // ----------------------------------------------------------
-    // HIT
-    // ----------------------------------------------------------
-
     if (cmd === "hit") {
       const card =
         drawCard(
@@ -2585,12 +2564,12 @@ async function resolveBlackjack(
               "blackjack"
             ),
             "",
-            "╭────────── BUST ─────────╮",
-            "│  ❌ Your hand went over 21.",
-            "╰─────────────────────────╯",
+            "❌ BUST",
             "",
             `♙ ${session.playerHand.join("  ")}`,
             `Total: ${playerValue}`,
+            "",
+            "The hand crossed 21.",
             "",
             rewardLine(
               reward,
@@ -2626,18 +2605,16 @@ async function resolveBlackjack(
           "blackjack"
         ),
         "",
-        divider(),
-        "",
         `♙ YOU     ${session.playerHand.join("  ")}`,
         `          Total: ${playerValue}`,
         "",
         `♟ DEALER  ${session.botHand[0]}  ▣`,
         "          Total: ?",
         "",
-        divider(),
+        thinDivider(),
         "",
-        "↳ hit   •   draw another card",
-        "↳ stand •   hold your hand",
+        "↳ !hit   Draw another card",
+        "↳ !stand Hold your hand",
       ].join("\n");
 
       await updateGameMessage(
@@ -2649,10 +2626,6 @@ async function resolveBlackjack(
 
       return true;
     }
-
-    // ----------------------------------------------------------
-    // STAND
-    // ----------------------------------------------------------
 
     clearSession(
       threadID,
@@ -2686,27 +2659,27 @@ async function resolveBlackjack(
 
     let result = "loss";
     let resultText =
-      "Dealer wins.";
+      "The dealer wins.";
 
     if (
       botValue > 21
     ) {
       result = "win";
       resultText =
-        "Dealer busted. You win!";
+        "The dealer busted. You win!";
     } else if (
       playerValue > botValue
     ) {
       result = "win";
       resultText =
-        "You win!";
+        "Your hand prevails.";
     } else if (
       playerValue ===
       botValue
     ) {
       result = "draw";
       resultText =
-        "Push — it's a draw.";
+        "Push — neither hand prevails.";
     }
 
     try {
@@ -2734,8 +2707,6 @@ async function resolveBlackjack(
           : result === "draw"
             ? "🤝 PUSH"
             : "❌ DEALER WINS",
-        "",
-        divider(),
         "",
         `♙ YOU     ${session.playerHand.join("  ")}`,
         `          Total: ${playerValue}`,
@@ -2785,7 +2756,7 @@ async function resolveBlackjack(
     await safeReply(
       api,
       event,
-      "❌ Blackjack ended because something went wrong."
+      "🌑 The blackjack hand ended unexpectedly."
     );
 
     return true;
@@ -2794,24 +2765,6 @@ async function resolveBlackjack(
 
 // ============================================================
 // SLOTS
-// ============================================================
-//
-// Payout system:
-//
-// 🍒🍒🍒 = 10×
-// ⭐⭐⭐ = 15×
-// 💎💎💎 = 20×
-// Any pair = 2×
-//
-// The bet is charged FIRST.
-// The payout includes the original bet.
-//
-// Example:
-//
-// Bet = 100
-// Triple ⭐ = 1500 returned
-// Net profit = +1400
-//
 // ============================================================
 
 const SLOT_SYMBOLS = [
@@ -2874,7 +2827,7 @@ async function handleSlots(
     await safeReply(
       api,
       event,
-      "⏳ You already have a game in progress."
+      "🌑 The Veil is already occupied.\n\nFinish your current challenge first."
     );
 
     return;
@@ -2898,7 +2851,7 @@ async function handleSlots(
       await safeReply(
         api,
         event,
-        `❌ Usage: !slots <bet>\nBet must be between 1 and ${formatNumber(MAX_BET)} coins.`
+        `🎰 Invalid wager.\n\nMinimum: 1\nMaximum: ${formatNumber(MAX_BET)} coins`
       );
 
       return;
@@ -2914,11 +2867,11 @@ async function handleSlots(
             playerLine(event)
           ),
           "",
-          divider(),
+          "THE REELS AWAKEN",
           "",
           "│     🍒   │   🍋   │   ⭐     │",
           "",
-          `💰 Bet: ${formatNumber(bet)} coins`,
+          `💰 Wager: ${formatNumber(bet)} coins`,
           "",
           "             SPINNING",
         ].join("\n"),
@@ -2944,7 +2897,8 @@ async function handleSlots(
             "slots"
           ),
           "",
-          "❌ Slots cancelled.",
+          "🌑 WAGER REJECTED",
+          "",
           error.message ||
             "Not enough wallet coins.",
         ].join("\n")
@@ -3000,7 +2954,7 @@ async function handleSlots(
             "slots"
           ),
           "",
-          divider(),
+          thinDivider(),
           "",
           reelText(
             rolling
@@ -3053,23 +3007,23 @@ async function handleSlots(
     const finalText = [
       gameHeader("slots"),
       "",
-      divider(),
+      thinDivider(),
       "",
       reelText(reels),
       "",
       won
-        ? `🏆 ${multiplier}× MATCH!`
+        ? `🏆 ${multiplier}× MATCH`
         : "❌ NO MATCH",
       "",
       won
         ? `💰 Payout: +${formatNumber(payout)} coins`
-        : `💸 Lost bet: -${formatNumber(bet)} coins`,
+        : `💸 Lost wager: -${formatNumber(bet)} coins`,
       won
         ? `📈 Net profit: +${formatNumber(net)} coins`
         : "",
       "",
       balanceText,
-    ].join("\n");
+    ].filter(Boolean).join("\n");
 
     await updateGameMessage(
       api,
@@ -3104,7 +3058,7 @@ async function handleSlots(
     await safeReply(
       api,
       event,
-      "❌ Slots failed."
+      "🌑 The reels could not complete their judgment."
     );
   } finally {
     unlockGame(
@@ -3137,7 +3091,7 @@ async function handleMath(
     await safeReply(
       api,
       event,
-      "⏳ You already have a game in progress."
+      "🌑 The Veil is already occupied.\n\nFinish your current challenge first."
     );
 
     return;
@@ -3188,13 +3142,13 @@ async function handleMath(
             playerLine(event)
           ),
           "",
-          divider(),
+          "PRECISION REQUIRED",
           "",
-          "🧮 Solve the equation",
+          "🧮 Solve:",
           "",
           `        ${a} ${op} ${b}`,
           "",
-          divider(),
+          thinDivider(),
           "",
           "↳ Reply with your answer.",
         ].join("\n"),
@@ -3225,7 +3179,7 @@ async function handleMath(
     await safeReply(
       api,
       event,
-      "❌ Math failed."
+      "🌑 The Veil could not generate an equation."
     );
   }
 }
@@ -3290,13 +3244,14 @@ async function resolveMath(
       gameHeader("math"),
       "",
       correct
-        ? "🏆 CORRECT"
-        : "❌ WRONG",
+        ? "🏆 CALCULATION COMPLETE"
+        : "❌ CALCULATION FAILED",
       "",
-      `Answer: ${session.correctAnswer}`,
+      `Your answer: ${Number.isNaN(userAnswer) ? "Invalid" : userAnswer}`,
+      `Correct: ${session.correctAnswer}`,
       "",
       correct
-        ? "✦ Calculation complete."
+        ? "✦ Precision wins."
         : "✦ The equation wins this round.",
       "",
       rewardLine(
@@ -3350,7 +3305,7 @@ async function handleRiddle(
     await safeReply(
       api,
       event,
-      "⏳ You already have a game in progress."
+      "🌑 The Veil is already occupied.\n\nFinish your current challenge first."
     );
 
     return;
@@ -3371,7 +3326,7 @@ async function handleRiddle(
       await safeReply(
         api,
         event,
-        "❌ No riddles are available."
+        "🌑 The Veil has no riddles available."
       );
 
       return;
@@ -3387,13 +3342,13 @@ async function handleRiddle(
             playerLine(event)
           ),
           "",
-          divider(),
+          "THE VEIL SPEAKS IN QUESTIONS",
           "",
-          `❓ ${riddle.question}`,
+          `❝ ${riddle.question} ❞`,
           "",
           "🧠 Think carefully.",
           "",
-          divider(),
+          thinDivider(),
           "",
           "↳ Reply with your answer.",
         ].join("\n"),
@@ -3427,7 +3382,7 @@ async function handleRiddle(
     await safeReply(
       api,
       event,
-      "❌ Riddle failed."
+      "🌑 The Veil could not reveal a riddle."
     );
   }
 }
@@ -3493,13 +3448,14 @@ async function resolveRiddle(
       gameHeader("riddle"),
       "",
       correct
-        ? "🏆 CORRECT ANSWER"
-        : "❌ WRONG ANSWER",
+        ? "🏆 MYSTERY SOLVED"
+        : "❌ THE VEIL ENDURES",
       "",
-      `Correct answer: ${session.answers[0]}`,
+      `Your answer: ${answerText}`,
+      `Correct: ${session.answers[0]}`,
       "",
       correct
-        ? "✦ Your mind solved it."
+        ? "✦ Your mind pierced the mystery."
         : "✦ The riddle remains undefeated.",
       "",
       rewardLine(
@@ -3577,7 +3533,7 @@ async function handleEightBall(
     await safeReply(
       api,
       event,
-      "⏳ You already have a game in progress."
+      "🌑 The Veil is already occupied.\n\nFinish your current challenge first."
     );
 
     return;
@@ -3600,7 +3556,7 @@ async function handleEightBall(
       await safeReply(
         api,
         event,
-        "❌ Ask a yes/no question."
+        "🔮 Ask the Oracle a question."
       );
 
       return;
@@ -3616,11 +3572,11 @@ async function handleEightBall(
             playerLine(event)
           ),
           "",
-          divider(),
+          "THE ORACLE LISTENS",
           "",
           `❝ ${question} ❞`,
           "",
-          "🎱 Consulting the oracle...",
+          "🔮 Consulting the Veil...",
           "",
           "             ◉",
         ].join("\n"),
@@ -3656,15 +3612,18 @@ async function handleEightBall(
     const finalText = [
       gameHeader("8ball"),
       "",
-      divider(),
+      "🔮 THE ORACLE ANSWERS",
       "",
       `❝ ${question} ❞`,
       "",
-      `🎱 ${response}`,
+      `        ✦`,
       "",
-      divider(),
+      `"${response}"`,
       "",
-      `💰 +${reward.coins} coins`,
+      thinDivider(),
+      "",
+      `💰 +${formatNumber(reward.coins)} coins`,
+      `⭐ +${formatNumber(reward.xp)} XP`,
       "",
       balanceText,
     ].join("\n");
@@ -3684,7 +3643,7 @@ async function handleEightBall(
     await safeReply(
       api,
       event,
-      "❌ 8Ball failed."
+      "🌑 The Oracle could not answer."
     );
   } finally {
     unlockGame(
@@ -3692,6 +3651,319 @@ async function handleEightBall(
       userID
     );
   }
+}
+
+// ============================================================
+// GAME STATUS
+// ============================================================
+
+async function handleGameStatus(
+  api,
+  event
+) {
+  const threadID =
+    String(event.threadID);
+
+  const userID =
+    String(event.senderID);
+
+  try {
+    const user =
+      await db.getUser(
+        threadID,
+        userID
+      );
+
+    const balance =
+      formatNumber(
+        user?.balance ?? 0
+      );
+
+    const xp =
+      formatNumber(
+        user?.xp ?? 0
+      );
+
+    const active =
+      activeGames.has(
+        sessionKey(
+          threadID,
+          userID
+        )
+      );
+
+    const session =
+      getSession(
+        threadID,
+        userID
+      );
+
+    const sessionName =
+      session?.type
+        ? String(
+            session.type
+          ).toUpperCase()
+        : "NONE";
+
+    await sendMessageAsync(
+      api,
+      threadID,
+      [
+        gameHeader(
+          "8ball",
+          playerLine(event)
+        ),
+        "",
+        "YOUR VEIL STATUS",
+        "",
+        `💰 Wallet      ${balance}`,
+        `⭐ XP          ${xp}`,
+        "",
+        `🎮 Active      ${active ? "YES" : "NO"}`,
+        `🌑 Session     ${sessionName}`,
+        "",
+        thinDivider(),
+        "",
+        active
+          ? "✦ A challenge is currently active."
+          : "✦ No active challenge.",
+        "",
+        "The Veil remembers every result.",
+      ].join("\n")
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      "[games] status:",
+      error
+    );
+
+    await safeReply(
+      api,
+      event,
+      "🌑 The Veil could not retrieve your status."
+    );
+
+    return true;
+  }
+}
+
+// ============================================================
+// GAME RULES
+// ============================================================
+
+async function handleGameRules(
+  api,
+  event
+) {
+  const threadID =
+    String(event.threadID);
+
+  await sendMessageAsync(
+    api,
+    threadID,
+    [
+      "╭────────────────────────────╮",
+      "          🌑 THE VEIL",
+      "           RULEBOOK",
+      "╰────────────────────────────╯",
+      "",
+      "       RISK • SKILL • FATE",
+      "",
+      "╭────── 🧠 CHALLENGES ──────╮",
+      "",
+      "🧠 TRIVIA",
+      "• Four choices appear.",
+      "• Answer with A, B, C or D.",
+      "• Correct: +50 XP and +150 coins.",
+      "• Wrong: -25 XP.",
+      "",
+      "🧩 RIDDLE",
+      "• Solve the generated riddle.",
+      "• Correct: +50 XP and +150 coins.",
+      "• Wrong: -25 XP.",
+      "• Used riddles are tracked by the manager.",
+      "",
+      "🧮 MATH",
+      "• Solve the generated equation.",
+      "• Correct: +50 XP and +175 coins.",
+      "• Wrong: -25 XP.",
+      "",
+      "╰────────────────────────────╯",
+      "",
+      "╭────── 🎲 FORTUNE ─────────╮",
+      "",
+      "🎲 ROLL",
+      "!roll <bet> [sides]",
+      "• Default die: 1–100.",
+      "• Custom die: 2–1000.",
+      "• High threshold is 55% of the die.",
+      "• Win = 2× wager.",
+      "",
+      "🪙 COINFLIP",
+      "!coinflip <bet> <heads|tails>",
+      "• Correct prediction = 2× wager.",
+      "• Wrong prediction loses the wager.",
+      "",
+      "🎰 SLOTS",
+      "!slots <bet>",
+      "• Any pair = 2×.",
+      "• Any normal triple = 10×.",
+      "• ⭐⭐⭐ = 15×.",
+      "• 💎💎💎 = 20×.",
+      "",
+      "╰────────────────────────────╯",
+      "",
+      "╭────── 🎯 CHALLENGES ──────╮",
+      "",
+      "🎯 GUESS",
+      "!guess <min> <max>",
+      "• Find the hidden number.",
+      "• You receive 3 attempts.",
+      "• Correct = +50 XP and +150 coins.",
+      "• Wrong final result = -25 XP.",
+      "",
+      "⚔️ RPS",
+      "!rps <rock|paper|scissors>",
+      "• Rock beats Scissors.",
+      "• Scissors beats Paper.",
+      "• Paper beats Rock.",
+      "• Win = +40 XP and +100 coins.",
+      "• Draw = no coin reward.",
+      "",
+      "╰────────────────────────────╯",
+      "",
+      "╭────── ♠️ TABLE ───────────╮",
+      "",
+      "♠️ BLACKJACK",
+      "!blackjack",
+      "",
+      "Actions:",
+      "!hit",
+      "!stand",
+      "",
+      "• Dealer draws until reaching 17.",
+      "• Higher hand wins.",
+      "• Dealer bust = player win.",
+      "• Equal totals = push.",
+      "• Win = +60 XP and +175 coins.",
+      "• Loss = -30 XP.",
+      "",
+      "╰────────────────────────────╯",
+      "",
+      "╭────── 🔮 UNKNOWN ─────────╮",
+      "",
+      "🔮 8-BALL",
+      "!8ball <question>",
+      "• Ask the Oracle.",
+      "• No wager required.",
+      "• +10 XP and +25 coins.",
+      "",
+      "╰────────────────────────────╯",
+      "",
+      "╭────── 💰 LIMITS ──────────╮",
+      "",
+      `Maximum wager: ${formatNumber(MAX_BET)} coins`,
+      "",
+      "Wagers are charged before resolution.",
+      "Unexpected failures are refunded",
+      "when the wager has already been charged.",
+      "",
+      "╰────────────────────────────╯",
+      "",
+      "        🌑 THE VEIL",
+      "",
+      "     Enter for fortune.",
+      "     Leave with what fate allows.",
+      "",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+      "↩ !games • Return to the Game Center",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    ].join("\n")
+  );
+
+  return true;
+}
+
+// ============================================================
+// GAME CENTER
+// ============================================================
+
+async function handleGameCenter(
+  api,
+  event
+) {
+  const threadID =
+    String(event.threadID);
+
+  await sendMessageAsync(
+    api,
+    threadID,
+    [
+      "╭────────────────────────────╮",
+      "          🌑 THE VEIL",
+      "╰────────────────────────────╯",
+      "",
+      "      FATE • SKILL • FORTUNE",
+      "",
+      "╭────── 🧠 CHALLENGE ───────╮",
+      "",
+      "🧠 TRIVIA",
+      "   Test your knowledge",
+      "   !trivia",
+      "",
+      "🧩 RIDDLE",
+      "   Outsmart the unknown",
+      "   !riddle",
+      "",
+      "🧮 MATH",
+      "   Precision under pressure",
+      "   !math",
+      "",
+      "╰────────────────────────────╯",
+      "",
+      "╭────── 🎲 FORTUNE ─────────╮",
+      "",
+      "🎲 ROLL",
+      "   !roll <bet> [sides]",
+      "",
+      "🪙 COINFLIP",
+      "   !coinflip <bet> <heads|tails>",
+      "",
+      "🎯 GUESS",
+      "   !guess <min> <max>",
+      "",
+      "🎰 SLOTS",
+      "   !slots <bet>",
+      "",
+      "╰────────────────────────────╯",
+      "",
+      "╭────── ⚔️ TABLE ───────────╮",
+      "",
+      "⚔️ RPS",
+      "   !rps <rock|paper|scissors>",
+      "",
+      "♠️ BLACKJACK",
+      "   !blackjack",
+      "   !hit • !stand",
+      "",
+      "🔮 8-BALL",
+      "   !8ball <question>",
+      "",
+      "╰────────────────────────────╯",
+      "",
+      "🌑 !games rules",
+      "   View the complete rulebook.",
+      "",
+      "🌑 !games status",
+      "   View your Veil status.",
+      "",
+      "        ✦ FATE HAS NO FAVORITES ✦",
+    ].join("\n")
+  );
+
+  return true;
 }
 
 // ============================================================
@@ -3757,6 +4029,54 @@ async function handleGameCommand(
   const normalizedArgs =
     normalizeArgs(args);
 
+  // ----------------------------------------------------------
+  // GAME CENTER SUBCOMMANDS
+  // ----------------------------------------------------------
+
+  if (
+    cmd === "games"
+  ) {
+    const subcommand =
+      String(
+        normalizedArgs[0] || ""
+      )
+        .trim()
+        .toLowerCase();
+
+    if (
+      subcommand === "rules"
+    ) {
+      await handleGameRules(
+        api,
+        event
+      );
+
+      return true;
+    }
+
+    if (
+      subcommand === "status"
+    ) {
+      await handleGameStatus(
+        api,
+        event
+      );
+
+      return true;
+    }
+
+    await handleGameCenter(
+      api,
+      event
+    );
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // DAILY / WORK
+  // ----------------------------------------------------------
+
   if (
     cmd === "daily"
   ) {
@@ -3778,6 +4098,10 @@ async function handleGameCommand(
 
     return true;
   }
+
+  // ----------------------------------------------------------
+  // GAMES
+  // ----------------------------------------------------------
 
   if (
     cmd === "trivia"
@@ -3863,7 +4187,7 @@ async function handleGameCommand(
     await safeReply(
       api,
       event,
-      `❌ Unknown game: ${cmd}`
+      `🌑 UNKNOWN PATH\n\n"${cmd}" is not part of The Veil.\n\nUse !games to view the available games.`
     );
 
     return false;
@@ -3963,18 +4287,13 @@ async function handleGameResponse(
 // ============================================================
 
 module.exports = {
-  // Main dispatcher expected by index.js
   handleGameCommand,
 
-  // Compatibility with index.js that uses
-  // handleGamesCommand
   handleGamesCommand:
     handleGameCommand,
 
-  // Session response handler
   handleGameResponse,
 
-  // Individual game handlers
   handleDaily,
   handleWork,
   handleTrivia,
@@ -3988,7 +4307,10 @@ module.exports = {
   handleRiddle,
   handleEightBall,
 
-  // Lock helpers
+  handleGameCenter,
+  handleGameRules,
+  handleGameStatus,
+
   lockGame,
   unlockGame,
 };
