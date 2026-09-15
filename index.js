@@ -1,27 +1,27 @@
 "use strict";
 
-const fs = require(“fs”);
-const fsp = require(“fs/promises”);
-const os = require(“os”);
-const path = require(“path”);
-const crypto = require(“crypto”);
-const express = require(“express”);
-const { login } = require(“ws3-fca”);
+const fs = require("fs");
+const fsp = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const crypto = require("crypto");
+const express = require("express");
+const { login } = require("ws3-fca");
 
-const db = require(”./db”);
+const db = require("./db");
 
-const { handleEconomyCommand } = require(”./economy”);
-
-const {
-handleGamesCommand,
-handleGameResponse,
-} = require(”./games”);
-
-const { handleRpgCommand } = require(”./rpg”);
+const { handleEconomyCommand } = require("./economy");
 
 const {
-handleRpgCharacterMessage,
-} = require(”./rpg/character-ai”);
+  handleGamesCommand,
+  handleGameResponse,
+} = require("./games");
+
+const { handleRpgCommand } = require("./rpg");
+
+const {
+  handleRpgCharacterMessage,
+} = require("./rpg/character-ai");
 
 /*
 
