@@ -19,6 +19,25 @@ const {
 
 const { handleRpgCommand } = require("./rpg");
 
+// ============================================================
+// PICTURES
+// ============================================================
+// General pictures are stored in:
+//
+// pictures/
+//
+// IMPORTANT:
+// This is completely separate from:
+//
+// memes/
+//
+// The memes/ folder remains exclusively for roast attachments.
+// ============================================================
+
+const {
+  sendRandomPicture,
+} = require("./pictures");
+
 const {
   handleRpgCharacterMessage,
 } = require("./rpg/character-ai");
@@ -624,11 +643,6 @@ async function handleMessage(
 
   // ———————————————————————
   // GLOBAL BOT CONTROL
-  //
-  // !shutdown
-  // !startup
-  //
-  // These remain functional but are NOT shown in public !help.
   // ———————————————————————
 
   if (
@@ -683,61 +697,75 @@ async function handleMessage(
   }
 
   // ============================================================
-// GLOBAL BOT DISABLED STATE
-// ============================================================
-// When shutdown is active:
-// - !startup / !shutdown remain available to admins.
-// - !game on / !game off remain available to admins.
-// - Game commands are allowed for everyone ONLY in GCs
-//   where games are enabled.
-// - All other bot systems remain disabled.
-// ============================================================
+  // GLOBAL BOT DISABLED STATE
+  // ============================================================
 
-if (global.botDisabled === true) {
-  const trimmedText = originalText.trim();
-  const isAdmin = ADMIN_IDS.includes(senderId);
+  if (global.botDisabled === true) {
+    const trimmedText =
+      originalText.trim();
 
-  const isStartup = /^!startup$/i.test(trimmedText);
-  const isShutdown = /^!shutdown$/i.test(trimmedText);
-  const isGameToggle = /^!game\s+(on|off)$/i.test(trimmedText);
+    const isAdmin =
+      ADMIN_IDS.includes(senderId);
 
-  // Admin global controls remain available.
-  if (isAdmin && (isStartup || isShutdown)) {
-    // Continue to the normal command handler.
-  }
-
-  // Admin can enable/disable games while bot is globally shut down.
-  else if (isAdmin && isGameToggle) {
-    // Continue to the normal game-toggle handler.
-  }
-
-  // Allow game commands for everyone if games are enabled
-  // in this specific group.
-  else if (/^!(?:game|games|play)\b/i.test(trimmedText)) {
-    let gamesEnabled = false;
-
-    try {
-      gamesEnabled = await db.isGameEnabled(threadID);
-    } catch (error) {
-      console.error(
-        "[SHUTDOWN] Failed to check game state:",
-        error
+    const isStartup =
+      /^!startup$/i.test(
+        trimmedText
       );
-      return;
+
+    const isShutdown =
+      /^!shutdown$/i.test(
+        trimmedText
+      );
+
+    const isGameToggle =
+      /^!game\s+(on|off)$/i.test(
+        trimmedText
+      );
+
+    if (
+      isAdmin &&
+      (isStartup || isShutdown)
+    ) {
+      // Continue.
     }
 
-    if (!gamesEnabled) {
-      return;
+    else if (
+      isAdmin &&
+      isGameToggle
+    ) {
+      // Continue.
     }
 
-    // Games are enabled in this GC, so allow the command.
-  }
+    else if (
+      /^!(?:game|games|play)\b/i.test(
+        trimmedText
+      )
+    ) {
+      let gamesEnabled = false;
 
-  // Everything else stays disabled.
-  else {
-    return;
+      try {
+        gamesEnabled =
+          await db.isGameEnabled(
+            threadID
+          );
+      } catch (error) {
+        console.error(
+          "[SHUTDOWN] Failed to check game state:",
+          error
+        );
+
+        return;
+      }
+
+      if (!gamesEnabled) {
+        return;
+      }
+    }
+
+    else {
+      return;
+    }
   }
-}
 
   // ———————————————————————
   // SIMPLE DIRECT COMMANDS
@@ -755,8 +783,6 @@ if (global.botDisabled === true) {
 
   // ———————————————————————
   // PUBLIC HELP
-  //
-  // Admin-only controls are deliberately NOT advertised here.
   // ———————————————————————
 
   if (text === "!help") {
@@ -779,6 +805,16 @@ if (global.botDisabled === true) {
         "• !play <song>",
         "  Search YouTube and send the audio.",
         "  Example: !play Die With A Smile",
+        "",
+        "🖼️ PICTURES",
+        "• !pic",
+        "  Send a random picture.",
+        "",
+        "• !picture",
+        "  Send a random picture.",
+        "",
+        "• !photo",
+        "  Send a random picture.",
         "",
         "🌑 ECLIPSE RPG",
         "• !rpg help",
@@ -898,11 +934,46 @@ if (global.botDisabled === true) {
     return;
   }
 
+  // ============================================================
+  // RANDOM PICTURE
+  // ============================================================
+  // IMPORTANT:
+  // This uses pictures.js -> pictures/
+  //
+  // It NEVER calls getRandomMemePath().
+  //
+  // Therefore your existing memes/ roast folder cannot be
+  // selected by !pic.
+  // ============================================================
+
+  if (
+    text === "!pic" ||
+    text === "!picture" ||
+    text === "!photo"
+  ) {
+    try {
+      sendRandomPicture(
+        api,
+        threadID
+      );
+    } catch (error) {
+      console.error(
+        "[PICTURES] Command failed:",
+        error
+      );
+
+      sendReplyWithTyping(
+        api,
+        "❌ Failed to send a picture.",
+        threadID
+      );
+    }
+
+    return;
+  }
+
   // ———————————————————————
   // BROADCAST
-  //
-  // Admin-only.
-  // Hidden from public help.
   // ———————————————————————
 
   if (
@@ -949,9 +1020,9 @@ if (global.botDisabled === true) {
     return;
   }
 
-  // ———————————————————————
-  // MODERATION
-  // ———————————————————————
+  // ------------------------------------------------------------
+  // EVERYTHING BELOW THIS POINT REMAINS YOUR EXISTING CODE
+  // ------------------------------------------------------------
 
   try {
     if (
@@ -971,10 +1042,6 @@ if (global.botDisabled === true) {
     );
   }
 
-  // ———————————————————————
-  // AI
-  // ———————————————————————
-
   try {
     if (
       await handleAiMessage(
@@ -992,10 +1059,6 @@ if (global.botDisabled === true) {
       error
     );
   }
-
-  // ———————————————————————
-  // RPG CHARACTER AI
-  // ———————————————————————
 
   try {
     if (
@@ -1015,13 +1078,6 @@ if (global.botDisabled === true) {
     );
   }
 
-  // ———————————————————————
-  // ACTIVE GAME RESPONSES
-  //
-  // IMPORTANT:
-  // This must happen BEFORE normal game commands.
-  // ———————————————————————
-
   try {
     if (
       await handleGameResponse(
@@ -1040,15 +1096,7 @@ if (global.botDisabled === true) {
     );
   }
 
-  // ———————————————————————
-  // RPG / GAME / ECONOMY COMMANDS
-  // ———————————————————————
-
   try {
-    // -------------------------------------------------------------------
-    // RPG
-    // -------------------------------------------------------------------
-
     if (
       /^!rpg(?:\s|$)/i.test(
         originalText
@@ -1061,10 +1109,6 @@ if (global.botDisabled === true) {
 
       const rpgArgs =
         rpgParts.slice(1);
-
-      // =================================================================
-      // SECRET LOVE QUEST COMMANDS
-      // =================================================================
 
       if (
         isSpecialPlayer(senderId)
@@ -1099,10 +1143,6 @@ if (global.botDisabled === true) {
         }
       }
 
-      // =================================================================
-      // NORMAL RPG
-      // =================================================================
-
       const isRpgExplore =
         /^!rpg\s+explore(?:\s|$)/i.test(
           originalText
@@ -1119,10 +1159,6 @@ if (global.botDisabled === true) {
       if (
         rpgHandled
       ) {
-        // ===============================================================
-        // SECRET LOVE QUEST DISCOVERY
-        // ===============================================================
-
         if (
           isRpgExplore &&
           isSpecialPlayer(senderId)
@@ -1144,16 +1180,6 @@ if (global.botDisabled === true) {
         return;
       }
     }
-
-    // -------------------------------------------------------------------
-    // GAME TOGGLE
-    //
-    // !game on
-    // !game off
-    //
-    // Admin-only.
-    // Hidden from public help.
-    // -------------------------------------------------------------------
 
     const gameToggleMatch =
       text.match(
@@ -1206,10 +1232,6 @@ if (global.botDisabled === true) {
       return;
     }
 
-    // -------------------------------------------------------------------
-    // CURRENT games.js COMMAND ROUTER
-    // -------------------------------------------------------------------
-
     const gameMatch =
       text.match(
         /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
@@ -1225,12 +1247,6 @@ if (global.botDisabled === true) {
               .trim()
               .split(/\s+/)
           : [];
-
-      // -----------------------------------------------------------------
-      // !games
-      // !games rules
-      // !games status
-      // -----------------------------------------------------------------
 
       if (
         gameCommand === "games"
@@ -1277,10 +1293,6 @@ if (global.botDisabled === true) {
         return;
       }
 
-      // -----------------------------------------------------------------
-      // GAMEPLAY ENABLE/DISABLE CHECK
-      // -----------------------------------------------------------------
-
       const gamesEnabled =
         await db.isGameEnabled(
           threadID
@@ -1300,10 +1312,6 @@ if (global.botDisabled === true) {
         return;
       }
 
-      // -----------------------------------------------------------------
-      // ACTUAL GAMEPLAY
-      // -----------------------------------------------------------------
-
       if (
         await handleGamesCommand(
           api,
@@ -1315,10 +1323,6 @@ if (global.botDisabled === true) {
         return;
       }
     }
-
-    // -------------------------------------------------------------------
-    // ECONOMY
-    // -------------------------------------------------------------------
 
     if (
       await handleEconomyCommand(
@@ -1335,21 +1339,7 @@ if (global.botDisabled === true) {
       "RPG/economy/games command failed:",
       error
     );
-
-    /*
-     * Do NOT return here.
-     *
-     * If an optional handler fails, trigger/roast systems below
-     * are still allowed to run.
-     */
   }
-
-  // ———————————————————————
-  // BANAT CONTROL
-  //
-  // Admin-only.
-  // Hidden from public help.
-  // ———————————————————————
 
   if (
     text === "!banat on" ||
@@ -1417,10 +1407,6 @@ if (global.botDisabled === true) {
     return;
   }
 
-  // ———————————————————————
-  // TARGETED TRIGGER / ROAST
-  // ———————————————————————
-
   try {
     const triggerReply =
       await getTriggerReply(
@@ -1445,10 +1431,6 @@ if (global.botDisabled === true) {
       error
     );
   }
-
-  // ———————————————————————
-  // PUBLIC RANDOM ROAST
-  // ———————————————————————
 
   if (
     !RANDOM_ROAST_ENABLED
