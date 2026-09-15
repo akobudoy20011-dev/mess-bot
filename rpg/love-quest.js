@@ -1,126 +1,176 @@
 "use strict";
 
+const db = require("../db");
+const { reply } = require("../util");
+
 /*
  * ============================================================
- * THE LAST STAR — SECRET LOVE QUEST
+ * THE LAST STAR
+ * Secret personal quest
  * ============================================================
  *
- * Standalone special RPG quest.
+ * This quest is ONLY available to the player whose Messenger
+ * sender ID matches SPECIAL_PLAYER_ID in the Render environment.
  *
- * IMPORTANT:
- * - Only the configured SPECIAL_PLAYER_ID can access it.
- * - Progress is persisted in PostgreSQL through db.query().
- * - This file does NOT replace or modify the normal RPG systems.
+ * Example Render environment variable:
  *
- * Environment variable:
- *
- *   SPECIAL_PLAYER_ID=HER_MESSENGER_ID
+ * SPECIAL_PLAYER_ID=123456789012345
  *
  * Optional:
  *
- *   LOVE_QUEST_ID=the_last_star
+ * LOVE_QUEST_ID=the_last_star
  *
+ * IMPORTANT:
+ * - This file does NOT replace the normal RPG system.
+ * - Normal !rpg commands still work for the special player.
+ * - Only these actions are intercepted:
+ *
+ *     !rpg laststar
+ *     !rpg laststar follow
+ *     !rpg laststar continue
+ *     !rpg laststar choose ...
+ *     !rpg laststar read
+ *
+ * The quest is persisted in PostgreSQL so Render restarts
+ * do not erase the player's progress.
  * ============================================================
  */
-
-const db = require("../db");
-const { reply } = require("../util");
 
 const QUEST_ID =
   process.env.LOVE_QUEST_ID || "the_last_star";
 
 const SPECIAL_PLAYER_ID =
-  process.env.SPECIAL_PLAYER_ID || "";
-
-/*
- * ------------------------------------------------------------
- * CONFIG
- * ------------------------------------------------------------
- */
+  String(process.env.SPECIAL_PLAYER_ID || "").trim();
 
 const MAX_CHAPTER = 7;
 
-/*
- * Small delays are intentionally handled by the caller/router.
- * This module itself does not create long-running timers.
- */
-
-const CHAPTER_NAMES = {
-  1: "ANOTHER DAY, ANOTHER NIGHT",
-  2: "THE DISTANT STAR",
-  3: "TWO KINGDOMS",
-  4: "THE RIVER",
-  5: "THE HOME",
-  6: "EVERYTHING",
-  7: "ETERNAL",
+const CHAPTERS = {
+  1: "Another Day, Another Night",
+  2: "The Distant Star",
+  3: "Two Kingdoms",
+  4: "The River",
+  5: "The Home",
+  6: "Everything",
+  7: "Eternal",
 };
 
 /*
  * ------------------------------------------------------------
- * DATABASE
- * ------------------------------------------------------------
- *
- * This module expects db.query(text, params).
- *
- * The table is created lazily so the quest does not require
- * a separate manual migration before testing.
- * ------------------------------------------------------------
- */
-
-let tableReadyPromise = null;
-
-async function ensureTable() {
-  if (!db || typeof db.query !== "function") {
-    throw new Error(
-      "love-quest.js requires db.query() to be exported from ../db"
-    );
-  }
-
-  if (!tableReadyPromise) {
-    tableReadyPromise = db.query(`
-      CREATE TABLE IF NOT EXISTS rpg_special_quests (
-        player_id TEXT NOT NULL,
-        quest_id TEXT NOT NULL,
-        chapter INTEGER NOT NULL DEFAULT 1,
-        stage TEXT NOT NULL DEFAULT 'start',
-        status TEXT NOT NULL DEFAULT 'active',
-        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        completed_at TIMESTAMPTZ,
-        PRIMARY KEY (player_id, quest_id)
-      )
-    `);
-  }
-
-  await tableReadyPromise;
-}
-
-/*
- * ------------------------------------------------------------
- * ACCESS CONTROL
+ * Helpers
  * ------------------------------------------------------------
  */
 
 function isSpecialPlayer(senderID) {
-  if (!SPECIAL_PLAYER_ID) {
-    return false;
+  if (!SPECIAL_PLAYER_ID) return false;
+
+  return String(senderID || "").trim() === SPECIAL_PLAYER_ID;
+}
+
+function normalizeArgs(args) {
+  if (!Array.isArray(args)) return [];
+
+  return args
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function now() {
+  return Date.now();
+}
+
+function formatQuestProgress(quest) {
+  if (!quest) return "not started";
+
+  if (quest.status === "completed") {
+    return "completed";
   }
 
-  return String(senderID) === String(SPECIAL_PLAYER_ID);
+  const chapter = Number(quest.chapter || 1);
+  const stage = Number(quest.stage || 0);
+
+  return `Chapter ${chapter}/${MAX_CHAPTER} • Stage ${stage}`;
 }
 
 /*
  * ------------------------------------------------------------
- * QUEST STATE
+ * Database
+ * ------------------------------------------------------------
+ *
+ * db.js creates rpg_special_quests during connect().
+ *
+ * This function remains here as a safe compatibility check.
+ * It does not hurt if the table already exists.
+ *
+ * If you already added the table to db.js, this function simply
+ * confirms it exists.
  * ------------------------------------------------------------
  */
 
-async function getQuest(senderID) {
+let tableReady = false;
+let tablePromise = null;
+
+async function ensureTable() {
+  if (tableReady) return;
+
+  if (tablePromise) {
+    await tablePromise;
+    return;
+  }
+
+  tablePromise = (async () => {
+    /*
+     * This mirrors the table created in db.js.
+     *
+     * If db.js already created it, IF NOT EXISTS makes this safe.
+     */
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS rpg_special_quests (
+        thread_id     TEXT NOT NULL,
+        player_id     TEXT NOT NULL,
+        quest_id      TEXT NOT NULL,
+        chapter       INTEGER NOT NULL DEFAULT 1,
+        stage         INTEGER NOT NULL DEFAULT 0,
+        status        TEXT NOT NULL DEFAULT 'active',
+        started_at    BIGINT NOT NULL,
+        updated_at    BIGINT NOT NULL,
+        completed_at  BIGINT,
+        PRIMARY KEY (thread_id, player_id, quest_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS rpg_special_quests_player_idx
+        ON rpg_special_quests (player_id, quest_id, status);
+
+      CREATE INDEX IF NOT EXISTS rpg_special_quests_thread_idx
+        ON rpg_special_quests (thread_id, player_id);
+    `);
+
+    tableReady = true;
+  })();
+
+  try {
+    await tablePromise;
+  } finally {
+    tablePromise = null;
+  }
+}
+
+/*
+ * ------------------------------------------------------------
+ * Quest retrieval
+ * ------------------------------------------------------------
+ */
+
+async function getQuest(threadID, playerID) {
+  if (!isSpecialPlayer(playerID)) {
+    return null;
+  }
+
   await ensureTable();
 
   const result = await db.query(
     `
       SELECT
+        thread_id,
         player_id,
         quest_id,
         chapter,
@@ -130,47 +180,115 @@ async function getQuest(senderID) {
         updated_at,
         completed_at
       FROM rpg_special_quests
-      WHERE player_id = $1
-        AND quest_id = $2
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
       LIMIT 1
     `,
-    [String(senderID), QUEST_ID]
+    [String(threadID), String(playerID), QUEST_ID]
   );
 
-  return result.rows?.[0] || null;
+  return result.rows[0] || null;
 }
 
-async function startQuest(senderID) {
+/*
+ * ------------------------------------------------------------
+ * Start quest
+ * ------------------------------------------------------------
+ */
+
+async function startQuest(threadID, playerID) {
+  if (!isSpecialPlayer(playerID)) {
+    return null;
+  }
+
   await ensureTable();
+
+  const timestamp = now();
 
   const result = await db.query(
     `
       INSERT INTO rpg_special_quests (
+        thread_id,
         player_id,
         quest_id,
         chapter,
         stage,
-        status
+        status,
+        started_at,
+        updated_at,
+        completed_at
       )
-      VALUES ($1, $2, 1, 'start', 'active')
-      ON CONFLICT (player_id, quest_id)
+      VALUES ($1, $2, $3, 1, 0, 'active', $4, $4, NULL)
+      ON CONFLICT (thread_id, player_id, quest_id)
       DO UPDATE SET
-        updated_at = NOW()
-      RETURNING *
+        updated_at = EXCLUDED.updated_at
+      RETURNING
+        thread_id,
+        player_id,
+        quest_id,
+        chapter,
+        stage,
+        status,
+        started_at,
+        updated_at,
+        completed_at
     `,
-    [String(senderID), QUEST_ID]
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      timestamp,
+    ]
   );
 
-  return result.rows?.[0] || null;
+  return result.rows[0] || null;
 }
 
-async function updateQuest(senderID, chapter, stage, status = "active") {
+/*
+ * ------------------------------------------------------------
+ * Update quest
+ * ------------------------------------------------------------
+ */
+
+async function updateQuest(
+  threadID,
+  playerID,
+  updates = {}
+) {
+  if (!isSpecialPlayer(playerID)) {
+    return null;
+  }
+
   await ensureTable();
 
+  const current = await getQuest(threadID, playerID);
+
+  if (!current) {
+    return null;
+  }
+
+  const chapter =
+    updates.chapter !== undefined
+      ? Number(updates.chapter)
+      : Number(current.chapter);
+
+  const stage =
+    updates.stage !== undefined
+      ? Number(updates.stage)
+      : Number(current.stage);
+
+  const status =
+    updates.status !== undefined
+      ? String(updates.status)
+      : String(current.status);
+
   const completedAt =
-    status === "completed"
-      ? "NOW()"
-      : "NULL";
+    updates.completed_at !== undefined
+      ? updates.completed_at
+      : current.completed_at;
+
+  const timestamp = now();
 
   const result = await db.query(
     `
@@ -179,512 +297,255 @@ async function updateQuest(senderID, chapter, stage, status = "active") {
         chapter = $1,
         stage = $2,
         status = $3,
-        updated_at = NOW(),
-        completed_at = ${completedAt}
-      WHERE player_id = $4
-        AND quest_id = $5
-      RETURNING *
+        updated_at = $4,
+        completed_at = $5
+      WHERE thread_id = $6
+        AND player_id = $7
+        AND quest_id = $8
+      RETURNING
+        thread_id,
+        player_id,
+        quest_id,
+        chapter,
+        stage,
+        status,
+        started_at,
+        updated_at,
+        completed_at
     `,
     [
-      Number(chapter),
-      String(stage),
-      String(status),
-      String(senderID),
+      chapter,
+      stage,
+      status,
+      timestamp,
+      completedAt,
+      String(threadID),
+      String(playerID),
       QUEST_ID,
     ]
   );
 
-  return result.rows?.[0] || null;
+  return result.rows[0] || null;
 }
 
 /*
  * ------------------------------------------------------------
- * MESSAGE HELPER
+ * Messaging
  * ------------------------------------------------------------
  */
 
-async function send(api, threadID, message) {
-  return reply(api, threadID, message);
+async function send(api, threadID, text) {
+  return reply(api, threadID, text);
 }
 
 /*
  * ------------------------------------------------------------
- * ACCESS / DISCOVERY
- * ------------------------------------------------------------
- *
- * Called by exploration or another RPG system when the special
- * player has a chance to discover the hidden location.
+ * Chapter 1
+ * Another Day, Another Night
  * ------------------------------------------------------------
  */
 
-async function discover(api, threadID, senderID) {
-  if (!isSpecialPlayer(senderID)) {
-    return false;
-  }
+async function chapterOne(api, threadID, playerID) {
+  const quest = await getQuest(threadID, playerID);
 
-  const existing = await getQuest(senderID);
-
-  if (existing) {
-    return false;
+  if (!quest) {
+    await startQuest(threadID, playerID);
   }
 
   await send(
     api,
     threadID,
     [
-      "🌌 UNKNOWN LOCATION DISCOVERED",
+      "✦ THE LAST STAR ✦",
       "",
-      "The world around you suddenly becomes quiet.",
+      "Chapter I — Another Day, Another Night",
       "",
-      "There is no enemy.",
-      "No treasure.",
-      "No warning.",
+      "It was a really interesting day.",
       "",
-      "Only a single star hanging unusually low in the sky.",
+      "A day I thought would simply pass by—",
+      "another day, another night.",
       "",
-      "You have never seen this place before.",
+      "But then, you came.",
       "",
-      "Location:",
-      "「THE LAST STAR」",
+      "I saw you like a star glittering in the sky.",
+      "I thought you were too far beyond my grasp,",
+      "but perhaps you weren't at all.",
       "",
-      "Something tells you to follow it.",
+      "Some encounters are written quietly.",
+      "You don't notice their importance until later.",
       "",
-      "Type:",
-      "!rpg laststar follow",
+      "And somehow...",
+      "that moment became the beginning of everything.",
+      "",
+      "— Dorian",
     ].join("\n")
   );
 
-  return true;
+  await updateQuest(threadID, playerID, {
+    chapter: 2,
+    stage: 0,
+    status: "active",
+  });
 }
 
 /*
  * ------------------------------------------------------------
- * CHAPTER 1
+ * Chapter 2
+ * The Distant Star
  * ------------------------------------------------------------
  */
 
-async function chapterOne(api, threadID, senderID) {
-  await updateQuest(senderID, 1, "followed");
-
+async function chapterTwo(api, threadID, playerID) {
   await send(
     api,
     threadID,
     [
-      "🌌 THE LAST STAR",
+      "✦ THE LAST STAR ✦",
       "",
-      "You follow the light.",
+      "Chapter II — The Distant Star",
       "",
-      "For some reason, this place feels familiar.",
+      "There was something about you that I couldn't explain.",
       "",
-      "The traveler beside you speaks:",
+      "At first...",
+      "I thought you were mean.",
       "",
-      "\"Funny, isn't it?\"",
+      "You were emitting a rarefied air that I couldn't explain.",
+      "Yet somehow, I was too captivated to give it a single thought.",
       "",
-      "\"Sometimes the days we think will mean nothing",
-      "become the days we remember forever.\"",
+      "There was distance between us.",
       "",
-      "━━━━━━━━━━━━━━━━━━",
-      "CHAPTER I — ANOTHER DAY, ANOTHER NIGHT",
-      "━━━━━━━━━━━━━━━━━━",
+      "Not the kind measured by roads or kingdoms.",
+      "The kind measured by uncertainty.",
       "",
-      "The star begins to shine brighter.",
+      "And still, I kept looking toward that star.",
       "",
-      "Something tells you that this journey",
-      "has only just begun.",
-      "",
-      "Next:",
-      "!rpg laststar continue",
+      "Perhaps some stars are worth reaching for.",
     ].join("\n")
   );
+
+  await updateQuest(threadID, playerID, {
+    chapter: 3,
+    stage: 0,
+  });
 }
 
 /*
  * ------------------------------------------------------------
- * CHAPTER 2
+ * Chapter 3
+ * Two Kingdoms
  * ------------------------------------------------------------
  */
 
-async function chapterTwo(api, threadID, senderID) {
-  await updateQuest(senderID, 2, "choice");
-
+async function chapterThree(api, threadID, playerID) {
   await send(
     api,
     threadID,
     [
-      "🌌 THE DISTANT STAR",
+      "✦ THE LAST STAR ✦",
       "",
-      "A star shines far beyond the horizon.",
+      "Chapter III — Two Kingdoms",
       "",
-      "It looks impossibly distant.",
+      "Not every story is peaceful.",
       "",
-      "The traveler asks:",
-      "",
-      "\"Would you chase something",
-      "you believed you could never reach?\"",
-      "",
-      "Choose:",
-      "",
-      "1. Chase the star",
-      "2. Wait for it",
-      "3. Walk away",
-      "",
-      "!rpg laststar choose 1",
-      "!rpg laststar choose 2",
-      "!rpg laststar choose 3",
-    ].join("\n")
-  );
-}
-
-async function chapterTwoChoice(
-  api,
-  threadID,
-  senderID,
-  choice
-) {
-  const valid = ["1", "2", "3"];
-
-  if (!valid.includes(choice)) {
-    await send(
-      api,
-      threadID,
-      "Choose 1, 2, or 3."
-    );
-    return;
-  }
-
-  await updateQuest(senderID, 2, `choice_${choice}`);
-
-  await send(
-    api,
-    threadID,
-    [
-      "The traveler watches you quietly.",
-      "",
-      "\"Perhaps distance isn't always measured",
-      "by how far something is.\"",
-      "",
-      "The star begins moving closer.",
-      "",
-      "Closer.",
-      "",
-      "Until its light touches the ground before you.",
-      "",
-      "You realize something:",
-      "",
-      "Some people appear impossibly far away",
-      "until one day, somehow...",
-      "",
-      "they become part of your world.",
-      "",
-      "━━━━━━━━━━━━━━━━━━",
-      "CHAPTER II — THE DISTANT STAR",
-      "━━━━━━━━━━━━━━━━━━",
-      "",
-      "Next:",
-      "!rpg laststar continue",
-    ].join("\n")
-  );
-}
-
-/*
- * ------------------------------------------------------------
- * CHAPTER 3
- * ------------------------------------------------------------
- */
-
-async function chapterThree(api, threadID, senderID) {
-  await updateQuest(senderID, 3, "battlefield");
-
-  await send(
-    api,
-    threadID,
-    [
-      "⚔️ THE KINGDOMS OF SUN AND MOON",
-      "",
-      "Two kingdoms stand opposite each other.",
-      "",
-      "Neither will yield.",
-      "Neither believes it is wrong.",
-      "",
-      "Their armies have been fighting for years.",
-      "",
-      "The traveler speaks:",
-      "",
-      "\"Sometimes two people can love each other",
-      "and still hurt each other.\"",
-      "",
-      "The battlefield falls silent.",
-      "",
-      "Three choices stand before you:",
-      "",
-      "1. Fight for your kingdom",
-      "2. Lower your weapon",
-      "3. Walk away",
-      "",
-      "!rpg laststar choose 1",
-      "!rpg laststar choose 2",
-      "!rpg laststar choose 3",
-    ].join("\n")
-  );
-}
-
-async function chapterThreeChoice(
-  api,
-  threadID,
-  senderID,
-  choice
-) {
-  const valid = ["1", "2", "3"];
-
-  if (!valid.includes(choice)) {
-    await send(
-      api,
-      threadID,
-      "Choose 1, 2, or 3."
-    );
-    return;
-  }
-
-  await updateQuest(senderID, 3, `choice_${choice}`);
-
-  await send(
-    api,
-    threadID,
-    [
-      "The armies collide.",
-      "",
-      "Steel strikes steel.",
-      "The sky burns with the light of two suns.",
-      "",
-      "Then...",
-      "",
-      "silence.",
-      "",
-      "The armies stop.",
-      "",
-      "There is no victor.",
-      "",
-      "Because neither side was ever truly",
-      "fighting to destroy the other.",
-      "",
-      "They were simply trying to be understood.",
-      "",
-      "━━━━━━━━━━━━━━━━━━",
-      "CHAPTER III — TWO KINGDOMS",
-      "━━━━━━━━━━━━━━━━━━",
-      "",
-      "You've been through a lot.",
+      "We've been through a lot.",
       "",
       "Breakups.",
       "Fights.",
-      "Random nights when letting go",
-      "seemed like it might be easier.",
+      "Random nights when we both thought",
+      "that letting go might be better.",
+      "",
+      "It sometimes felt like two kingdoms",
+      "fighting over the same piece of land.",
+      "",
+      "Two suns refusing to share the same sky.",
       "",
       "But somehow...",
       "",
-      "you both kept fighting through it.",
+      "we fought through it.",
       "",
-      "And that is why the story continued.",
-      "",
-      "Next:",
-      "!rpg laststar continue",
+      "And that's why we are here.",
     ].join("\n")
   );
+
+  await updateQuest(threadID, playerID, {
+    chapter: 4,
+    stage: 0,
+  });
 }
 
 /*
  * ------------------------------------------------------------
- * CHAPTER 4
+ * Chapter 4
+ * The River
  * ------------------------------------------------------------
  */
 
-async function chapterFour(api, threadID, senderID) {
-  await updateQuest(senderID, 4, "desert");
-
+async function chapterFour(api, threadID, playerID) {
   await send(
     api,
     threadID,
     [
-      "🏜️ THE BOUNDLESS DESERT",
+      "✦ THE LAST STAR ✦",
       "",
-      "There is nothing here.",
+      "Chapter IV — The River",
       "",
-      "No kingdoms.",
-      "No armies.",
-      "No roads.",
+      "There are rivers that separate kingdoms.",
       "",
-      "Only endless sand.",
+      "And there are rivers that connect them.",
       "",
-      "You walk for what feels like hours.",
+      "Like the Nile...",
+      "a single source of life flowing through",
+      "a boundless desert.",
       "",
-      "The heat becomes unbearable.",
+      "No matter how vast the land becomes,",
+      "water still finds a way forward.",
       "",
-      "Then...",
+      "Perhaps love is like that.",
       "",
-      "you hear something.",
+      "It doesn't always travel in a straight line.",
       "",
-      "Water.",
+      "Sometimes it bends.",
+      "Sometimes it disappears beneath the earth.",
+      "Sometimes it has to survive a desert.",
       "",
-      "You follow the sound.",
-      "",
-      "Type:",
-      "!rpg laststar continue",
+      "But it keeps flowing.",
     ].join("\n")
   );
+
+  await updateQuest(threadID, playerID, {
+    chapter: 5,
+    stage: 0,
+  });
 }
 
 /*
  * ------------------------------------------------------------
- * CHAPTER 4 CONTINUATION
+ * Chapter 5
+ * The Home
  * ------------------------------------------------------------
  */
 
-async function chapterFourRiver(
-  api,
-  threadID,
-  senderID
-) {
-  await updateQuest(senderID, 4, "river");
-
+async function chapterFive(api, threadID, playerID) {
   await send(
     api,
     threadID,
     [
-      "🌊 THE RIVER",
+      "✦ THE LAST STAR ✦",
       "",
-      "A river cuts through the desert.",
+      "Chapter V — The Home",
       "",
-      "Its water is clear.",
+      "You are very special to me.",
       "",
-      "Life grows around it.",
+      "You are someone I'll never outgrow,",
+      "someone I'll treasure for the rest of my life.",
       "",
-      "Flowers.",
-      "Trees.",
-      "Animals.",
+      "And when I imagine the future...",
       "",
-      "For the first time since entering this world...",
+      "I don't imagine a throne.",
+      "I don't imagine an empire.",
+      "I don't imagine riches beyond the stars.",
       "",
-      "you feel at peace.",
-      "",
-      "The traveler asks:",
-      "",
-      "\"Do you understand now?\"",
-      "",
-      "\"Some people don't need to change",
-      "the entire world.\"",
-      "",
-      "\"Sometimes their existence alone",
-      "makes your world feel alive.\"",
-      "",
-      "━━━━━━━━━━━━━━━━━━",
-      "CHAPTER IV — THE RIVER",
-      "━━━━━━━━━━━━━━━━━━",
-      "",
-      "Everything about you makes my heart feel at ease.",
-      "",
-      "Like the Nile, a single source of life",
-      "flowing through a boundless desert.",
-      "",
-      "Next:",
-      "!rpg laststar continue",
-    ].join("\n")
-  );
-}
-
-/*
- * ------------------------------------------------------------
- * CHAPTER 5
- * ------------------------------------------------------------
- */
-
-async function chapterFive(api, threadID, senderID) {
-  await updateQuest(senderID, 5, "kingdom");
-
-  await send(
-    api,
-    threadID,
-    [
-      "🏰 THE KINGDOM OF EVERYTHING",
-      "",
-      "You arrive at the greatest kingdom",
-      "you have ever seen.",
-      "",
-      "Gold.",
-      "Armies.",
-      "Castles.",
-      "Treasures.",
-      "Power.",
-      "",
-      "Everything a ruler could want.",
-      "",
-      "The traveler asks:",
-      "",
-      "\"What would you choose?\"",
-      "",
-      "1. The crown",
-      "2. The kingdom",
-      "3. Something else",
-      "",
-      "!rpg laststar choose 1",
-      "!rpg laststar choose 2",
-      "!rpg laststar choose 3",
-    ].join("\n")
-  );
-}
-
-async function chapterFiveChoice(
-  api,
-  threadID,
-  senderID,
-  choice
-) {
-  const valid = ["1", "2", "3"];
-
-  if (!valid.includes(choice)) {
-    await send(
-      api,
-      threadID,
-      "Choose 1, 2, or 3."
-    );
-    return;
-  }
-
-  await updateQuest(senderID, 5, `choice_${choice}`);
-
-  await send(
-    api,
-    threadID,
-    [
-      "The crown disappears.",
-      "",
-      "The gold disappears.",
-      "",
-      "The armies disappear.",
-      "",
-      "The castle disappears.",
-      "",
-      "The entire kingdom fades away.",
-      "",
-      "You are left standing beneath",
-      "an ordinary evening sky.",
-      "",
-      "Then you see it.",
-      "",
-      "🏠 A SMALL HOUSE",
-      "",
-      "Warm light shines through the windows.",
-      "",
-      "There is nothing extravagant about it.",
-      "",
-      "But somehow...",
-      "",
-      "it feels like home.",
-      "",
-      "━━━━━━━━━━━━━━━━━━",
-      "CHAPTER V — THE HOME",
-      "━━━━━━━━━━━━━━━━━━",
-      "",
-      "A simple family.",
+      "I imagine a simple family.",
       "",
       "You.",
       "Our children.",
@@ -695,191 +556,127 @@ async function chapterFiveChoice(
       "But it's all I need.",
       "",
       "It's you.",
-      "",
-      "Next:",
-      "!rpg laststar continue",
     ].join("\n")
   );
+
+  await updateQuest(threadID, playerID, {
+    chapter: 6,
+    stage: 0,
+  });
 }
 
 /*
  * ------------------------------------------------------------
- * CHAPTER 6
+ * Chapter 6
+ * Everything
  * ------------------------------------------------------------
  */
 
-async function chapterSix(api, threadID, senderID) {
-  await updateQuest(senderID, 6, "collapse");
-
+async function chapterSix(api, threadID, playerID) {
   await send(
     api,
     threadID,
     [
-      "⚠️ WORLD EVENT",
+      "✦ THE LAST STAR ✦",
       "",
-      "Something is happening to the world.",
-      "",
-      "The forests disappear.",
-      "",
-      "The kingdoms disappear.",
-      "",
-      "The roads disappear.",
-      "",
-      "The dungeons disappear.",
-      "",
-      "The treasures disappear.",
-      "",
-      "The map begins fading.",
-      "",
-      "Then...",
-      "",
-      "🌌 THE STARS BEGIN TO DISAPPEAR",
-      "",
-      "One by one.",
-      "",
-      "Everything you have seen here",
-      "will disappear one day.",
-      "",
-      "Everything.",
-      "",
-      "The kingdoms.",
-      "The treasures.",
-      "The battles.",
-      "The roads.",
-      "",
-      "Even the people who walked them.",
-      "",
-      "━━━━━━━━━━━━━━━━━━",
-      "CHAPTER VI — EVERYTHING",
-      "━━━━━━━━━━━━━━━━━━",
-      "",
-      "There is only one star left.",
-      "",
-      "Continue?",
-      "",
-      "!rpg laststar continue",
-    ].join("\n")
-  );
-}
-
-/*
- * ------------------------------------------------------------
- * CHAPTER 7
- * ------------------------------------------------------------
- */
-
-async function chapterSeven(api, threadID, senderID) {
-  await updateQuest(senderID, 7, "eternal");
-
-  await send(
-    api,
-    threadID,
-    [
-      "🌌 THE LAST STAR",
-      "",
-      "You have reached the end.",
-      "",
-      "There is no enemy waiting for you.",
-      "",
-      "No treasure.",
-      "",
-      "No kingdom.",
-      "",
-      "No final boss.",
-      "",
-      "Only one star remains.",
-      "",
-      "The traveler looks toward it.",
-      "",
-      "\"Some things disappear because",
-      "they were never meant to last.\"",
-      "",
-      "\"But some things...\"",
-      "",
-      "\"...are worth believing will last forever.\"",
-      "",
-      "━━━━━━━━━━━━━━━━━━",
-      "CHAPTER VII — ETERNAL",
-      "━━━━━━━━━━━━━━━━━━",
-      "",
-      "The star shines.",
-      "",
-      "Everything becomes quiet.",
-      "",
-      "There is only one thing left.",
-      "",
-      "!rpg laststar read",
-    ].join("\n")
-  );
-}
-
-/*
- * ------------------------------------------------------------
- * FINAL MESSAGE
- * ------------------------------------------------------------
- */
-
-async function finalMessage(
-  api,
-  threadID,
-  senderID
-) {
-  await updateQuest(
-    senderID,
-    MAX_CHAPTER,
-    "complete",
-    "completed"
-  );
-
-  /*
-   * Deliberately split into multiple messages.
-   * It makes the final reveal feel like a letter rather than
-   * one giant wall of text.
-   */
-
-  await send(
-    api,
-    threadID,
-    [
-      "🌌 THE LAST STAR",
+      "Chapter VI — Everything",
       "",
       "Now, everything you see here will disappear one day.",
       "",
-      "Everything—including me.",
+      "Everything.",
       "",
-      "But you know what will live forever, for eons?",
+      "Including me.",
+      "",
+      "The kingdoms.",
+      "The roads.",
+      "The battles.",
+      "The stars.",
+      "The worlds we built.",
+      "",
+      "Everything eventually becomes silence.",
+      "",
+      "But you know what will live forever?",
       "",
       "My love for you.",
-    ].join("\n")
-  );
-
-  await send(
-    api,
-    threadID,
-    [
+      "",
       "I know I cannot offer extravagant things at your feet,",
       "but I can offer you my vision for both of us.",
       "",
       "I can build our dreams together",
       "until the first break of dawn.",
-    ].join("\n")
-  );
-
-  await send(
-    api,
-    threadID,
-    [
-      "We fought together.",
       "",
-      "We hurt each other—",
-      "like two kingdoms and suns",
-      "clashing over who is right.",
+      "We fought together.",
+      "We hurt each other.",
+      "",
+      "Like two kingdoms and suns clashing",
+      "over who is right.",
       "",
       "But in the end...",
       "",
       "none of that matters.",
     ].join("\n")
   );
+
+  await updateQuest(threadID, playerID, {
+    chapter: 7,
+    stage: 0,
+  });
+}
+
+/*
+ * ------------------------------------------------------------
+ * Chapter 7
+ * Eternal
+ * ------------------------------------------------------------
+ */
+
+async function chapterSeven(api, threadID, playerID) {
+  /*
+   * The final chapter intentionally uses several messages.
+   *
+   * This creates the feeling that the world itself is
+   * disappearing instead of dumping everything into one block.
+   */
+
+  await send(
+    api,
+    threadID,
+    [
+      "✦ THE LAST STAR ✦",
+      "",
+      "Chapter VII — Eternal",
+      "",
+      "The world begins to disappear.",
+      "",
+      "The kingdoms fade.",
+      "The roads vanish.",
+      "The stars become distant.",
+      "",
+      "One by one...",
+      "everything becomes nothing.",
+    ].join("\n")
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+
+  await send(
+    api,
+    threadID,
+    [
+      "The sky is empty now.",
+      "",
+      "No kingdoms.",
+      "No wars.",
+      "No borders.",
+      "No throne.",
+      "",
+      "Just you.",
+      "",
+      "And me.",
+    ].join("\n")
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 1200));
 
   await send(
     api,
@@ -891,11 +688,10 @@ async function finalMessage(
       "if they have no one to guide me to you?",
       "",
       "You are far more important than anything.",
-      "",
-      "Like the Nile, a single source of life",
-      "flowing through a boundless desert.",
     ].join("\n")
   );
+
+  await new Promise((resolve) => setTimeout(resolve, 1200));
 
   await send(
     api,
@@ -903,53 +699,338 @@ async function finalMessage(
     [
       "So, my love...",
       "",
-      "stay until everything collapses.",
+      "Stay until everything collapses.",
       "",
-      "Until the galaxy itself",
+      "Stay until the galaxy itself",
       "dissipates into nothingness.",
-      "",
-      "For I promise you eternal love in return.",
     ].join("\n")
   );
+
+  await new Promise((resolve) => setTimeout(resolve, 1400));
 
   await send(
     api,
     threadID,
     [
-      "╔══════════════════════════════╗",
-      "        QUEST COMPLETE",
-      "╚══════════════════════════════╝",
+      "Because I promise you",
       "",
-      "「THE LAST STAR」",
+      "eternal love",
       "",
-      "There was never a treasure.",
-      "There was never a kingdom.",
-      "There was never a final boss.",
-      "",
-      "The entire journey existed",
-      "for one person.",
-      "",
-      "❤️",
-      "",
-      "ACHIEVEMENT UNLOCKED",
-      "",
-      "「THE PERSON I WOULD CHOOSE",
-      "  IN EVERY WORLD」",
-      "",
-      "Reward:",
-      "∞ ❤️",
+      "in return.",
     ].join("\n")
   );
+
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
+  await send(
+    api,
+    threadID,
+    [
+      "∞",
+      "",
+      "THE PERSON I WOULD CHOOSE",
+      "IN EVERY WORLD",
+      "",
+      "❤️",
+    ].join("\n")
+  );
+
+  await updateQuest(threadID, playerID, {
+    chapter: MAX_CHAPTER,
+    stage: 1,
+    status: "completed",
+    completed_at: now(),
+  });
 }
 
 /*
  * ------------------------------------------------------------
- * COMMAND HANDLER
+ * Continue current chapter
+ * ------------------------------------------------------------
+ */
+
+async function continueQuest(api, threadID, playerID) {
+  const quest = await getQuest(threadID, playerID);
+
+  if (!quest) {
+    await startQuest(threadID, playerID);
+    await chapterOne(api, threadID, playerID);
+    return true;
+  }
+
+  if (quest.status === "completed") {
+    await send(
+      api,
+      threadID,
+      [
+        "✦ THE LAST STAR ✦",
+        "",
+        "This story has already reached its end.",
+        "",
+        "But some things don't really end.",
+        "",
+        "∞ ❤️",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  switch (Number(quest.chapter)) {
+    case 1:
+      await chapterOne(api, threadID, playerID);
+      break;
+
+    case 2:
+      await chapterTwo(api, threadID, playerID);
+      break;
+
+    case 3:
+      await chapterThree(api, threadID, playerID);
+      break;
+
+    case 4:
+      await chapterFour(api, threadID, playerID);
+      break;
+
+    case 5:
+      await chapterFive(api, threadID, playerID);
+      break;
+
+    case 6:
+      await chapterSix(api, threadID, playerID);
+      break;
+
+    case 7:
+      await chapterSeven(api, threadID, playerID);
+      break;
+
+    default:
+      await updateQuest(threadID, playerID, {
+        chapter: 1,
+        stage: 0,
+        status: "active",
+      });
+
+      await chapterOne(api, threadID, playerID);
+      break;
+  }
+
+  return true;
+}
+
+/*
+ * ------------------------------------------------------------
+ * Discover hidden quest
  * ------------------------------------------------------------
  *
- * Returns:
- *   true  = this command belonged to the secret quest
- *   false = normal RPG should handle it
+ * Called after the special player successfully uses normal
+ * !rpg explore.
+ *
+ * IMPORTANT:
+ * Discovery is silent until the normal exploration result
+ * has already been shown.
+ * ------------------------------------------------------------
+ */
+
+async function discover(api, threadID, playerID) {
+  if (!isSpecialPlayer(playerID)) {
+    return false;
+  }
+
+  const existing = await getQuest(threadID, playerID);
+
+  if (existing) {
+    return false;
+  }
+
+  await ensureTable();
+
+  /*
+   * Start the quest only when it is actually discovered.
+   */
+  await startQuest(threadID, playerID);
+
+  await send(
+    api,
+    threadID,
+    [
+      "🌌 Something feels different.",
+      "",
+      "For a moment, Dorian stops speaking.",
+      "",
+      "The path ahead is unfamiliar.",
+      "",
+      "A single light shines between the trees.",
+      "",
+      "It doesn't look like a torch.",
+      "",
+      "It looks like a star.",
+      "",
+      "🧑‍🏫 Dorian:",
+      "\"I've never seen this place before.\"",
+      "",
+      "A faint inscription appears beneath the light:",
+      "",
+      "THE LAST STAR",
+      "",
+      "Perhaps this is a place meant to be followed.",
+      "",
+      "Use:",
+      "!rpg laststar follow",
+    ].join("\n")
+  );
+
+  return true;
+}
+
+/*
+ * ------------------------------------------------------------
+ * Follow hidden quest
+ * ------------------------------------------------------------
+ */
+
+async function followQuest(api, threadID, playerID) {
+  if (!isSpecialPlayer(playerID)) {
+    return false;
+  }
+
+  let quest = await getQuest(threadID, playerID);
+
+  if (!quest) {
+    quest = await startQuest(threadID, playerID);
+  }
+
+  if (!quest) {
+    return false;
+  }
+
+  if (quest.status === "completed") {
+    await send(
+      api,
+      threadID,
+      [
+        "✦ THE LAST STAR ✦",
+        "",
+        "The star has already shown you the end of the journey.",
+        "",
+        "∞ ❤️",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  await continueQuest(api, threadID, playerID);
+
+  return true;
+}
+
+/*
+ * ------------------------------------------------------------
+ * Read quest status
+ * ------------------------------------------------------------
+ */
+
+async function readQuest(api, threadID, playerID) {
+  if (!isSpecialPlayer(playerID)) {
+    return false;
+  }
+
+  const quest = await getQuest(threadID, playerID);
+
+  if (!quest) {
+    await send(
+      api,
+      threadID,
+      [
+        "✦ THE LAST STAR ✦",
+        "",
+        "No record of this story has been found.",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  const chapter =
+    Number(quest.chapter || 1);
+
+  const chapterName =
+    CHAPTERS[chapter] || "Unknown";
+
+  await send(
+    api,
+    threadID,
+    [
+      "✦ THE LAST STAR ✦",
+      "",
+      `Status: ${quest.status === "completed" ? "COMPLETED" : "ACTIVE"}`,
+      `Chapter: ${chapter}/${MAX_CHAPTER}`,
+      `Title: ${chapterName}`,
+      `Stage: ${Number(quest.stage || 0)}`,
+      "",
+      "Some journeys are not meant to be rushed.",
+    ].join("\n")
+  );
+
+  return true;
+}
+
+/*
+ * ------------------------------------------------------------
+ * Reset quest
+ * ------------------------------------------------------------
+ *
+ * Not exposed as a normal command.
+ *
+ * Useful for testing from code if needed.
+ * ------------------------------------------------------------
+ */
+
+async function resetQuest(threadID, playerID) {
+  if (!isSpecialPlayer(playerID)) {
+    return false;
+  }
+
+  await ensureTable();
+
+  await db.query(
+    `
+      DELETE FROM rpg_special_quests
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+    ]
+  );
+
+  return true;
+}
+
+/*
+ * ------------------------------------------------------------
+ * Main command handler
+ * ------------------------------------------------------------
+ *
+ * CRITICAL:
+ *
+ * This function MUST return false for normal RPG commands.
+ *
+ * Example:
+ *
+ * !rpg profile
+ * !rpg explore
+ * !rpg army
+ * !rpg inventory
+ *
+ * These should continue to the normal RPG router.
+ *
+ * Only special quest actions are intercepted.
  * ------------------------------------------------------------
  */
 
@@ -960,343 +1041,161 @@ async function handleLoveQuestCommand(
   args = []
 ) {
   /*
-   * Never reveal the existence of the quest to other players.
+   * Never interfere with normal players.
    */
-
   if (!isSpecialPlayer(senderID)) {
     return false;
   }
 
-  const command = String(args[0] || "")
-    .trim()
-    .toLowerCase();
+  const parts = normalizeArgs(args);
 
-  const subArg = String(args[1] || "")
-    .trim()
-    .toLowerCase();
-
-  /*
-   * !rpg laststar
-   */
-
-  if (!command || command === "laststar") {
-    const quest = await getQuest(senderID);
-
-    if (!quest) {
-      await send(
-        api,
-        threadID,
-        [
-          "🌌 A faint star appears in the distance.",
-          "",
-          "Something about it feels familiar.",
-          "",
-          "Type:",
-          "!rpg laststar follow",
-        ].join("\n")
-      );
-
-      return true;
-    }
-
-    if (quest.status === "completed") {
-      await send(
-        api,
-        threadID,
-        [
-          "🌌 THE LAST STAR",
-          "",
-          "This journey has already been completed.",
-          "",
-          "Some stories only need to be told once.",
-          "",
-          "❤️",
-        ].join("\n")
-      );
-
-      return true;
-    }
-
-    await send(
-      api,
-      threadID,
-      [
-        "🌌 THE LAST STAR",
-        "",
-        `Current Chapter: ${quest.chapter}`,
-        `「${CHAPTER_NAMES[quest.chapter] || "UNKNOWN"}」`,
-        "",
-        `Stage: ${quest.stage}`,
-        "",
-        "Continue:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    return true;
+  if (!parts.length) {
+    return false;
   }
 
   /*
-   * FOLLOW
+   * The first argument must explicitly be "laststar".
+   *
+   * This is what prevents:
+   *
+   * !rpg profile
+   * !rpg explore
+   * !rpg kingdom
+   * !rpg army
+   *
+   * from being intercepted.
    */
+  const root = parts[0].toLowerCase();
 
-  if (command === "follow") {
-    const quest = await getQuest(senderID);
-
-    if (quest) {
-      await send(
-        api,
-        threadID,
-        [
-          "The star is already waiting for you.",
-          "",
-          "Continue:",
-          "!rpg laststar continue",
-        ].join("\n")
-      );
-
-      return true;
-    }
-
-    await startQuest(senderID);
-    await chapterOne(api, threadID, senderID);
-
-    return true;
+  if (
+    root !== "laststar" &&
+    root !== "last-star" &&
+    root !== "thelaststar" &&
+    root !== "the-last-star"
+  ) {
+    return false;
   }
 
-  /*
-   * CONTINUE
-   */
+  const action =
+    (parts[1] || "follow").toLowerCase();
 
-  if (command === "continue") {
-    const quest = await getQuest(senderID);
-
-    if (!quest) {
-      await send(
+  switch (action) {
+    case "follow":
+    case "start":
+    case "begin":
+      return followQuest(
         api,
         threadID,
-        [
-          "You haven't discovered this journey yet.",
-          "",
-          "Explore until you find the star.",
-        ].join("\n")
+        senderID
       );
 
-      return true;
-    }
-
-    if (quest.status === "completed") {
-      await send(
+    case "continue":
+    case "next":
+      return continueQuest(
         api,
         threadID,
-        "🌌 THE LAST STAR has already been completed. ❤️"
+        senderID
       );
 
-      return true;
-    }
+    case "read":
+    case "status":
+    case "progress":
+      return readQuest(
+        api,
+        threadID,
+        senderID
+      );
 
-    switch (Number(quest.chapter)) {
-      case 1:
-        await chapterTwo(api, threadID, senderID);
-        break;
+    /*
+     * Reserved for future choice-based chapters.
+     */
+    case "choose": {
+      const choice = parts
+        .slice(2)
+        .join(" ")
+        .trim()
+        .toLowerCase();
 
-      case 2:
-        await chapterThree(api, threadID, senderID);
-        break;
-
-      case 3:
-        await chapterFour(api, threadID, senderID);
-        break;
-
-      case 4:
-        if (quest.stage === "desert") {
-          await chapterFourRiver(
-            api,
-            threadID,
-            senderID
-          );
-        } else {
-          await chapterFive(
-            api,
-            threadID,
-            senderID
-          );
-        }
-        break;
-
-      case 5:
-        await chapterSix(api, threadID, senderID);
-        break;
-
-      case 6:
-        await chapterSeven(api, threadID, senderID);
-        break;
-
-      case 7:
-        await finalMessage(
-          api,
-          threadID,
-          senderID
-        );
-        break;
-
-      default:
+      /*
+       * At the moment there are no destructive choices.
+       * Keeping the handler here makes future branching easy.
+       */
+      if (!choice) {
         await send(
           api,
           threadID,
           [
-            "The star flickers.",
+            "✦ THE LAST STAR ✦",
             "",
-            "Something went wrong with the journey.",
+            "There is no choice waiting here yet.",
             "",
-            "Please continue again:",
+            "Use:",
             "!rpg laststar continue",
           ].join("\n")
         );
-        break;
+
+        return true;
+      }
+
+      await send(
+        api,
+        threadID,
+        [
+          "✦ THE LAST STAR ✦",
+          "",
+          `You chose: ${choice}`,
+          "",
+          "The story remembers your choice.",
+        ].join("\n")
+      );
+
+      return true;
     }
 
-    return true;
+    default:
+      await send(
+        api,
+        threadID,
+        [
+          "✦ THE LAST STAR ✦",
+          "",
+          "Available actions:",
+          "",
+          "!rpg laststar follow",
+          "!rpg laststar continue",
+          "!rpg laststar read",
+        ].join("\n")
+      );
+
+      return true;
   }
-
-  /*
-   * CHAPTER CHOICES
-   */
-
-  if (command === "choose") {
-    const quest = await getQuest(senderID);
-
-    if (!quest) {
-      await send(
-        api,
-        threadID,
-        "You haven't started THE LAST STAR."
-      );
-
-      return true;
-    }
-
-    if (!["1", "2", "3"].includes(subArg)) {
-      await send(
-        api,
-        threadID,
-        "Choose 1, 2, or 3."
-      );
-
-      return true;
-    }
-
-    switch (Number(quest.chapter)) {
-      case 2:
-        await chapterTwoChoice(
-          api,
-          threadID,
-          senderID,
-          subArg
-        );
-        break;
-
-      case 3:
-        await chapterThreeChoice(
-          api,
-          threadID,
-          senderID,
-          subArg
-        );
-        break;
-
-      case 5:
-        await chapterFiveChoice(
-          api,
-          threadID,
-          senderID,
-          subArg
-        );
-        break;
-
-      default:
-        await send(
-          api,
-          threadID,
-          "There is no choice to make here."
-        );
-        break;
-    }
-
-    return true;
-  }
-
-  /*
-   * FINAL READ
-   */
-
-  if (command === "read") {
-    const quest = await getQuest(senderID);
-
-    if (!quest) {
-      await send(
-        api,
-        threadID,
-        "The final star has not been reached yet."
-      );
-
-      return true;
-    }
-
-    if (Number(quest.chapter) < 7) {
-      await send(
-        api,
-        threadID,
-        "You haven't reached the final chapter yet."
-      );
-
-      return true;
-    }
-
-    await finalMessage(
-      api,
-      threadID,
-      senderID
-    );
-
-    return true;
-  }
-
-  /*
-   * Unknown secret-quest subcommand.
-   *
-   * Keep it secret rather than revealing the whole quest
-   * structure to other users.
-   */
-
-  await send(
-    api,
-    threadID,
-    [
-      "🌌 The last star flickers.",
-      "",
-      "Try:",
-      "!rpg laststar",
-      "!rpg laststar continue",
-    ].join("\n")
-  );
-
-  return true;
 }
 
 /*
  * ------------------------------------------------------------
- * EXPORTS
+ * Exports
  * ------------------------------------------------------------
  */
 
 module.exports = {
   QUEST_ID,
+  SPECIAL_PLAYER_ID,
+  MAX_CHAPTER,
+  CHAPTERS,
+
   isSpecialPlayer,
+
   ensureTable,
   getQuest,
   startQuest,
   updateQuest,
+
   discover,
+  followQuest,
+  continueQuest,
+  readQuest,
+
+  resetQuest,
+
   handleLoveQuestCommand,
 };
