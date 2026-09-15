@@ -9,17 +9,23 @@ const { login } = require("ws3-fca");
 const db = require("./db");
 
 const { handleEconomyCommand } = require("./economy");
+
 const {
   handleGamesCommand,
   handleGameResponse,
 } = require("./games");
 
 const { handleRpgCommand } = require("./rpg");
-const { handleRpgCharacterMessage } = require("./rpg/character-ai");
+const {
+  handleRpgCharacterMessage,
+} = require("./rpg/character-ai");
+
 const { handleAiMessage } = require("./ai");
 
 // MODERATION
-const { handleModerationMessage } = require("./moderation");
+const {
+  handleModerationMessage,
+} = require("./moderation");
 
 const {
   searchYouTube,
@@ -44,16 +50,18 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .map((id) => id.trim())
   .filter(Boolean);
 
-const RANDOM_ROAST_ENABLED = !/^(0|false|no|off)$/i.test(
-  process.env.RANDOM_ROAST || ""
-);
+const RANDOM_ROAST_ENABLED =
+  !/^(0|false|no|off)$/i.test(
+    process.env.RANDOM_ROAST || ""
+  );
 
 const parsedCooldown = Number(
   process.env.RANDOM_ROAST_COOLDOWN_MS || "30000"
 );
 
 const RANDOM_ROAST_COOLDOWN_MS =
-  Number.isFinite(parsedCooldown) && parsedCooldown >= 0
+  Number.isFinite(parsedCooldown) &&
+  parsedCooldown >= 0
     ? parsedCooldown
     : 30_000;
 
@@ -62,10 +70,23 @@ const activeThreads = new Set();
 
 
 // ---------------------------------------------------------------------------
+// Global bot state
+// ---------------------------------------------------------------------------
+
+if (typeof global.botDisabled !== "boolean") {
+  global.botDisabled = false;
+}
+
+
+// ---------------------------------------------------------------------------
 // Timeout helper
 // ---------------------------------------------------------------------------
 
-function withTimeout(operation, timeoutMs, timeoutMessage) {
+function withTimeout(
+  operation,
+  timeoutMs,
+  timeoutMessage
+) {
   return new Promise((resolve, reject) => {
     let settled = false;
 
@@ -81,14 +102,18 @@ function withTimeout(operation, timeoutMs, timeoutMessage) {
       .then(
         (value) => {
           if (settled) return;
+
           settled = true;
           clearTimeout(timer);
+
           resolve(value);
         },
         (error) => {
           if (settled) return;
+
           settled = true;
           clearTimeout(timer);
+
           reject(error);
         }
       );
@@ -100,13 +125,24 @@ function withTimeout(operation, timeoutMs, timeoutMessage) {
 // Messenger Promise wrapper
 // ---------------------------------------------------------------------------
 
-function sendMessengerMessage(api, message, threadID) {
+function sendMessengerMessage(
+  api,
+  message,
+  threadID
+) {
   return new Promise((resolve, reject) => {
     try {
-      api.sendMessage(message, threadID, (error) => {
-        if (error) reject(error);
-        else resolve();
-      });
+      api.sendMessage(
+        message,
+        threadID,
+        (error) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        }
+      );
     } catch (error) {
       reject(error);
     }
@@ -118,15 +154,28 @@ function sendMessengerMessage(api, message, threadID) {
 // YouTube audio
 // ---------------------------------------------------------------------------
 
-async function sendAudioTrack(api, requestedSong, threadID) {
-  if (typeof requestedSong !== "string" || !requestedSong.trim()) {
+async function sendAudioTrack(
+  api,
+  requestedSong,
+  threadID
+) {
+  if (
+    typeof requestedSong !== "string" ||
+    !requestedSong.trim()
+  ) {
     api.sendMessage(
       "🎵 Usage: !play <song name>",
       threadID,
       (error) => {
-        if (error) console.error("Usage message failed:", error);
+        if (error) {
+          console.error(
+            "Usage message failed:",
+            error
+          );
+        }
       }
     );
+
     return;
   }
 
@@ -140,7 +189,12 @@ async function sendAudioTrack(api, requestedSong, threadID) {
       "🔎 Searching for the song...",
       threadID,
       (error) => {
-        if (error) console.error("Search status message failed:", error);
+        if (error) {
+          console.error(
+            "Search status message failed:",
+            error
+          );
+        }
       }
     );
 
@@ -151,41 +205,68 @@ async function sendAudioTrack(api, requestedSong, threadID) {
     );
 
     if (!video || !video.url) {
-      throw new Error(`No YouTube result found for "${requestedSong}".`);
+      throw new Error(
+        `No YouTube result found for "${requestedSong}".`
+      );
     }
 
     await withTimeout(
-      () => downloadYouTubeAudio(video.url, temporaryFile),
+      () =>
+        downloadYouTubeAudio(
+          video.url,
+          temporaryFile
+        ),
       YOUTUBE_DOWNLOAD_TIMEOUT_MS,
       "YouTube download timed out after 3 minutes. Please try again."
     );
 
-    const fileInfo = await fsp.stat(temporaryFile);
+    const fileInfo = await fsp.stat(
+      temporaryFile
+    );
 
-    if (!fileInfo.isFile() || fileInfo.size === 0) {
-      throw new Error("The downloaded audio file is empty.");
+    if (
+      !fileInfo.isFile() ||
+      fileInfo.size === 0
+    ) {
+      throw new Error(
+        "The downloaded audio file is empty."
+      );
     }
 
     await sendMessengerMessage(
       api,
       {
         body: `🎵 ${video.title || requestedSong}`,
-        attachment: fs.createReadStream(temporaryFile),
+        attachment:
+          fs.createReadStream(temporaryFile),
       },
       threadID
     );
   } catch (error) {
-    console.error("Audio command failed:", error);
+    console.error(
+      "Audio command failed:",
+      error
+    );
 
     api.sendMessage(
-      `❌ Unable to download that song.\n${error.message}`,
+      [
+        "❌ Unable to download that song.",
+        error.message,
+      ].join("\n"),
       threadID,
       (sendError) => {
-        if (sendError) console.error("Audio error message failed:", sendError);
+        if (sendError) {
+          console.error(
+            "Audio error message failed:",
+            sendError
+          );
+        }
       }
     );
   } finally {
-    await fsp.unlink(temporaryFile).catch(() => {});
+    await fsp
+      .unlink(temporaryFile)
+      .catch(() => {});
   }
 }
 
@@ -197,21 +278,42 @@ async function sendAudioTrack(api, requestedSong, threadID) {
 const app = express();
 
 app.get("/", (_req, res) => {
-  res.status(200).send("Bot is running ✅");
+  res.status(200).send(
+    "Bot is running ✅"
+  );
 });
 
-const port = Number.parseInt(process.env.PORT || "3000", 10);
+const port = Number.parseInt(
+  process.env.PORT || "3000",
+  10
+);
 
-if (!Number.isInteger(port) || port < 1 || port > 65535) {
-  throw new Error(`Invalid PORT value: ${process.env.PORT}`);
+if (
+  !Number.isInteger(port) ||
+  port < 1 ||
+  port > 65535
+) {
+  throw new Error(
+    `Invalid PORT value: ${process.env.PORT}`
+  );
 }
 
-const server = app.listen(port, "0.0.0.0", () => {
-  console.log(`Web server listening on port ${port}`);
-});
+const server = app.listen(
+  port,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `Web server listening on port ${port}`
+    );
+  }
+);
 
 server.on("error", (error) => {
-  console.error("Web server error:", error);
+  console.error(
+    "Web server error:",
+    error
+  );
+
   process.exitCode = 1;
 });
 
@@ -221,10 +323,16 @@ server.on("error", (error) => {
 // ---------------------------------------------------------------------------
 
 function readAppState() {
-  const rawCookies = process.env.FB_COOKIES;
+  const rawCookies =
+    process.env.FB_COOKIES;
 
-  if (typeof rawCookies !== "string" || !rawCookies.trim()) {
-    throw new Error("FB_COOKIES is missing.");
+  if (
+    typeof rawCookies !== "string" ||
+    !rawCookies.trim()
+  ) {
+    throw new Error(
+      "FB_COOKIES is missing."
+    );
   }
 
   let parsed;
@@ -236,11 +344,18 @@ function readAppState() {
       parsed = JSON.parse(parsed);
     }
   } catch {
-    throw new Error("FB_COOKIES must contain valid JSON.");
+    throw new Error(
+      "FB_COOKIES must contain valid JSON."
+    );
   }
 
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error("FB_COOKIES must be a non-empty cookie array.");
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0
+  ) {
+    throw new Error(
+      "FB_COOKIES must be a non-empty cookie array."
+    );
   }
 
   return parsed.map((cookie) => {
@@ -249,7 +364,9 @@ function readAppState() {
       typeof cookie !== "object" ||
       Array.isArray(cookie)
     ) {
-      throw new Error("Each FB_COOKIES entry must be an object.");
+      throw new Error(
+        "Each FB_COOKIES entry must be an object."
+      );
     }
 
     const key =
@@ -279,7 +396,10 @@ let appState;
 try {
   appState = readAppState();
 } catch (error) {
-  console.error(`Configuration error: ${error.message}`);
+  console.error(
+    `Configuration error: ${error.message}`
+  );
+
   process.exit(1);
 }
 
@@ -299,22 +419,38 @@ login(
 
   async (loginError, api) => {
     if (loginError) {
-      console.error("Login failed:", loginError);
+      console.error(
+        "Login failed:",
+        loginError
+      );
+
       process.exit(1);
     }
 
     if (!api) {
-      console.error("Login failed: Facebook API object was not returned.");
+      console.error(
+        "Login failed: Facebook API object was not returned."
+      );
+
       process.exit(1);
     }
 
-    console.log("Logged in successfully.");
+    console.log(
+      "Logged in successfully."
+    );
 
     try {
       await db.connect();
-      console.log("Neon database connected successfully.");
+
+      console.log(
+        "Neon database connected successfully."
+      );
     } catch (error) {
-      console.error("Database connection failed:", error);
+      console.error(
+        "Database connection failed:",
+        error
+      );
+
       process.exit(1);
     }
 
@@ -323,14 +459,20 @@ login(
       selfListen: false,
     });
 
-    const startupThreadID = process.env.STARTUP_THREAD_ID;
+    const startupThreadID =
+      process.env.STARTUP_THREAD_ID;
 
     if (startupThreadID) {
       api.sendMessage(
         "🟢 Bot is online and ready.",
         startupThreadID,
         (sendError) => {
-          if (sendError) console.error("Startup message failed:", sendError);
+          if (sendError) {
+            console.error(
+              "Startup message failed:",
+              sendError
+            );
+          }
         }
       );
     }
@@ -339,32 +481,56 @@ login(
       "Listener started. Send a message from a different Facebook account."
     );
 
-    api.listenMqtt((listenError, event) => {
-      if (listenError) {
-        console.error("Listener error:", listenError);
-        return;
+    api.listenMqtt(
+      (listenError, event) => {
+        if (listenError) {
+          console.error(
+            "Listener error:",
+            listenError
+          );
+
+          return;
+        }
+
+        if (
+          !event ||
+          typeof event !== "object"
+        ) {
+          return;
+        }
+
+        console.log(
+          "Incoming event:",
+          {
+            type: event.type,
+            senderID: event.senderID,
+            threadID: event.threadID,
+          }
+        );
+
+        if (
+          (
+            event.type === "message" ||
+            event.type === "message_reply"
+          ) &&
+          event.threadID
+        ) {
+          const threadID =
+            String(event.threadID);
+
+          activeThreads.add(threadID);
+
+          console.log(
+            `[Threads] Active threads: ${activeThreads.size}`
+          );
+
+          void handleMessage(
+            api,
+            event
+          );
+        }
       }
-
-      if (!event || typeof event !== "object") return;
-
-      console.log("Incoming event:", {
-        type: event.type,
-        senderID: event.senderID,
-        threadID: event.threadID,
-      });
-
-      if (
-        (event.type === "message" || event.type === "message_reply") &&
-        event.threadID
-      ) {
-        const threadID = String(event.threadID);
-        activeThreads.add(threadID);
-
-        console.log(`[Threads] Active threads: ${activeThreads.size}`);
-
-        void handleMessage(api, event);
-      }
-    });
+    );
   }
 );
 
@@ -373,7 +539,10 @@ login(
 // Message handling
 // ---------------------------------------------------------------------------
 
-async function handleMessage(api, event) {
+async function handleMessage(
+  api,
+  event
+) {
   const {
     threadID,
     senderID,
@@ -388,29 +557,53 @@ async function handleMessage(api, event) {
     return;
   }
 
-  const threadId = String(threadID);
-  const originalText = body.trim();
-  const text = originalText.toLowerCase();
-  const senderId = String(senderID || "").trim();
+  const threadId =
+    String(threadID);
+
+  const originalText =
+    body.trim();
+
+  const text =
+    originalText.toLowerCase();
+
+  const senderId =
+    String(senderID || "").trim();
+
 
   // -------------------------------------------------------------------------
-  // GLOBAL BOT CONTROL — !shutdown / !startup
+  // GLOBAL BOT CONTROL
+  //
+  // !shutdown
+  // !startup
+  //
+  // These remain functional but are NOT shown in public !help.
   // -------------------------------------------------------------------------
 
-  if (/^!(shutdown|startup)$/i.test(originalText)) {
-    if (!ADMIN_IDS.includes(senderId)) {
+  if (
+    /^!(shutdown|startup)$/i.test(
+      originalText
+    )
+  ) {
+    if (
+      !ADMIN_IDS.includes(senderId)
+    ) {
       sendReplyWithTyping(
         api,
         "❌ Only the bot admin can use this command.",
         threadID
       );
+
       return;
     }
 
     const controlCommand =
-      originalText.slice(1).toLowerCase();
+      originalText
+        .slice(1)
+        .toLowerCase();
 
-    if (controlCommand === "shutdown") {
+    if (
+      controlCommand === "shutdown"
+    ) {
       global.botDisabled = true;
 
       sendReplyWithTyping(
@@ -418,10 +611,13 @@ async function handleMessage(api, event) {
         "🛑 Bot shutdown enabled. The bot is now OFF in all groups.",
         threadID
       );
+
       return;
     }
 
-    if (controlCommand === "startup") {
+    if (
+      controlCommand === "startup"
+    ) {
       global.botDisabled = false;
 
       sendReplyWithTyping(
@@ -429,34 +625,52 @@ async function handleMessage(api, event) {
         "🟢 Bot startup enabled. The bot is now ON.",
         threadID
       );
+
       return;
     }
   }
 
-  if (global.botDisabled === true) {
+
+  // -------------------------------------------------------------------------
+  // GLOBAL BOT DISABLED STATE
+  // -------------------------------------------------------------------------
+
+  if (
+    global.botDisabled === true
+  ) {
     return;
   }
 
 
   // -------------------------------------------------------------------------
   // SIMPLE DIRECT COMMANDS
-  //
-  // These are intentionally FIRST.
-  // This prevents AI/RPG/game/economy handlers from swallowing !ping,
-  // !help, !play, or !broadcast when one of those handlers errors.
   // -------------------------------------------------------------------------
 
   if (text === "!ping") {
-    sendReplyWithTyping(api, "🏓 Pong!", threadID);
+    sendReplyWithTyping(
+      api,
+      "🏓 Pong!",
+      threadID
+    );
+
     return;
   }
+
+
+  // -------------------------------------------------------------------------
+  // PUBLIC HELP
+  //
+  // IMPORTANT:
+  // Admin-only controls are deliberately NOT advertised here.
+  // -------------------------------------------------------------------------
 
   if (text === "!help") {
     sendReplyWithTyping(
       api,
       [
         "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "       🤖 BOT MENU",
+        "          🌑 ECLIPSE",
+        "        PUBLIC MENU",
         "╰━━━━━━━━━━━━━━━━━━━━╯",
         "",
         "⚡ GENERAL",
@@ -464,7 +678,7 @@ async function handleMessage(api, event) {
         "  Check if the bot is online.",
         "",
         "• !help",
-        "  Show this command menu.",
+        "  Show this public command menu.",
         "",
         "🎵 MUSIC",
         "• !play <song>",
@@ -473,35 +687,39 @@ async function handleMessage(api, event) {
         "",
         "🌑 ECLIPSE RPG",
         "• !rpg help",
-        "  Open the persistent character, kingdom, and army system.",
-        "• !rpg profile / !rpg kingdom",
-        "  View your ruler and domain.",
-        "• !rpg property buy cottage",
-        "  Start expanding your domain.",
-        "• !rpg train infantry 10",
+        "  Open the persistent RPG system.",
+        "",
+        "• !rpg profile",
+        "  View your character and progression.",
+        "",
+        "• !rpg kingdom",
+        "  View your kingdom and domain.",
+        "",
+        "• !rpg property",
+        "  Manage your property.",
+        "",
+        "• !rpg train <unit> <amount>",
         "  Train troops using your wallet.",
-        "• !rpg march ironspine",
-        "  Travel by map distance with no global time cap.",
+        "",
+        "• !rpg march <region>",
+        "  Travel through the world map.",
         "",
         "🎭 LUCIEN AI",
         "• !lucien",
         "  Start Lucien for Alaiza only.",
-        "• !lucien reset / !lucien off",
-        "  Reset history or end the private session.",
         "",
-        "🔥 BANAT",
-        "• !banat on",
-        "  Turn automatic banat ON.",
+        "• !lucien reset",
+        "  Reset the private session.",
         "",
-        "• !banat off",
-        "  Turn automatic banat OFF.",
+        "• !lucien off",
+        "  End the private session.",
         "",
         "💰 ECONOMY",
         "• !balance / !bal",
         "  Check your coins.",
         "",
         "• !daily",
-        "  Claim your daily coins.",
+        "  Claim your daily reward.",
         "",
         "• !work",
         "  Work for coins.",
@@ -523,74 +741,106 @@ async function handleMessage(api, event) {
         "",
         "🎮 GAMES",
         "• !games",
-        "  Open the full Game Center + rules.",
+        "  Open the ECLIPSE Game Center.",
         "",
-        "• !game on",
-        "  Enable games in this group.",
+        "• !games rules",
+        "  View detailed game rules.",
         "",
-        "• !game off",
-        "  Disable games in this group.",
+        "• !games status",
+        "  View your game status.",
         "",
         "🧠 !trivia",
-        "  Answer A, B, C, or D.",
-        "  Correct answers earn coins.",
+        "  Answer the generated question.",
         "",
-        "✊ !rps <choice> [bet]",
-        "  Rock, Paper, Scissors.",
-        "  Win = 2× • Tie = refund.",
+        "✊ !rps <rock|paper|scissors>",
+        "  Play Rock, Paper, Scissors.",
         "",
         "🎲 !roll <bet>",
-        "  Roll a d100.",
-        "  55+ wins 2×.",
+        "  Roll the generated range.",
         "",
-        "🎯 !guess <1-10> [bet]",
+        "🎯 !guess <number>",
         "  Guess the secret number.",
-        "  Exact guess = 5×.",
         "",
-        "🪙 !coinflip <bet> <heads/tails>",
-        "  Pick heads or tails.",
-        "  Correct = 2×.",
+        "🪙 !coinflip <bet> <heads|tails>",
+        "  Bet on heads or tails.",
         "",
         "🎰 !slots <bet>",
         "  Spin the slot machine.",
-        "  Matching symbols pay out.",
         "",
-        "🃏 !blackjack <bet>",
-        "  Play against the dealer.",
+        "🃏 !blackjack",
+        "  Start Blackjack.",
         "  Use !hit or !stand.",
+        "",
+        "🧮 !math",
+        "  Solve the generated problem.",
+        "",
+        "🧩 !riddle",
+        "  Solve the generated riddle.",
         "",
         "🔮 !8ball <question>",
         "  Ask the Magic 8-Ball.",
         "",
-        "👑 ADMIN",
-        "• !broadcast <text>",
-        "  Send a message to active threads.",
-        "  Admin only.",
-        "",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        "💡 Type !games for detailed",
-        "   game rules and payouts.",
+        "🌑 Explore ECLIPSE RPG",
+        "   to discover more systems.",
         "━━━━━━━━━━━━━━━━━━━━━━",
       ].join("\n"),
       threadID
     );
+
     return;
   }
 
-  if (text === "!play" || text.startsWith("!play ")) {
-    const requestedSong = originalText.slice("!play".length).trim();
 
-    void sendAudioTrack(api, requestedSong, threadID);
+  // -------------------------------------------------------------------------
+  // MUSIC
+  // -------------------------------------------------------------------------
+
+  if (
+    text === "!play" ||
+    text.startsWith("!play ")
+  ) {
+    const requestedSong =
+      originalText
+        .slice("!play".length)
+        .trim();
+
+    void sendAudioTrack(
+      api,
+      requestedSong,
+      threadID
+    );
+
     return;
   }
 
-  if (text.startsWith("!broadcast ")) {
-    if (!ADMIN_IDS.includes(senderId)) {
-      sendReplyWithTyping(api, "❌ Admin only.", threadID);
+
+  // -------------------------------------------------------------------------
+  // BROADCAST
+  //
+  // Admin-only.
+  // Hidden from public help.
+  // -------------------------------------------------------------------------
+
+  if (
+    text.startsWith("!broadcast ")
+  ) {
+    if (
+      !ADMIN_IDS.includes(senderId)
+    ) {
+      sendReplyWithTyping(
+        api,
+        "❌ Admin only.",
+        threadID
+      );
+
       return;
     }
 
-    const message = originalText.slice("!broadcast ".length).trim();
+    const message =
+      originalText
+        .slice("!broadcast ".length)
+        .trim();
 
     if (!message) {
       sendReplyWithTyping(
@@ -598,25 +848,27 @@ async function handleMessage(api, event) {
         "📢 Usage: !broadcast <message>",
         threadID
       );
+
       return;
     }
 
-    broadcastToAllThreads(api, message);
+    broadcastToAllThreads(
+      api,
+      message
+    );
+
     sendReplyWithTyping(
       api,
       `📢 Broadcast queued for ${activeThreads.size} active thread(s).`,
       threadID
     );
+
     return;
   }
 
 
   // -------------------------------------------------------------------------
   // MODERATION
-  //
-  // This runs before AI, RPG, games, and economy.
-  // Blocked moderation/economy-admin actions stop here.
-  // Normal economy commands are allowed to continue to economy.js.
   // -------------------------------------------------------------------------
 
   try {
@@ -639,16 +891,31 @@ async function handleMessage(api, event) {
 
 
   // -------------------------------------------------------------------------
-  // AI / RPG CHARACTER SESSIONS
+  // AI
   // -------------------------------------------------------------------------
 
   try {
-    if (await handleAiMessage(api, event, text, originalText)) {
+    if (
+      await handleAiMessage(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
       return;
     }
   } catch (error) {
-    console.error("AI message handler failed:", error);
+    console.error(
+      "AI message handler failed:",
+      error
+    );
   }
+
+
+  // -------------------------------------------------------------------------
+  // RPG CHARACTER AI
+  // -------------------------------------------------------------------------
 
   try {
     if (
@@ -662,11 +929,23 @@ async function handleMessage(api, event) {
       return;
     }
   } catch (error) {
-    console.error("RPG character handler failed:", error);
+    console.error(
+      "RPG character handler failed:",
+      error
+    );
   }
+
 
   // -------------------------------------------------------------------------
   // ACTIVE GAME RESPONSES
+  //
+  // IMPORTANT:
+  // This must happen BEFORE normal game commands.
+  //
+  // Example:
+  // !trivia
+  // user answers A
+  // A must reach handleGameResponse().
   // -------------------------------------------------------------------------
 
   try {
@@ -681,16 +960,28 @@ async function handleMessage(api, event) {
       return;
     }
   } catch (error) {
-    console.error("Game response failed:", error);
+    console.error(
+      "Game response failed:",
+      error
+    );
   }
 
 
   // -------------------------------------------------------------------------
-  // RPG / GAMES / ECONOMY COMMANDS
+  // RPG / GAME / ECONOMY COMMANDS
   // -------------------------------------------------------------------------
 
   try {
-    if (/^!rpg(?:\s|$)/i.test(originalText)) {
+
+    // -----------------------------------------------------------------------
+    // RPG
+    // -----------------------------------------------------------------------
+
+    if (
+      /^!rpg(?:\s|$)/i.test(
+        originalText
+      )
+    ) {
       if (
         await handleRpgCommand(
           api,
@@ -703,26 +994,38 @@ async function handleMessage(api, event) {
       }
     }
 
+
     // -----------------------------------------------------------------------
-    // GAME TOGGLE — !game on / !game off
+    // GAME TOGGLE
+    //
+    // !game on
+    // !game off
+    //
+    // Admin-only.
+    // Hidden from public help.
     // -----------------------------------------------------------------------
 
-    const gameToggleMatch = text.match(
-      /^!game\s+(on|off)$/i
-    );
+    const gameToggleMatch =
+      text.match(
+        /^!game\s+(on|off)$/i
+      );
 
     if (gameToggleMatch) {
-      if (!ADMIN_IDS.includes(senderId)) {
+      if (
+        !ADMIN_IDS.includes(senderId)
+      ) {
         sendReplyWithTyping(
           api,
           "❌ Only the bot admin can turn games on or off.",
           threadID
         );
+
         return;
       }
 
       const enabled =
-        gameToggleMatch[1].toLowerCase() === "on";
+        gameToggleMatch[1]
+          .toLowerCase() === "on";
 
       try {
         await db.setGameEnabled(
@@ -753,33 +1056,125 @@ async function handleMessage(api, event) {
       return;
     }
 
-    const gameMatch = text.match(
-      /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
-    );
+
+    // -----------------------------------------------------------------------
+    // CURRENT games.js COMMAND ROUTER
+    //
+    // IMPORTANT:
+    // Keep this list synchronized with games.js.
+    // -----------------------------------------------------------------------
+
+    const gameMatch =
+      text.match(
+        /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
+      );
 
     if (gameMatch) {
-      const gameCommand = gameMatch[1].toLowerCase();
+      const gameCommand =
+        gameMatch[1].toLowerCase();
 
-      if (gameCommand === "games") {
-        sendGameCenter(api, threadID);
+      const gameArgs =
+        gameMatch[2]
+          ? gameMatch[2]
+              .trim()
+              .split(/\s+/)
+          : [];
+
+
+      // ---------------------------------------------------------------------
+      // !games
+      // !games rules
+      // !games status
+      //
+      // These are handled specially because the Game Center itself should
+      // remain accessible even when gameplay is disabled.
+      // ---------------------------------------------------------------------
+
+      if (
+        gameCommand === "games"
+      ) {
+        const subcommand =
+          (
+            gameArgs[0] || ""
+          ).toLowerCase();
+
+
+        // !games rules
+        // !games status
+        //
+        // Let games.js handle these so its rules/status stay centralized.
+        if (
+          subcommand === "rules" ||
+          subcommand === "status"
+        ) {
+          const handled =
+            await handleGamesCommand(
+              api,
+              event,
+              gameCommand,
+              gameArgs
+            );
+
+          if (handled) {
+            return;
+          }
+        }
+
+
+        // Plain !games
+        //
+        // games.js owns the Game Center itself.
+        const handled =
+          await handleGamesCommand(
+            api,
+            event,
+            gameCommand,
+            gameArgs
+          );
+
+        if (handled) {
+          return;
+        }
+
+        // Safety fallback in case the games.js dispatcher returns false.
+        sendGameCenter(
+          api,
+          threadID
+        );
+
         return;
       }
 
+
+      // ---------------------------------------------------------------------
+      // GAMEPLAY ENABLE/DISABLE CHECK
+      //
+      // Only actual gameplay is blocked when games are OFF.
+      // ---------------------------------------------------------------------
+
       const gamesEnabled =
-        await db.isGameEnabled(threadID);
+        await db.isGameEnabled(
+          threadID
+        );
 
       if (!gamesEnabled) {
         sendReplyWithTyping(
           api,
-          "🎮 Games are currently OFF in this group.\n\nAn admin can enable them with !game on.",
+          [
+            "🎮 Games are currently OFF in this group.",
+            "",
+            "An admin can enable them with !game on.",
+          ].join("\n"),
           threadID
         );
+
         return;
       }
 
-      const gameArgs = gameMatch[2]
-        ? gameMatch[2].trim().split(/\s+/)
-        : [];
+
+      // ---------------------------------------------------------------------
+      // Send actual gameplay command to games.js.
+      // ---------------------------------------------------------------------
 
       if (
         await handleGamesCommand(
@@ -793,6 +1188,11 @@ async function handleMessage(api, event) {
       }
     }
 
+
+    // -----------------------------------------------------------------------
+    // ECONOMY
+    // -----------------------------------------------------------------------
+
     if (
       await handleEconomyCommand(
         api,
@@ -803,6 +1203,7 @@ async function handleMessage(api, event) {
     ) {
       return;
     }
+
   } catch (error) {
     console.error(
       "RPG/economy/games command failed:",
@@ -810,32 +1211,48 @@ async function handleMessage(api, event) {
     );
 
     // Do NOT return here.
-    // A failed optional handler must not prevent the fallback systems
-    // below from running.
+    //
+    // If an optional handler fails, the trigger/roast systems below
+    // are still allowed to run.
   }
-  
+
+
   // -------------------------------------------------------------------------
-  // BANAT CONTROL — ADMIN ONLY
+  // BANAT CONTROL
+  //
+  // Admin-only.
+  // Hidden from public help.
   // -------------------------------------------------------------------------
 
-  if (text === "!banat on" || text === "!banat off") {
-    // BANAT CONTROL IS ADMIN-ONLY
-    if (!ADMIN_IDS.includes(senderId)) {
+  if (
+    text === "!banat on" ||
+    text === "!banat off"
+  ) {
+    if (
+      !ADMIN_IDS.includes(senderId)
+    ) {
       sendReplyWithTyping(
         api,
         "❌ Only the bot admin can turn banat on or off.",
         threadID
       );
+
       return;
     }
 
-    const enabled = text === "!banat on";
+    const enabled =
+      text === "!banat on";
 
     try {
-      await db.setRoastEnabled(threadId, enabled);
+      await db.setRoastEnabled(
+        threadId,
+        enabled
+      );
 
       if (!enabled) {
-        lastRandomRoastByThread.delete(threadId);
+        lastRandomRoastByThread.delete(
+          threadId
+        );
       }
 
       sendReplyWithTyping(
@@ -872,18 +1289,19 @@ async function handleMessage(api, event) {
 
     return;
   }
-  
+
 
   // -------------------------------------------------------------------------
   // TARGETED TRIGGER / ROAST
   // -------------------------------------------------------------------------
 
   try {
-    const triggerReply = await getTriggerReply(
-      body,
-      senderId,
-      threadId
-    );
+    const triggerReply =
+      await getTriggerReply(
+        body,
+        senderId,
+        threadId
+      );
 
     if (triggerReply) {
       sendReplyWithTyping(
@@ -892,10 +1310,14 @@ async function handleMessage(api, event) {
         threadID,
         true
       );
+
       return;
     }
   } catch (error) {
-    console.error("Trigger system failed:", error);
+    console.error(
+      "Trigger system failed:",
+      error
+    );
   }
 
 
@@ -903,26 +1325,43 @@ async function handleMessage(api, event) {
   // PUBLIC RANDOM ROAST
   // -------------------------------------------------------------------------
 
-  if (!RANDOM_ROAST_ENABLED) {
+  if (
+    !RANDOM_ROAST_ENABLED
+  ) {
     return;
   }
 
   try {
-    const roastEnabled = await db.isRoastEnabled(threadId);
+    const roastEnabled =
+      await db.isRoastEnabled(
+        threadId
+      );
 
     if (!roastEnabled) {
       return;
     }
   } catch (error) {
-    console.error("Could not check roast setting:", error);
+    console.error(
+      "Could not check roast setting:",
+      error
+    );
+
     return;
   }
 
-  if (canRandomRoastThread(threadId)) {
-    const publicReply = getNextPublicReply();
+  if (
+    canRandomRoastThread(
+      threadId
+    )
+  ) {
+    const publicReply =
+      getNextPublicReply();
 
     if (publicReply) {
-      lastRandomRoastByThread.set(threadId, Date.now());
+      lastRandomRoastByThread.set(
+        threadId,
+        Date.now()
+      );
 
       sendReplyWithTyping(
         api,
@@ -936,63 +1375,64 @@ async function handleMessage(api, event) {
 
 
 // ---------------------------------------------------------------------------
-// Game Center
+// Game Center fallback
+//
+// Normally games.js handles !games itself.
+// This exists as a safety fallback so index.js can still display the center
+// if the games dispatcher returns false for plain !games.
 // ---------------------------------------------------------------------------
 
-function sendGameCenter(api, threadID) {
+function sendGameCenter(
+  api,
+  threadID
+) {
   sendReplyWithTyping(
     api,
     [
       "╭━━━━━━━━━━━━━━━━━━━━╮",
-      "       🎮 GAME CENTER",
+      "          🌑 ECLIPSE",
+      "        GAME CENTER",
       "╰━━━━━━━━━━━━━━━━━━━━╯",
       "",
       "🧠 TRIVIA",
       "!trivia",
-      "Answer A, B, C, or D.",
+      "Answer the generated question.",
       "",
-      "✊ RPS",
-      "!rps rock 100",
-      "!rps paper 100",
-      "!rps scissors 100",
-      "Win = 2× • Tie = refund.",
+      "✊ ROCK • PAPER • SCISSORS",
+      "!rps rock",
+      "!rps paper",
+      "!rps scissors",
       "",
       "🎲 ROLL",
       "!roll 100",
-      "55+ wins 2×.",
       "",
       "🎯 GUESS",
-      "!guess 7 100",
-      "Exact guess = 5×.",
+      "!guess 7",
       "",
       "🪙 COINFLIP",
       "!coinflip 100 heads",
-      "Correct = 2×.",
       "",
       "🎰 SLOTS",
       "!slots 100",
-      "Matching symbols pay out.",
       "",
       "🃏 BLACKJACK",
-      "!blackjack 100",
-      "Then use !hit / !stand.",
+      "!blackjack",
+      "!hit",
+      "!stand",
+      "",
+      "🧮 MATH",
+      "!math",
+      "",
+      "🧩 RIDDLE",
+      "!riddle",
       "",
       "🔮 8-BALL",
       "!8ball Will I win?",
       "",
-      "🧮 MATH",
-      "!math",
-      "Solve the generated problem.",
-      "",
-      "🧩 RIDDLE",
-      "!riddle",
-      "Solve the generated riddle.",
-      "",
-      "⚙️ GAME SWITCH",
-      "!game on",
-      "!game off",
-      "",
-      "💡 Type !help for the complete bot menu.",
+      "━━━━━━━━━━━━━━━━━━━━━━",
+      "📜 !games rules",
+      "📊 !games status",
+      "━━━━━━━━━━━━━━━━━━━━━━",
     ].join("\n"),
     threadID
   );
@@ -1003,27 +1443,45 @@ function sendGameCenter(api, threadID) {
 // Random roast cooldown
 // ---------------------------------------------------------------------------
 
-function canRandomRoastThread(threadID) {
+function canRandomRoastThread(
+  threadID
+) {
   const now = Date.now();
 
   const lastRoastAt =
-    lastRandomRoastByThread.get(threadID) || 0;
+    lastRandomRoastByThread.get(
+      threadID
+    ) || 0;
 
-  if (now - lastRoastAt < RANDOM_ROAST_COOLDOWN_MS) {
+  if (
+    now - lastRoastAt <
+    RANDOM_ROAST_COOLDOWN_MS
+  ) {
     return false;
   }
 
-  if (lastRandomRoastByThread.size > 1000) {
-    const expiry = Math.max(
-      RANDOM_ROAST_COOLDOWN_MS * 2,
-      60_000
-    );
+  if (
+    lastRandomRoastByThread.size >
+    1000
+  ) {
+    const expiry =
+      Math.max(
+        RANDOM_ROAST_COOLDOWN_MS * 2,
+        60_000
+      );
 
     for (
-      const [knownThreadID, roastAt] of lastRandomRoastByThread.entries()
+      const [
+        knownThreadID,
+        roastAt,
+      ] of lastRandomRoastByThread.entries()
     ) {
-      if (now - roastAt > expiry) {
-        lastRandomRoastByThread.delete(knownThreadID);
+      if (
+        now - roastAt > expiry
+      ) {
+        lastRandomRoastByThread.delete(
+          knownThreadID
+        );
       }
     }
   }
@@ -1036,16 +1494,31 @@ function canRandomRoastThread(threadID) {
 // Broadcast
 // ---------------------------------------------------------------------------
 
-function broadcastToAllThreads(api, message) {
-  if (!message || !message.trim()) {
-    console.log("[Broadcast] No message to broadcast.");
+function broadcastToAllThreads(
+  api,
+  message
+) {
+  if (
+    !message ||
+    !message.trim()
+  ) {
+    console.log(
+      "[Broadcast] No message to broadcast."
+    );
+
     return;
   }
 
-  const threads = Array.from(activeThreads);
+  const threads =
+    Array.from(activeThreads);
 
-  if (threads.length === 0) {
-    console.log("[Broadcast] No active threads.");
+  if (
+    threads.length === 0
+  ) {
+    console.log(
+      "[Broadcast] No active threads."
+    );
+
     return;
   }
 
@@ -1061,24 +1534,28 @@ function broadcastToAllThreads(api, message) {
     message.trim(),
   ].join("\n");
 
-  threads.forEach((threadID, index) => {
-    setTimeout(() => {
-      api.sendMessage(
-        broadcastMessage,
-        threadID,
-        (sendError) => {
-          if (sendError) {
-            console.error(
-              `[Broadcast] Failed for ${threadID}:`,
-              sendError
-            );
-          } else {
-            console.log(`[Broadcast] Sent to ${threadID}`);
+  threads.forEach(
+    (threadID, index) => {
+      setTimeout(() => {
+        api.sendMessage(
+          broadcastMessage,
+          threadID,
+          (sendError) => {
+            if (sendError) {
+              console.error(
+                `[Broadcast] Failed for ${threadID}:`,
+                sendError
+              );
+            } else {
+              console.log(
+                `[Broadcast] Sent to ${threadID}`
+              );
+            }
           }
-        }
-      );
-    }, index * 500);
-  });
+        );
+      }, index * 500);
+    }
+  );
 }
 
 
@@ -1095,7 +1572,10 @@ function sendReplyWithTyping(
   const typingDelayMs = 1200;
 
   try {
-    if (typeof api.sendTypingIndicator === "function") {
+    if (
+      typeof api.sendTypingIndicator ===
+      "function"
+    ) {
       api.sendTypingIndicator(
         threadID,
         (typingError) => {
@@ -1109,31 +1589,47 @@ function sendReplyWithTyping(
       );
     }
   } catch (typingError) {
-    console.error("Typing indicator error:", typingError);
+    console.error(
+      "Typing indicator error:",
+      typingError
+    );
   }
 
   setTimeout(() => {
     try {
-      const memePath = attachMeme ? getRandomMemePath() : null;
+      const memePath =
+        attachMeme
+          ? getRandomMemePath()
+          : null;
 
-      const outgoingMessage = memePath
-        ? {
-            body: message,
-            attachment: fs.createReadStream(memePath),
-          }
-        : message;
+      const outgoingMessage =
+        memePath
+          ? {
+              body: message,
+              attachment:
+                fs.createReadStream(
+                  memePath
+                ),
+            }
+          : message;
 
       api.sendMessage(
         outgoingMessage,
         threadID,
         (sendError) => {
           if (sendError) {
-            console.error("Reply failed:", sendError);
+            console.error(
+              "Reply failed:",
+              sendError
+            );
           }
         }
       );
     } catch (sendError) {
-      console.error("Reply error:", sendError);
+      console.error(
+        "Reply error:",
+        sendError
+      );
     }
   }, typingDelayMs);
 }
@@ -1144,39 +1640,68 @@ function sendReplyWithTyping(
 // ---------------------------------------------------------------------------
 
 function getRandomMemePath() {
-  const memeDirectory = path.join(__dirname, "memes");
+  const memeDirectory =
+    path.join(
+      __dirname,
+      "memes"
+    );
 
-  const supportedExtensions = new Set([
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".webp",
-  ]);
+  const supportedExtensions =
+    new Set([
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".gif",
+      ".webp",
+    ]);
 
   try {
-    if (!fs.existsSync(memeDirectory)) {
+    if (
+      !fs.existsSync(
+        memeDirectory
+      )
+    ) {
       return null;
     }
 
-    const files = fs
-      .readdirSync(memeDirectory)
-      .filter((fileName) =>
-        supportedExtensions.has(
-          path.extname(fileName).toLowerCase()
+    const files =
+      fs
+        .readdirSync(
+          memeDirectory
         )
-      );
+        .filter(
+          (fileName) =>
+            supportedExtensions.has(
+              path
+                .extname(fileName)
+                .toLowerCase()
+            )
+        );
 
-    if (files.length === 0) {
+    if (
+      files.length === 0
+    ) {
       return null;
     }
 
     const randomFile =
-      files[Math.floor(Math.random() * files.length)];
+      files[
+        Math.floor(
+          Math.random() *
+          files.length
+        )
+      ];
 
-    return path.join(memeDirectory, randomFile);
+    return path.join(
+      memeDirectory,
+      randomFile
+    );
   } catch (error) {
-    console.error("Could not load memes:", error);
+    console.error(
+      "Could not load memes:",
+      error
+    );
+
     return null;
   }
 }
