@@ -1,3 +1,5 @@
+"use strict";
+
 const fs = require("fs");
 const fsp = require("fs/promises");
 const os = require("os");
@@ -16,9 +18,45 @@ const {
 } = require("./games");
 
 const { handleRpgCommand } = require("./rpg");
+
 const {
   handleRpgCharacterMessage,
 } = require("./rpg/character-ai");
+
+/*
+ * ============================================================
+ * SECRET LOVE QUEST
+ * ============================================================
+ *
+ * THE LAST STAR is handled by rpg/love-quest.js.
+ *
+ * It is NOT a separate RPG system.
+ *
+ * The normal RPG still handles:
+ *
+ *   !rpg profile
+ *   !rpg explore
+ *   !rpg army
+ *   !rpg kingdom
+ *   !rpg property
+ *   etc.
+ *
+ * The love quest only handles:
+ *
+ *   !rpg laststar
+ *   !rpg laststar follow
+ *   !rpg laststar continue
+ *   !rpg laststar read
+ *   !rpg laststar choose ...
+ *
+ * Discovery is triggered after the normal !rpg explore command.
+ * ============================================================
+ */
+
+const {
+  isSpecialPlayer,
+  discover: discoverLoveQuest,
+} = require("./rpg/love-quest");
 
 const { handleAiMessage } = require("./ai");
 
@@ -68,9 +106,11 @@ const RANDOM_ROAST_COOLDOWN_MS =
 const lastRandomRoastByThread = new Map();
 const activeThreads = new Set();
 
+
 // ===============================
 // MEMORY MONITOR
 // ===============================
+
 setInterval(() => {
   const m = process.memoryUsage();
 
@@ -81,6 +121,7 @@ setInterval(() => {
     `External: ${Math.round(m.external / 1024 / 1024)} MB`
   );
 }, 60_000);
+
 
 // ---------------------------------------------------------------------------
 // Global bot state
@@ -673,7 +714,6 @@ async function handleMessage(
   // -------------------------------------------------------------------------
   // PUBLIC HELP
   //
-  // IMPORTANT:
   // Admin-only controls are deliberately NOT advertised here.
   // -------------------------------------------------------------------------
 
@@ -954,11 +994,6 @@ async function handleMessage(
   //
   // IMPORTANT:
   // This must happen BEFORE normal game commands.
-  //
-  // Example:
-  // !trivia
-  // user answers A
-  // A must reach handleGameResponse().
   // -------------------------------------------------------------------------
 
   try {
@@ -995,14 +1030,55 @@ async function handleMessage(
         originalText
       )
     ) {
-      if (
+
+      const isRpgExplore =
+        /^!rpg\s+explore(?:\s|$)/i.test(
+          originalText
+        );
+
+      const rpgHandled =
         await handleRpgCommand(
           api,
           event,
           text,
           originalText
-        )
-      ) {
+        );
+
+      if (rpgHandled) {
+
+        /*
+         * ================================================================
+         * SECRET LOVE QUEST DISCOVERY
+         * ================================================================
+         *
+         * Only check discovery after a normal !rpg explore command.
+         *
+         * The normal exploration result is handled FIRST.
+         *
+         * Then the secret quest gets its own message.
+         *
+         * Normal players are ignored immediately by isSpecialPlayer().
+         * ================================================================
+         */
+
+        if (
+          isRpgExplore &&
+          isSpecialPlayer(senderId)
+        ) {
+          try {
+            await discoverLoveQuest(
+              api,
+              threadID,
+              senderId
+            );
+          } catch (loveQuestError) {
+            console.error(
+              "Love quest discovery failed:",
+              loveQuestError
+            );
+          }
+        }
+
         return;
       }
     }
@@ -1072,9 +1148,6 @@ async function handleMessage(
 
     // -----------------------------------------------------------------------
     // CURRENT games.js COMMAND ROUTER
-    //
-    // IMPORTANT:
-    // Keep this list synchronized with games.js.
     // -----------------------------------------------------------------------
 
     const gameMatch =
@@ -1098,9 +1171,6 @@ async function handleMessage(
       // !games
       // !games rules
       // !games status
-      //
-      // These are handled specially because the Game Center itself should
-      // remain accessible even when gameplay is disabled.
       // ---------------------------------------------------------------------
 
       if (
@@ -1111,11 +1181,6 @@ async function handleMessage(
             gameArgs[0] || ""
           ).toLowerCase();
 
-
-        // !games rules
-        // !games status
-        //
-        // Let games.js handle these so its rules/status stay centralized.
         if (
           subcommand === "rules" ||
           subcommand === "status"
@@ -1133,10 +1198,6 @@ async function handleMessage(
           }
         }
 
-
-        // Plain !games
-        //
-        // games.js owns the Game Center itself.
         const handled =
           await handleGamesCommand(
             api,
@@ -1149,7 +1210,6 @@ async function handleMessage(
           return;
         }
 
-        // Safety fallback in case the games.js dispatcher returns false.
         sendGameCenter(
           api,
           threadID
@@ -1161,8 +1221,6 @@ async function handleMessage(
 
       // ---------------------------------------------------------------------
       // GAMEPLAY ENABLE/DISABLE CHECK
-      //
-      // Only actual gameplay is blocked when games are OFF.
       // ---------------------------------------------------------------------
 
       const gamesEnabled =
@@ -1186,7 +1244,7 @@ async function handleMessage(
 
 
       // ---------------------------------------------------------------------
-      // Send actual gameplay command to games.js.
+      // ACTUAL GAMEPLAY
       // ---------------------------------------------------------------------
 
       if (
@@ -1223,10 +1281,12 @@ async function handleMessage(
       error
     );
 
-    // Do NOT return here.
-    //
-    // If an optional handler fails, the trigger/roast systems below
-    // are still allowed to run.
+    /*
+     * Do NOT return here.
+     *
+     * If an optional handler fails, trigger/roast systems below
+     * are still allowed to run.
+     */
   }
 
 
@@ -1389,10 +1449,6 @@ async function handleMessage(
 
 // ---------------------------------------------------------------------------
 // Game Center fallback
-//
-// Normally games.js handles !games itself.
-// This exists as a safety fallback so index.js can still display the center
-// if the games dispatcher returns false for plain !games.
 // ---------------------------------------------------------------------------
 
 function sendGameCenter(
