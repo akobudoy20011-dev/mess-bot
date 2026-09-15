@@ -1,4 +1,4 @@
-"use strict";
+“use strict”;
 
 const db = require(”../db”);
 const { reply } = require(”../util”);
@@ -31,18 +31,21 @@ const CHAPTERS = {
 /*
 
 * Number of story stages in each chapter.
-* Chapter 7 is handled separately because it contains
-* multiple timed ending messages.
+* Stages:
+* 0 = main chapter scene
+* 1 = second scene / choice
+* Chapter 7 is the final ending.
     */
-    const CHAPTER_STAGES = {
-    1: 2,
-    2: 2,
-    3: 2,
-    4: 2,
-    5: 2,
-    6: 2,
-    7: 1,
-    };
+
+const CHAPTER_STAGES = {
+1: 2,
+2: 2,
+3: 2,
+4: 2,
+5: 2,
+6: 2,
+7: 1,
+};
 
 /*
 
@@ -54,7 +57,10 @@ const CHAPTERS = {
 function isSpecialPlayer(senderID) {
 if (!SPECIAL_PLAYER_ID) return false;
 
-return String(senderID || “”).trim() === SPECIAL_PLAYER_ID;
+return (
+String(senderID || “”).trim() ===
+SPECIAL_PLAYER_ID
+);
 }
 
 function normalizeArgs(args) {
@@ -101,10 +107,6 @@ return;
 }
 
 tablePromise = (async () => {
-/*
-* The choice column allows the story to remember
-* the player’s decisions.
-*/
 await db.query(`
 CREATE TABLE IF NOT EXISTS rpg_special_quests (
 thread_id     TEXT NOT NULL,
@@ -122,10 +124,14 @@ PRIMARY KEY (thread_id, player_id, quest_id)
 
   ALTER TABLE rpg_special_quests
     ADD COLUMN IF NOT EXISTS choice TEXT;
-  CREATE INDEX IF NOT EXISTS rpg_special_quests_player_idx
-    ON rpg_special_quests (player_id, quest_id, status);
-  CREATE INDEX IF NOT EXISTS rpg_special_quests_thread_idx
-    ON rpg_special_quests (thread_id, player_id);
+  CREATE INDEX IF NOT EXISTS
+    rpg_special_quests_player_idx
+    ON rpg_special_quests
+    (player_id, quest_id, status);
+  CREATE INDEX IF NOT EXISTS
+    rpg_special_quests_thread_idx
+    ON rpg_special_quests
+    (thread_id, player_id);
 `);
 tableReady = true;
 
@@ -181,13 +187,58 @@ await ensureTable();
 const timestamp = now();
 
 const result = await db.query(
-INSERT INTO rpg_special_quests ( thread_id, player_id, quest_id, chapter, stage, status, choice, started_at, updated_at, completed_at ) VALUES ( $1, $2, $3, 1, 0, 'active', NULL, $4, $4, NULL ) ON CONFLICT (thread_id, player_id, quest_id) DO UPDATE SET updated_at = EXCLUDED.updated_at RETURNING thread_id, player_id, quest_id, chapter, stage, status, choice, started_at, updated_at, completed_at,
+`
+INSERT INTO rpg_special_quests (
+thread_id,
+player_id,
+quest_id,
+chapter,
+stage,
+status,
+choice,
+started_at,
+updated_at,
+completed_at
+)
+VALUES (
+$1,
+$2,
+$3,
+1,
+0,
+‘active’,
+NULL,
+$4,
+$4,
+NULL
+)
+ON CONFLICT (
+thread_id,
+player_id,
+quest_id
+)
+DO UPDATE SET
+updated_at = EXCLUDED.updated_at
+
+  RETURNING
+    thread_id,
+    player_id,
+    quest_id,
+    chapter,
+    stage,
+    status,
+    choice,
+    started_at,
+    updated_at,
+    completed_at
+`,
 [
-String(threadID),
-String(playerID),
-QUEST_ID,
-timestamp,
+  String(threadID),
+  String(playerID),
+  QUEST_ID,
+  timestamp,
 ]
+
 );
 
 return result.rows[0] || null;
@@ -248,18 +299,43 @@ updates.completed_at !== undefined
 const timestamp = now();
 
 const result = await db.query(
-UPDATE rpg_special_quests SET chapter = $1, stage = $2, status = $3, choice = $4, updated_at = $5, completed_at = $6 WHERE thread_id = $7 AND player_id = $8 AND quest_id = $9 RETURNING thread_id, player_id, quest_id, chapter, stage, status, choice, started_at, updated_at, completed_at,
+`
+UPDATE rpg_special_quests
+SET
+chapter = $1,
+stage = $2,
+status = $3,
+choice = $4,
+updated_at = $5,
+completed_at = $6
+WHERE thread_id = $7
+AND player_id = $8
+AND quest_id = $9
+
+  RETURNING
+    thread_id,
+    player_id,
+    quest_id,
+    chapter,
+    stage,
+    status,
+    choice,
+    started_at,
+    updated_at,
+    completed_at
+`,
 [
-chapter,
-stage,
-status,
-choice,
-timestamp,
-completedAt,
-String(threadID),
-String(playerID),
-QUEST_ID,
+  chapter,
+  stage,
+  status,
+  choice,
+  timestamp,
+  completedAt,
+  String(threadID),
+  String(playerID),
+  QUEST_ID,
 ]
+
 );
 
 return result.rows[0] || null;
@@ -294,56 +370,61 @@ api,
 threadID,
 playerID
 ) {
-const quest = await getQuest(
+let quest = await getQuest(
 threadID,
 playerID
 );
 
 if (!quest) {
-await startQuest(
+quest = await startQuest(
 threadID,
 playerID
 );
 }
 
+const stage = Number(
+quest?.stage || 0
+);
+
 /*
 
 * STAGE 0
     */
-    if (Number(quest?.stage || 0) === 0) {
-    await send(
-    api,
-    threadID,
-    [
-    “✦ THE LAST STAR ✦”,
-    “”,
-    “Chapter I — Another Day, Another Night”,
-    “”,
-    “It was a really interesting day.”,
-    “”,
-    “A day I thought would simply pass by—”,
-    “another day, another night.”,
-    “”,
-    “But then, you came.”,
-    “”,
-    “I saw you like a star glittering in the sky.”,
-    “I thought you were too far beyond my grasp,”,
-    “but perhaps you weren’t at all.”,
-    “”,
-    “Some encounters are written quietly.”,
-    “You don’t notice their importance until later.”,
-    “”,
-    “And somehow…”,
-    “that moment became the beginning of everything.”,
-    “”,
-    “— Dorian”,
-    “”,
-    “Something about that moment stayed with me.”,
-    “”,
-    “Use:”,
-    “!rpg laststar continue”,
-    ].join(”\n”)
-    );
+
+if (stage === 0) {
+await send(
+api,
+threadID,
+[
+“✦ THE LAST STAR ✦”,
+“”,
+“Chapter I — Another Day, Another Night”,
+“”,
+“It was a really interesting day.”,
+“”,
+“A day I thought would simply pass by—”,
+“another day, another night.”,
+“”,
+“But then, you came.”,
+“”,
+“I saw you like a star glittering in the sky.”,
+“I thought you were too far beyond my grasp,”,
+“but perhaps you weren’t at all.”,
+“”,
+“Some encounters are written quietly.”,
+“You don’t notice their importance until later.”,
+“”,
+“And somehow…”,
+“that moment became the beginning of everything.”,
+“”,
+“— Dorian”,
+“”,
+“Something about that moment stayed with me.”,
+“”,
+“Use:”,
+“!rpg laststar continue”,
+].join(”\n”)
+);
 
 await updateQuest(
   threadID,
@@ -361,34 +442,33 @@ return;
 
 * STAGE 1
     */
-    await send(
-    api,
-    threadID,
-    [
-    “✦ THE LAST STAR ✦”,
-    “”,
-    “I didn’t know it then…”,
-    “”,
-    “but I would remember that moment.”,
-    “”,
-    “Maybe some people enter our lives”,
-    “without announcing what they will become.”,
-    “”,
-    “Maybe that is what makes them special.”,
-    “”,
-    “And somewhere beyond that ordinary night,”,
-    “a distant light was already waiting.”,
-    “”,
-    “Use:”,
-    “!rpg laststar choose follow”,
-    “”,
-    “or”,
-    “”,
-    “!rpg laststar choose hesitate”,
-    ].join(”\n”)
-    );
 
-return;
+await send(
+api,
+threadID,
+[
+“✦ THE LAST STAR ✦”,
+“”,
+“I didn’t know it then…”,
+“”,
+“but I would remember that moment.”,
+“”,
+“Maybe some people enter our lives”,
+“without announcing what they will become.”,
+“”,
+“Maybe that is what makes them special.”,
+“”,
+“And somewhere beyond that ordinary night,”,
+“a distant light was already waiting.”,
+“”,
+“Use:”,
+“!rpg laststar choose follow”,
+“”,
+“or”,
+“”,
+“!rpg laststar choose hesitate”,
+].join(”\n”)
+);
 }
 
 /*
@@ -408,7 +488,11 @@ threadID,
 playerID
 );
 
-if (Number(quest.stage || 0) === 0) {
+const stage = Number(
+quest?.stage || 0
+);
+
+if (stage === 0) {
 await send(
 api,
 threadID,
@@ -491,7 +575,11 @@ threadID,
 playerID
 );
 
-if (Number(quest.stage || 0) === 0) {
+const stage = Number(
+quest?.stage || 0
+);
+
+if (stage === 0) {
 await send(
 api,
 threadID,
@@ -579,7 +667,11 @@ threadID,
 playerID
 );
 
-if (Number(quest.stage || 0) === 0) {
+const stage = Number(
+quest?.stage || 0
+);
+
+if (stage === 0) {
 await send(
 api,
 threadID,
@@ -670,7 +762,11 @@ threadID,
 playerID
 );
 
-if (Number(quest.stage || 0) === 0) {
+const stage = Number(
+quest?.stage || 0
+);
+
+if (stage === 0) {
 await send(
 api,
 threadID,
@@ -762,7 +858,11 @@ threadID,
 playerID
 );
 
-if (Number(quest.stage || 0) === 0) {
+const stage = Number(
+quest?.stage || 0
+);
+
+if (stage === 0) {
 await send(
 api,
 threadID,
@@ -990,25 +1090,27 @@ CHAPTER_STAGES[chapter] || 1;
 
 /*
 
-* Current chapter still has another stage.
+* Current chapter has another stage.
     */
-    if (stage < maxStages - 1) {
-    return {
-    chapter,
-    stage: stage + 1,
-    };
-    }
+
+if (stage < maxStages - 1) {
+return {
+chapter,
+stage: stage + 1,
+};
+}
 
 /*
 
-* Move to the next chapter.
+* Move to next chapter.
     */
-    if (chapter < MAX_CHAPTER) {
-    return {
-    chapter: chapter + 1,
-    stage: 0,
-    };
-    }
+
+if (chapter < MAX_CHAPTER) {
+return {
+chapter: chapter + 1,
+stage: 0,
+};
+}
 
 return {
 chapter: MAX_CHAPTER,
@@ -1037,11 +1139,12 @@ playerID
 
 * Quest hasn’t started.
     */
-    if (!quest) {
-    quest = await startQuest(
-    threadID,
-    playerID
-    );
+
+if (!quest) {
+quest = await startQuest(
+threadID,
+playerID
+);
 
 await chapterOne(
   api,
@@ -1056,20 +1159,21 @@ return true;
 
 * Already completed.
     */
-    if (quest.status === “completed”) {
-    await send(
-    api,
-    threadID,
-    [
-    “✦ THE LAST STAR ✦”,
-    “”,
-    “This story has already reached its end.”,
-    “”,
-    “But some things don’t really end.”,
-    “”,
-    “∞ ❤️”,
-    ].join(”\n”)
-    );
+
+if (quest.status === “completed”) {
+await send(
+api,
+threadID,
+[
+“✦ THE LAST STAR ✦”,
+“”,
+“This story has already reached its end.”,
+“”,
+“But some things don’t really end.”,
+“”,
+“∞ ❤️”,
+].join(”\n”)
+);
 
 return true;
 
@@ -1077,16 +1181,18 @@ return true;
 
 /*
 
-* Determine which chapter function should run.
+* Determine which chapter function
+* should run.
     */
-    switch (Number(quest.chapter)) {
-    case 1:
-    await chapterOne(
-    api,
-    threadID,
-    playerID
-    );
-    break;
+
+switch (Number(quest.chapter)) {
+case 1:
+await chapterOne(
+api,
+threadID,
+playerID
+);
+break;
 
 case 2:
   await chapterTwo(
@@ -1157,7 +1263,10 @@ return true;
 * ============================================================
 * DISCOVER HIDDEN QUEST
 * ============================================================
-* FIRST SUCCESSFUL !rpg explore = GUARANTEED DISCOVERY.
+* FIRST SUCCESSFUL !rpg explore
+* = GUARANTEED DISCOVERY.
+* The quest is persistent.
+* Leaving the message on read does NOT expire it.
 * ============================================================
     */
 
@@ -1361,46 +1470,50 @@ return true;
 
 /*
 
-* Save the choice.
+* Save choice.
     */
-    await updateQuest(
-    threadID,
-    playerID,
-    {
-    choice: cleanChoice,
-    }
-    );
+
+await updateQuest(
+threadID,
+playerID,
+{
+choice: cleanChoice,
+}
+);
 
 /*
 
 * Choice-specific flavor.
     */
-    const choiceMessages = {
-    follow:
-    “You decided to follow the distant light.”,
-    hesitate:
-    “You hesitated, but the star remained.”,
-    reach:
-    “You reached toward the distant star.”,
-    wait:
-    “You chose to wait beneath the night sky.”,
-    fight:
-    “You chose to fight for what mattered.”,
-    stay:
-    “You chose to stay.”,
-    flow:
-    “You chose to keep moving with the river.”,
-    stop:
-    “You chose to stop and look back.”,
-    home:
-    “You chose the home you imagined together.”,
-    stars:
-    “You chose to keep looking toward the stars.”,
-    forever:
-    “You chose forever.”,
-    moment:
-    “You chose to treasure the moment.”,
-    };
+
+const choiceMessages = {
+follow:
+“You decided to follow the distant light.”,
+
+hesitate:
+  "You hesitated, but the star remained.",
+reach:
+  "You reached toward the distant star.",
+wait:
+  "You chose to wait beneath the night sky.",
+fight:
+  "You chose to fight for what mattered.",
+stay:
+  "You chose to stay.",
+flow:
+  "You chose to keep moving with the river.",
+stop:
+  "You chose to stop and look back.",
+home:
+  "You chose the home you imagined together.",
+stars:
+  "You chose to keep looking toward the stars.",
+forever:
+  "You chose forever.",
+moment:
+  "You chose to treasure the moment.",
+
+};
 
 await send(
 api,
@@ -1422,12 +1535,13 @@ You chose: ${cleanChoice},
 
 * Move forward after the choice.
     */
-    const next =
-    await advanceChapter(
-    threadID,
-    playerID,
-    quest
-    );
+
+const next =
+await advanceChapter(
+threadID,
+playerID,
+quest
+);
 
 await updateQuest(
 threadID,
@@ -1495,6 +1609,8 @@ Chapter: ${chapter}/${MAX_CHAPTER},
 Title: ${chapterName},
 Stage: ${Number(quest.stage || 0)},
 Last choice: ${ quest.choice || "none" },
+“”,
+formatQuestProgress(quest),
 “”,
 “Some journeys are not meant to be rushed.”,
 ].join(”\n”)
