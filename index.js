@@ -682,15 +682,23 @@ async function handleMessage(
     }
   }
 
-  // ———————————————————————
-  // GLOBAL BOT DISABLED STATE
-  // ———————————————————————
+ // ———————————————————————
+// GLOBAL BOT DISABLED STATE
+//
+// When shutdown is active, normal commands are blocked.
+// Admin control commands remain available so the admin
+// can use !startup or change system settings.
+// ———————————————————————
 
-  if (
-    global.botDisabled === true
-  ) {
-    return;
-  }
+if (
+  global.botDisabled === true &&
+  !ADMIN_IDS.includes(senderId) &&
+  !/^!(startup|shutdown|game\s+(on|off)|banat\s+(on|off))$/i.test(
+    originalText
+  )
+) {
+  return;
+}
 
   // ———————————————————————
   // SIMPLE DIRECT COMMANDS
