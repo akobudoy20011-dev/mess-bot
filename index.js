@@ -682,22 +682,61 @@ async function handleMessage(
     }
   }
 
- // ———————————————————————
+  // ============================================================
 // GLOBAL BOT DISABLED STATE
-//
-// When shutdown is active, normal commands are blocked.
-// Admin control commands remain available so the admin
-// can use !startup or change system settings.
-// ———————————————————————
+// ============================================================
+// When shutdown is active:
+// - !startup / !shutdown remain available to admins.
+// - !game on / !game off remain available to admins.
+// - Game commands are allowed for everyone ONLY in GCs
+//   where games are enabled.
+// - All other bot systems remain disabled.
+// ============================================================
 
-if (
-  global.botDisabled === true &&
-  !ADMIN_IDS.includes(senderId) &&
-  !/^!(startup|shutdown|game\s+(on|off)|banat\s+(on|off))$/i.test(
-    originalText
-  )
-) {
-  return;
+if (global.botDisabled === true) {
+  const trimmedText = originalText.trim();
+  const isAdmin = ADMIN_IDS.includes(senderId);
+
+  const isStartup = /^!startup$/i.test(trimmedText);
+  const isShutdown = /^!shutdown$/i.test(trimmedText);
+  const isGameToggle = /^!game\s+(on|off)$/i.test(trimmedText);
+
+  // Admin global controls remain available.
+  if (isAdmin && (isStartup || isShutdown)) {
+    // Continue to the normal command handler.
+  }
+
+  // Admin can enable/disable games while bot is globally shut down.
+  else if (isAdmin && isGameToggle) {
+    // Continue to the normal game-toggle handler.
+  }
+
+  // Allow game commands for everyone if games are enabled
+  // in this specific group.
+  else if (/^!(?:game|games|play)\b/i.test(trimmedText)) {
+    let gamesEnabled = false;
+
+    try {
+      gamesEnabled = await db.isGameEnabled(threadID);
+    } catch (error) {
+      console.error(
+        "[SHUTDOWN] Failed to check game state:",
+        error
+      );
+      return;
+    }
+
+    if (!gamesEnabled) {
+      return;
+    }
+
+    // Games are enabled in this GC, so allow the command.
+  }
+
+  // Everything else stays disabled.
+  else {
+    return;
+  }
 }
 
   // ———————————————————————
