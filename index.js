@@ -32,58 +32,28 @@ const {
   runCleanup,
   startCleanupScheduler,
   getCleanupStatus,
+  registerGCActivity,
 } = require("./cleanup");
 
 // ============================================================
 // PICTURES
-// ============================================================
-// General pictures are stored in:
-//
-// pictures/
-//
-// IMPORTANT:
-// This is completely separate from:
-//
-// memes/
-//
-// The memes/ folder remains exclusively for roast attachments.
 // ============================================================
 
 const {
   sendRandomPicture,
 } = require("./pictures");
 
+// ============================================================
+// RPG CHARACTER AI
+// ============================================================
+
 const {
   handleRpgCharacterMessage,
 } = require("./rpg/character-ai");
 
-/*
- * ============================================================
- * SECRET LOVE QUEST
- * ============================================================
- * THE LAST STAR is handled by rpg/love-quest.js.
- *
- * It is NOT a separate RPG system.
- *
- * Normal RPG remains responsible for:
- * !rpg profile
- * !rpg explore
- * !rpg army
- * !rpg kingdom
- * !rpg property
- * etc.
- *
- * Love Quest only handles:
- * !rpg laststar
- * !rpg laststar follow
- * !rpg laststar continue
- * !rpg laststar read
- * !rpg laststar choose ...
- * etc.
- *
- * Discovery is triggered AFTER normal !rpg explore.
- * ============================================================
- */
+// ============================================================
+// SECRET LOVE QUEST
+// ============================================================
 
 const {
   isSpecialPlayer,
@@ -93,15 +63,26 @@ const {
 
 const { handleAiMessage } = require("./ai");
 
+// ============================================================
 // MODERATION
+// ============================================================
+
 const {
   handleModerationMessage,
 } = require("./moderation");
+
+// ============================================================
+// YOUTUBE
+// ============================================================
 
 const {
   searchYouTube,
   downloadYouTubeAudio,
 } = require("./youtube");
+
+// ============================================================
+// TRIGGERS
+// ============================================================
 
 const {
   getTriggerReply,
@@ -184,6 +165,7 @@ function withTimeout(
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
+
         reject(
           new Error(timeoutMessage)
         );
@@ -551,13 +533,6 @@ login(
     // ========================================================
     // AUTOMATIC CLEANUP
     // ========================================================
-    //
-    // Starts ONLY after the database connection succeeds.
-    //
-    // cleanup.js is responsible for temporary/session/cache
-    // cleanup. Permanent RPG/economy progress is not supposed
-    // to be deleted by the cleanup system.
-    // ========================================================
 
     try {
       startCleanupScheduler();
@@ -642,6 +617,17 @@ login(
 
           activeThreads.add(threadID);
 
+          // Register activity with the
+          // ECLIPSE maintenance engine.
+          void registerGCActivity(
+            threadID
+          ).catch((error) => {
+            console.error(
+              "[GC ACTIVITY] Failed to register activity:",
+              error
+            );
+          });
+
           console.log(
             `[Threads] Active threads: ${activeThreads.size}`
           );
@@ -693,20 +679,6 @@ async function handleMessage(
   // ============================================================
   // AI TRAINING / ADAPTATION
   // ============================================================
-  //
-  // IMPORTANT:
-  // This is the ONLY adaptation block.
-  //
-  // !lucien from BOT OWNER:
-  //   toggles training silently.
-  //
-  // Other users:
-  //   !lucien continues through the normal AI system.
-  //
-  // During training:
-  //   only OWNER messages are observed.
-  //
-  // ============================================================
 
   try {
     const trainingHandled =
@@ -754,52 +726,98 @@ async function handleMessage(
     );
   }
 
-// ============================================================
-// ECLIPSE CLEANUP COMMANDS
-// ============================================================
+  // ============================================================
+  // ECLIPSE CLEANUP COMMANDS
+  // ============================================================
 
-if (
-  text === "!cleanup" ||
-  text === "!cleanup status" ||
-  text === "!cleanup run"
-) {
-  // ADMIN ONLY
-  if (!ADMIN_IDS.includes(senderId)) {
-    return;
-  }
-
-  // STATUS
   if (
-    text === "!cleanup" ||
-    text === "!cleanup status"
+    /^!cleanup(?:\s+(status|run|repair|optimize|full))?$/i.test(
+      originalText
+    )
   ) {
-    const status = getCleanupStatus();
+    // ADMIN ONLY
+    if (!ADMIN_IDS.includes(senderId)) {
+      return;
+    }
 
-    sendReplyWithTyping(
-      api,
-      [
-        "🌑 ECLIPSE CLEANUP",
-        "",
-        `AUTO CLEANUP: ${
-          status.schedulerActive ? "🟢 ACTIVE" : "🔴 OFF"
-        }`,
-        "INTERVAL: 24 HOURS",
-        "DATA AGE: 3 DAYS",
-        `RUNNING: ${status.running ? "🟡 YES" : "🟢 NO"}`,
-        `LAST RUN: ${status.lastCleanupAt || "Never"}`,
-        "",
-        "🧹 !cleanup run",
-      ].join("\n"),
-      threadID
-    );
+    const cleanupMatch =
+      originalText.match(
+        /^!cleanup(?:\s+(status|run|repair|optimize|full))?$/i
+      );
 
-    return;
-  }
+    const cleanupCommand =
+      (
+        cleanupMatch?.[1] ||
+        "status"
+      ).toLowerCase();
 
-  // MANUAL RUN
-  if (text === "!cleanup run") {
+    // ----------------------------------------------------------
+    // STATUS
+    // ----------------------------------------------------------
+
+    if (
+      cleanupCommand === "status"
+    ) {
+      const status =
+        getCleanupStatus();
+
+      sendReplyWithTyping(
+        api,
+        [
+          "🌑 ECLIPSE CLEANUP",
+          "",
+          `AUTO CLEANUP: ${
+            status.schedulerActive
+              ? "🟢 ACTIVE"
+              : "🔴 OFF"
+          }`,
+          "INTERVAL: 24 HOURS",
+          "TEMP FILE AGE: 3 DAYS",
+          `RUNNING: ${
+            status.running
+              ? "🟡 YES"
+              : "🟢 NO"
+          }`,
+          `LAST RUN: ${
+            status.lastCleanupAt ||
+            "Never"
+          }`,
+          "",
+          "Commands:",
+          "• !cleanup run",
+          "• !cleanup repair",
+          "• !cleanup optimize",
+          "• !cleanup full",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // CLEANUP MODE
+    // ----------------------------------------------------------
+
+    const modeMap = {
+      run: "clean",
+      repair: "repair",
+      optimize: "optimize",
+      full: "full",
+    };
+
+    const mode =
+      modeMap[cleanupCommand];
+
+    if (!mode) {
+      return;
+    }
+
     try {
-      const result = await runCleanup();
+      const result =
+        await runCleanup({
+          mode,
+        });
 
       if (result?.skipped) {
         sendReplyWithTyping(
@@ -807,29 +825,89 @@ if (
           "🟡 Cleanup is already running.",
           threadID
         );
+
         return;
       }
+
+      const temporaryFiles =
+        Number(
+          result?.cleaned
+            ?.temporaryFiles || 0
+        );
+
+      const expiredSessions =
+        Number(
+          result?.cleaned
+            ?.expiredSessions || 0
+        );
+
+      const repairs =
+        Array.isArray(
+          result?.repaired
+            ?.stateFiles
+        )
+          ? result.repaired
+              .stateFiles.length
+          : 0;
+
+      const optimizerFindings =
+        Array.isArray(
+          result?.optimizer
+            ?.findings
+        )
+          ? result.optimizer
+              .findings.length
+          : 0;
+
+      const gc =
+        result?.gc || {};
 
       sendReplyWithTyping(
         api,
         [
-          "🌑 ECLIPSE CLEANUP COMPLETE",
+          "🌑 ECLIPSE MAINTENANCE COMPLETE",
           "",
-          `📁 TEMP FILES: ${result?.temporaryFiles || 0}`,
-          `📜 OLD LOGS: ${result?.logs || 0}`,
-          `⚔️ RPG: ${result?.rpg || 0}`,
-          `🎮 GAMES: ${result?.games || 0}`,
-          `🤖 AI: ${result?.ai || 0}`,
+          `MODE: ${mode.toUpperCase()}`,
+          "",
+          `📁 TEMP FILES: ${temporaryFiles}`,
+          `⏳ EXPIRED SESSIONS: ${expiredSessions}`,
+          `🔧 REPAIRS: ${repairs}`,
+          `🔍 OPTIMIZER FINDINGS: ${optimizerFindings}`,
+          "",
+          `👥 GC INACTIVE: ${
+            Number(
+              gc.markedInactive || 0
+            )
+          }`,
+          `⚙️ GC FEATURES DISABLED: ${
+            Number(
+              gc.expensiveFeaturesDisabled || 0
+            )
+          }`,
+          `📦 GC ARCHIVED: ${
+            Number(
+              gc.archived || 0
+            )
+          }`,
           "",
           `🗄️ DATABASE: ${
-            result?.databaseMaintenance ? "🟢 OK" : "🔴 FAILED"
+            result?.databaseMaintenance
+              ? "🟢 OK"
+              : "🔴 FAILED"
           }`,
-          `⏱️ ${result?.durationMs || 0}ms`,
+          `⏱️ ${
+            Number(
+              result?.durationMs || 0
+            )
+          }ms`,
         ].join("\n"),
         threadID
       );
     } catch (error) {
-      console.error("[CLEANUP]", error);
+      console.error(
+        "[CLEANUP] Manual cleanup failed:",
+        error
+      );
 
       sendReplyWithTyping(
         api,
@@ -840,8 +918,7 @@ if (
 
     return;
   }
-}
-  
+
   // ============================================================
   // GLOBAL BOT CONTROL
   // ============================================================
@@ -1131,13 +1208,6 @@ if (
 
   // ============================================================
   // RANDOM PICTURE
-  // ============================================================
-  // This uses pictures.js -> pictures/
-  //
-  // It NEVER calls getRandomMemePath().
-  //
-  // Therefore your existing memes/ roast folder cannot be
-  // selected by !pic.
   // ============================================================
 
   if (
@@ -1620,7 +1690,6 @@ if (
         enabled
       );
 
-      // Clear cooldown when Banat is turned off.
       if (!enabled) {
         lastRandomRoastByThread.delete(
           threadId
@@ -1679,16 +1748,11 @@ if (
       error
     );
 
-    // Fail closed.
-    //
-    // If the database check fails, Banat stays OFF rather
-    // than accidentally roasting someone.
     roastEnabled = false;
   }
 
   // ============================================================
   // TARGETED TRIGGER / ROAST
-  // ONLY RUN WHEN BANAT IS ON
   // ============================================================
 
   if (roastEnabled) {
@@ -1720,7 +1784,6 @@ if (
 
   // ============================================================
   // PUBLIC RANDOM ROAST
-  // ONLY RUN WHEN BANAT IS ON
   // ============================================================
 
   if (
@@ -1835,7 +1898,6 @@ function canRandomRoastThread(
     return false;
   }
 
-  // Prevent unlimited growth of the Map.
   if (
     lastRandomRoastByThread.size >
     1000
