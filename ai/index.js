@@ -1,70 +1,423 @@
 const { getCharacter } = require("./characters");
-const { isAuthorized } = require("./access");
+const {
+  isAuthorized,
+  isPrimaryUser,
+  authorizeUser,
+  revokeUser,
+  getAccessType,
+} = require("./access");
+
 const { buildMessages } = require("./prompt");
 const { generateReply } = require("./provider");
-const { getRelevantMemories, saveMemories } = require("./memory");
-const { clearHistory, getActiveSession, getRecentMessages, saveMessage, startSession, stopSession } = require("./history");
+
+const {
+  getRelevantMemories,
+  saveMemories,
+} = require("./memory");
+
+const {
+  clearHistory,
+  getActiveSession,
+  getRecentMessages,
+  saveMessage,
+  startSession,
+  stopSession,
+} = require("./history");
+
+const CHARACTER_ID = "lucien";
 
 function send(api, message, threadID) {
-  return new Promise((resolve, reject) => api.sendMessage(message, threadID, (error) => error ? reject(error) : resolve()));
+  return new Promise((resolve, reject) => {
+    api.sendMessage(
+      message,
+      threadID,
+      (error) => {
+        if (error) reject(error);
+        else resolve();
+      }
+    );
+  });
 }
 
-async function handleAiMessage(api, event, text, originalText) {
-  const normalized = String(text || "").trim().toLowerCase();
-  const original = String(originalText || text || "").trim();
-  const isLucienCommand = normalized === "!lucien" || normalized.startsWith("!lucien " );
-  if (isLucienCommand && !isAuthorized(event.senderID)) return true;
-  if (!isAuthorized(event.senderID)) return false;
-  const character = getCharacter("lucien");
-  const threadID = String(event.threadID);
-  const userID = String(event.senderID);
+function getCommand(text) {
+  return String(text || "")
+    .trim()
+    .split(/\s+/)[0]
+    .toLowerCase();
+}
 
-  if (isLucienCommand) {
-    const argument = original.slice("!lucien".length).trim().toLowerCase();
+function getCommandArgument(text) {
+  const parts = String(text || "")
+    .trim()
+    .split(/\s+/);
+
+  return parts.slice(1).join(" ").trim();
+}
+
+async function handleAiMessage(
+  api,
+  event,
+  text,
+  originalText
+) {
+  const normalized = String(
+    text || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  const original = String(
+    originalText || text || ""
+  ).trim();
+
+  const character = getCharacter(
+    CHARACTER_ID
+  );
+
+  if (!character) {
+    console.error(
+      "[AI] Character not found:",
+      CHARACTER_ID
+    );
+
+    return false;
+  }
+
+  const threadID = String(
+    event.threadID || ""
+  ).trim();
+
+  const userID = String(
+    event.senderID || ""
+  ).trim();
+
+  if (!threadID || !userID) {
+    return false;
+  }
+
+  const command = getCommand(normalized);
+
+  const isCharacterCommand =
+    command ===
+    String(character.command || "")
+      .trim()
+      .toLowerCase();
+
+  /*
+   * Character command is intentionally kept as !lucien
+   * for compatibility with the existing bot.
+   */
+
+  if (isCharacterCommand) {
+    if (!isAuthorized(userID)) {
+      return true;
+    }
+
+    const argument = getCommandArgument(
+      original
+    ).toLowerCase();
+
     try {
-      if (argument === "off" || argument === "stop") {
-        await stopSession(character.id, threadID, userID);
-        await send(api, "Lucien has left the conversation.", threadID);
+      /*
+       * !lucien off
+       */
+      if (
+        argument === "off" ||
+        argument === "stop"
+      ) {
+        await stopSession(
+          character.id,
+          threadID,
+          userID
+        );
+
+        await send(
+          api,
+          `${character.name} has left the conversation.`,
+          threadID
+        );
+
         return true;
       }
-      const conversation = await startSession(character.id, threadID, userID);
+
+      /*
+       * !lucien reset
+       */
       if (argument === "reset") {
-        await clearHistory(conversation.id);
-        await send(api, "Lucien conversation history has been reset.", threadID);
+        const conversation =
+          await startSession(
+            character.id,
+            threadID,
+            userID
+          );
+
+        await clearHistory(
+          conversation.id
+        );
+
+        await send(
+          api,
+          "okay, fresh convo 😭",
+          threadID
+        );
+
         return true;
       }
+
+      /*
+       * !lucien allow USER_ID
+       *
+       * Only the primary user can authorize
+       * another Messenger account.
+       */
+      if (
+        argument.startsWith("allow ")
+      ) {
+        if (!isPrimaryUser(userID)) {
+          return true;
+        }
+
+        const targetID = argument
+          .slice("allow ".length)
+          .trim();
+
+        if (!targetID) {
+          await send(
+            api,
+            "give me the messenger id 😭",
+            threadID
+          );
+
+          return true;
+        }
+
+        authorizeUser(targetID);
+
+        await send(
+          api,
+          "okay, they can talk to me now",
+          threadID
+        );
+
+        return true;
+      }
+
+      /*
+       * !lucien revoke USER_ID
+       */
+      if (
+        argument.startsWith("revoke ")
+      ) {
+        if (!isPrimaryUser(userID)) {
+          return true;
+        }
+
+        const targetID = argument
+          .slice("revoke ".length)
+          .trim();
+
+        if (!targetID) {
+          await send(
+            api,
+            "give me the messenger id 😭",
+            threadID
+          );
+
+          return true;
+        }
+
+        revokeUser(targetID);
+
+        await send(
+          api,
+          "done",
+          threadID
+        );
+
+        return true;
+      }
+
+      /*
+       * !lucien
+       */
       if (!argument) {
-        const existing = await getRecentMessages(conversation.id, 1);
-        if (!existing.length) await saveMessage(conversation.id, "assistant", character.greeting);
-        await send(api, existing.length ? "Lucien is already here." : character.greeting, threadID);
+        const conversation =
+          await startSession(
+            character.id,
+            threadID,
+            userID
+          );
+
+        const existing =
+          await getRecentMessages(
+            conversation.id,
+            1
+          );
+
+        if (!existing.length) {
+          await saveMessage(
+            conversation.id,
+            "assistant",
+            character.greeting
+          );
+        }
+
+        await send(
+          api,
+          existing.length
+            ? `${character.name} is already here.`
+            : character.greeting,
+          threadID
+        );
+
         return true;
       }
-      await send(api, "Use !lucien to start, !lucien reset to clear history, or !lucien off to end the session.", threadID);
+
+      await send(
+        api,
+        "use !lucien, !lucien reset, or !lucien off",
+        threadID
+      );
+
       return true;
     } catch (error) {
-      console.error("Lucien session command failed:", error);
-      await send(api, "Lucien is unavailable right now.", threadID).catch(() => {});
+      console.error(
+        "[AI] Character session command failed:",
+        error
+      );
+
+      await send(
+        api,
+        "wait something broke 😭",
+        threadID
+      ).catch(() => {});
+
       return true;
     }
   }
 
-  if (normalized.startsWith("!")) return false;
-  const session = await getActiveSession(character.id, threadID, userID);
-  if (!session) return false;
+  /*
+   * Ignore normal bot commands.
+   */
+  if (normalized.startsWith("!")) {
+    return false;
+  }
+
+  /*
+   * User must have access before the AI
+   * responds to normal messages.
+   */
+  if (!isAuthorized(userID)) {
+    return false;
+  }
+
+  const session =
+    await getActiveSession(
+      character.id,
+      threadID,
+      userID
+    );
+
+  /*
+   * The character only responds when its
+   * conversation session is active.
+   */
+  if (!session) {
+    return false;
+  }
 
   try {
-    const history = await getRecentMessages(session.conversation_id, 12);
-    const memories = await getRelevantMemories(character.id, threadID, userID, 12);
-    const result = await generateReply(buildMessages(character, memories, history, original));
-    await saveMessage(session.conversation_id, "user", original);
-    await saveMessage(session.conversation_id, "assistant", result.reply);
-    await saveMemories(character.id, threadID, userID, result.memories);
-    await send(api, result.reply, threadID);
+    const history =
+      await getRecentMessages(
+        session.conversation_id,
+        12
+      );
+
+    const memories =
+      await getRelevantMemories(
+        character.id,
+        threadID,
+        userID,
+        12
+      );
+
+    const messages =
+      buildMessages(
+        character,
+        memories,
+        history,
+        original
+      );
+
+    const result =
+      await generateReply(messages);
+
+    /*
+     * Save the actual conversation.
+     */
+    await saveMessage(
+      session.conversation_id,
+      "user",
+      original
+    );
+
+    await saveMessage(
+      session.conversation_id,
+      "assistant",
+      result.reply
+    );
+
+    /*
+     * Save ONLY meaningful memories.
+     */
+    if (
+      Array.isArray(result.memories) &&
+      result.memories.length
+    ) {
+      await saveMemories(
+        character.id,
+        threadID,
+        userID,
+        result.memories
+      );
+    }
+
+    /*
+     * Emotion is currently kept in the
+     * provider result for future persistent
+     * emotional-state support.
+     *
+     * We don't expose it to Messenger.
+     */
+    if (result.emotion) {
+      console.log("[AI] Emotion:", {
+        userID,
+        state: result.emotion.state,
+        intensity: result.emotion.intensity,
+      });
+    }
+
+    await send(
+      api,
+      result.reply,
+      threadID
+    );
   } catch (error) {
-    console.error("Lucien response failed:", error);
-    await send(api, "Lucien is unavailable right now. Please try again shortly.", threadID).catch(() => {});
+    console.error(
+      "[AI] Response failed:",
+      error
+    );
+
+    await send(
+      api,
+      "wait 😭 something went wrong, try again",
+      threadID
+    ).catch(() => {});
   }
+
   return true;
 }
 
-module.exports = { handleAiMessage };
+module.exports = {
+  handleAiMessage,
+};
