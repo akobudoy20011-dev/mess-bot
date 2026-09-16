@@ -1,4 +1,5 @@
 const { getCharacter } = require("./characters");
+
 const {
   isAuthorized,
   isPrimaryUser,
@@ -24,7 +25,12 @@ const {
   stopSession,
 } = require("./history");
 
+const {
+  getAdaptationContext,
+} = require("./adaptation");
+
 const CHARACTER_ID = "lucien";
+
 
 function send(api, message, threadID) {
   return new Promise((resolve, reject) => {
@@ -39,12 +45,14 @@ function send(api, message, threadID) {
   });
 }
 
+
 function getCommand(text) {
   return String(text || "")
     .trim()
     .split(/\s+/)[0]
     .toLowerCase();
 }
+
 
 function getCommandArgument(text) {
   const parts = String(text || "")
@@ -53,6 +61,7 @@ function getCommandArgument(text) {
 
   return parts.slice(1).join(" ").trim();
 }
+
 
 async function handleAiMessage(
   api,
@@ -280,6 +289,7 @@ async function handleAiMessage(
       );
 
       return true;
+
     } catch (error) {
       console.error(
         "[AI] Character session command failed:",
@@ -296,12 +306,14 @@ async function handleAiMessage(
     }
   }
 
+
   /*
    * Ignore normal bot commands.
    */
   if (normalized.startsWith("!")) {
     return false;
   }
+
 
   /*
    * User must have access before the AI
@@ -311,12 +323,17 @@ async function handleAiMessage(
     return false;
   }
 
+
+  /*
+   * Find the active character conversation.
+   */
   const session =
     await getActiveSession(
       character.id,
       threadID,
       userID
     );
+
 
   /*
    * The character only responds when its
@@ -326,13 +343,21 @@ async function handleAiMessage(
     return false;
   }
 
+
   try {
+    /*
+     * Load recent conversation history.
+     */
     const history =
       await getRecentMessages(
         session.conversation_id,
         12
       );
 
+
+    /*
+     * Load relevant long-term memories.
+     */
     const memories =
       await getRelevantMemories(
         character.id,
@@ -341,16 +366,78 @@ async function handleAiMessage(
         12
       );
 
+
+    /*
+     * ========================================================
+     * PRIVATE AI ADAPTATION
+     * ========================================================
+     *
+     * The adaptation profile belongs to the BOT OWNER.
+     *
+     * This means:
+     *
+     * OWNER trains the AI
+     *        ↓
+     * adaptation.js learns communication patterns
+     *        ↓
+     * Neon stores the learned profile
+     *        ↓
+     * AI loads the profile here
+     *        ↓
+     * personality/prompt uses it subtly
+     *
+     * The current user does NOT need to be the owner.
+     *
+     * The private training data itself is never sent
+     * directly to Messenger.
+     */
+
+    const ownerID = String(
+      process.env.BOT_OWNER_ID || ""
+    ).trim();
+
+    let adaptationContext = "";
+
+    if (ownerID) {
+      try {
+        adaptationContext =
+          await getAdaptationContext(
+            ownerID
+          );
+      } catch (adaptationError) {
+        console.error(
+          "[AI ADAPTATION] Failed to load adaptation:",
+          adaptationError
+        );
+
+        adaptationContext = "";
+      }
+    }
+
+
+    /*
+     * Build the final AI prompt.
+     *
+     * adaptationContext is only a style reference.
+     * It must never override the character personality,
+     * memories, boundaries, or current conversation context.
+     */
     const messages =
       buildMessages(
         character,
         memories,
         history,
-        original
+        original,
+        adaptationContext
       );
 
+
+    /*
+     * Generate response.
+     */
     const result =
       await generateReply(messages);
+
 
     /*
      * Save the actual conversation.
@@ -367,6 +454,7 @@ async function handleAiMessage(
       result.reply
     );
 
+
     /*
      * Save ONLY meaningful memories.
      */
@@ -381,6 +469,7 @@ async function handleAiMessage(
         result.memories
       );
     }
+
 
     /*
      * Emotion is currently kept in the
@@ -397,11 +486,16 @@ async function handleAiMessage(
       });
     }
 
+
+    /*
+     * Send final response.
+     */
     await send(
       api,
       result.reply,
       threadID
     );
+
   } catch (error) {
     console.error(
       "[AI] Response failed:",
@@ -417,6 +511,7 @@ async function handleAiMessage(
 
   return true;
 }
+
 
 module.exports = {
   handleAiMessage,
