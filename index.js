@@ -29,7 +29,9 @@ const {
 } = require("./debug");
 
 const {
+  runCleanup,
   startCleanupScheduler,
+  getCleanupStatus,
 } = require("./cleanup");
 
 // ============================================================
@@ -752,6 +754,94 @@ async function handleMessage(
     );
   }
 
+// ============================================================
+// ECLIPSE CLEANUP COMMANDS
+// ============================================================
+
+if (
+  text === "!cleanup" ||
+  text === "!cleanup status" ||
+  text === "!cleanup run"
+) {
+  // ADMIN ONLY
+  if (!ADMIN_IDS.includes(senderId)) {
+    return;
+  }
+
+  // STATUS
+  if (
+    text === "!cleanup" ||
+    text === "!cleanup status"
+  ) {
+    const status = getCleanupStatus();
+
+    sendReplyWithTyping(
+      api,
+      [
+        "🌑 ECLIPSE CLEANUP",
+        "",
+        `AUTO CLEANUP: ${
+          status.schedulerActive ? "🟢 ACTIVE" : "🔴 OFF"
+        }`,
+        "INTERVAL: 24 HOURS",
+        "DATA AGE: 3 DAYS",
+        `RUNNING: ${status.running ? "🟡 YES" : "🟢 NO"}`,
+        `LAST RUN: ${status.lastCleanupAt || "Never"}`,
+        "",
+        "🧹 !cleanup run",
+      ].join("\n"),
+      threadID
+    );
+
+    return;
+  }
+
+  // MANUAL RUN
+  if (text === "!cleanup run") {
+    try {
+      const result = await runCleanup();
+
+      if (result?.skipped) {
+        sendReplyWithTyping(
+          api,
+          "🟡 Cleanup is already running.",
+          threadID
+        );
+        return;
+      }
+
+      sendReplyWithTyping(
+        api,
+        [
+          "🌑 ECLIPSE CLEANUP COMPLETE",
+          "",
+          `📁 TEMP FILES: ${result?.temporaryFiles || 0}`,
+          `📜 OLD LOGS: ${result?.logs || 0}`,
+          `⚔️ RPG: ${result?.rpg || 0}`,
+          `🎮 GAMES: ${result?.games || 0}`,
+          `🤖 AI: ${result?.ai || 0}`,
+          "",
+          `🗄️ DATABASE: ${
+            result?.databaseMaintenance ? "🟢 OK" : "🔴 FAILED"
+          }`,
+          `⏱️ ${result?.durationMs || 0}ms`,
+        ].join("\n"),
+        threadID
+      );
+    } catch (error) {
+      console.error("[CLEANUP]", error);
+
+      sendReplyWithTyping(
+        api,
+        "❌ Cleanup failed. Check Render logs.",
+        threadID
+      );
+    }
+
+    return;
+  }
+}
+  
   // ============================================================
   // GLOBAL BOT CONTROL
   // ============================================================
