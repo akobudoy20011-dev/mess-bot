@@ -692,11 +692,18 @@ async function handleMessage(
       return;
     }
 
-    await observeMessage({
-      senderID: senderId,
-      threadID: threadId,
-      body: originalText,
-    });
+    // Do not feed ordinary bot commands into
+    // personality/adaptation observations.
+    //
+    // This keeps !commands from contaminating
+    // the AI's learned conversational style.
+    if (!originalText.startsWith("!")) {
+      await observeMessage({
+        senderID: senderId,
+        threadID: threadId,
+        body: originalText,
+      });
+    }
   } catch (error) {
     console.error(
       "[AI ADAPTATION] Training/observation failed:",
@@ -850,14 +857,62 @@ async function handleMessage(
               .stateFiles.length
           : 0;
 
+      // Keep the actual findings instead of
+      // only calculating the count.
       const optimizerFindings =
         Array.isArray(
           result?.optimizer
             ?.findings
         )
-          ? result.optimizer
-              .findings.length
-          : 0;
+          ? result.optimizer.findings
+          : [];
+
+      const optimizerCount =
+        optimizerFindings.length;
+
+      const optimizerDetails =
+        optimizerCount > 0
+          ? [
+              "",
+              "🔍 OPTIMIZER DETAILS",
+              ...optimizerFindings.map(
+                (finding, index) => {
+                  if (
+                    typeof finding === "string"
+                  ) {
+                    return `${index + 1}. ${finding}`;
+                  }
+
+                  if (
+                    finding &&
+                    typeof finding === "object"
+                  ) {
+                    const file =
+                      finding.file ||
+                      finding.path ||
+                      finding.filePath ||
+                      "Unknown file";
+
+                    const line =
+                      finding.line != null
+                        ? `:${finding.line}`
+                        : "";
+
+                    const message =
+                      finding.message ||
+                      finding.issue ||
+                      finding.reason ||
+                      finding.description ||
+                      JSON.stringify(finding);
+
+                    return `${index + 1}. ${file}${line} — ${message}`;
+                  }
+
+                  return `${index + 1}. ${String(finding)}`;
+                }
+              ),
+            ]
+          : [];
 
       const gc =
         result?.gc || {};
@@ -872,7 +927,8 @@ async function handleMessage(
           `📁 TEMP FILES: ${temporaryFiles}`,
           `⏳ EXPIRED SESSIONS: ${expiredSessions}`,
           `🔧 REPAIRS: ${repairs}`,
-          `🔍 OPTIMIZER FINDINGS: ${optimizerFindings}`,
+          `🔍 OPTIMIZER FINDINGS: ${optimizerCount}`,
+          ...optimizerDetails,
           "",
           `👥 GC INACTIVE: ${
             Number(
@@ -923,14 +979,28 @@ async function handleMessage(
   // GLOBAL BOT CONTROL
   // ============================================================
 
-  if (
-    /^!(shutdown|startup)$/i.test(
-      originalText
-    )
-  ) {
-    if (
-      !ADMIN_IDS.includes(senderId)
-    ) {
+  // Supported:
+  //
+  // !bot off
+  // !bot on
+  // !bot status
+  //
+  // Legacy aliases:
+  //
+  // !shutdown
+  // !startup
+  //
+  // This is a process-wide/global command state.
+  // It does NOT remove the bot from Messenger groups.
+  // ============================================================
+
+  const botControlMatch =
+    originalText.match(
+      /^!(bot\s+(off|on|status)|shutdown|startup)$/i
+    );
+
+  if (botControlMatch) {
+    if (!ADMIN_IDS.includes(senderId)) {
       sendReplyWithTyping(
         api,
         "❌ Only the bot admin can use this command.",
@@ -940,33 +1010,59 @@ async function handleMessage(
       return;
     }
 
-    const controlCommand =
-      originalText
-        .slice(1)
-        .toLowerCase();
+    const rawControl =
+      botControlMatch[1].toLowerCase();
+
+    // ----------------------------------------------------------
+    // STATUS
+    // ----------------------------------------------------------
 
     if (
-      controlCommand === "shutdown"
+      rawControl === "bot status"
     ) {
-      global.botDisabled = true;
-
       sendReplyWithTyping(
         api,
-        "🛑 Bot shutdown enabled. The bot is now OFF in all groups.",
+        global.botDisabled
+          ? "🔴 BOT STATUS: OFF\nThe bot is disabled globally."
+          : "🟢 BOT STATUS: ON\nThe bot is active globally.",
         threadID
       );
 
       return;
     }
 
+    // ----------------------------------------------------------
+    // OFF
+    // ----------------------------------------------------------
+
     if (
-      controlCommand === "startup"
+      rawControl === "bot off" ||
+      rawControl === "shutdown"
+    ) {
+      global.botDisabled = true;
+
+      sendReplyWithTyping(
+        api,
+        "🛑 Bot is now OFF globally.\nThe bot will ignore normal commands in all groups.",
+        threadID
+      );
+
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // ON
+    // ----------------------------------------------------------
+
+    if (
+      rawControl === "bot on" ||
+      rawControl === "startup"
     ) {
       global.botDisabled = false;
 
       sendReplyWithTyping(
         api,
-        "🟢 Bot startup enabled. The bot is now ON.",
+        "🟢 Bot is now ON globally.\nNormal commands are active again.",
         threadID
       );
 
@@ -985,6 +1081,21 @@ async function handleMessage(
     const isAdmin =
       ADMIN_IDS.includes(senderId);
 
+    const isBotStatus =
+      /^!bot\s+status$/i.test(
+        trimmedText
+      );
+
+    const isBotOn =
+      /^!bot\s+on$/i.test(
+        trimmedText
+      );
+
+    const isBotOff =
+      /^!bot\s+off$/i.test(
+        trimmedText
+      );
+
     const isStartup =
       /^!startup$/i.test(
         trimmedText
@@ -1002,14 +1113,24 @@ async function handleMessage(
 
     if (
       isAdmin &&
-      (isStartup || isShutdown)
+      (
+        isBotStatus ||
+        isBotOn ||
+        isBotOff ||
+        isStartup ||
+        isShutdown
+      )
     ) {
-      // Continue.
-    } else if (
+      // Global control commands are handled above.
+      return;
+    }
+
+    if (
       isAdmin &&
       isGameToggle
     ) {
-      // Continue.
+      // Allow admins to configure games
+      // while the general bot is disabled.
     } else if (
       /^!(?:game|games|play)\b/i.test(
         trimmedText
@@ -1564,23 +1685,8 @@ async function handleMessage(
             gameArgs[0] || ""
           ).toLowerCase();
 
-        if (
-          subcommand === "rules" ||
-          subcommand === "status"
-        ) {
-          const handled =
-            await handleGamesCommand(
-              api,
-              event,
-              gameCommand,
-              gameArgs
-            );
-
-          if (handled) {
-            return;
-          }
-        }
-
+        // Let games.js handle all supported
+        // !games subcommands exactly once.
         const handled =
           await handleGamesCommand(
             api,
@@ -1593,10 +1699,19 @@ async function handleMessage(
           return;
         }
 
-        sendGameCenter(
-          api,
-          threadID
-        );
+        // Only use the local menu fallback when
+        // games.js did not handle the command.
+        if (
+          subcommand === "" ||
+          subcommand === "menu"
+        ) {
+          sendGameCenter(
+            api,
+            threadID
+          );
+
+          return;
+        }
 
         return;
       }
