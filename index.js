@@ -646,6 +646,34 @@ async function handleMessage(
   const senderId =
     String(senderID || "").trim();
 
+  // ============================================================
+  // AI TRAINING / ADAPTATION
+  // ============================================================
+
+  try {
+    const trainingHandled =
+      await handleTrainingCommand({
+        threadId,
+        senderId,
+        originalText,
+      });
+
+    if (trainingHandled) {
+      return;
+    }
+
+    await observeMessage({
+      threadId,
+      senderId,
+      body: originalText,
+    });
+  } catch (error) {
+    console.error(
+      "[AI ADAPTATION] Training/observation failed:",
+      error
+    );
+  }
+  
   // ———————————————————————
   // GLOBAL BOT CONTROL
   // ———————————————————————
