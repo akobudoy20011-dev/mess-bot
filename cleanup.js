@@ -2452,5 +2452,7 @@ module.exports = {
 
   registerGCActivity,
 
+  getGCStatus,
+
   healthCheck,
 };
