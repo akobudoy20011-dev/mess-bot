@@ -1374,72 +1374,98 @@ try {
     );
   }
 
+if (
+  text === "!banat on" ||
+  text === "!banat off"
+) {
   if (
-    text === "!banat on" ||
-    text === "!banat off"
+    !ADMIN_IDS.includes(senderId)
   ) {
-    if (
-      !ADMIN_IDS.includes(senderId)
-    ) {
-      sendReplyWithTyping(
-        api,
-        "❌ Only the bot admin can turn banat on or off.",
-        threadID
-      );
-
-      return;
-    }
-
-    const enabled =
-      text === "!banat on";
-
-    try {
-      await db.setRoastEnabled(
-        threadId,
-        enabled
-      );
-
-      if (!enabled) {
-        lastRandomRoastByThread.delete(
-          threadId
-        );
-      }
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭━━━━━━━━━━━━━━╮",
-          "      🔥 BANAT",
-          "╰━━━━━━━━━━━━━━╯",
-          "",
-          enabled
-            ? "🟢 Status: ON"
-            : "🔴 Status: OFF",
-          "",
-          enabled
-            ? "Automatic banat has been enabled for this group."
-            : "Automatic banat has been disabled for this group.",
-        ].join("\n"),
-        threadID
-      );
-    } catch (error) {
-      console.error(
-        enabled
-          ? "Failed to enable banat:"
-          : "Failed to disable banat:",
-        error
-      );
-
-      sendReplyWithTyping(
-        api,
-        "❌ Failed to update banat setting.",
-        threadID
-      );
-    }
+    sendReplyWithTyping(
+      api,
+      "❌ Only the bot admin can turn banat on or off.",
+      threadID
+    );
 
     return;
   }
 
+  const enabled =
+    text === "!banat on";
+
+  try {
+    await db.setRoastEnabled(
+      threadId,
+      enabled
+    );
+
+    if (!enabled) {
+      lastRandomRoastByThread.delete(
+        threadId
+      );
+    }
+
+    sendReplyWithTyping(
+      api,
+      [
+        "╭━━━━━━━━━━━━━━╮",
+        "      🔥 BANAT",
+        "╰━━━━━━━━━━━━━━╯",
+        "",
+        enabled
+          ? "🟢 Status: ON"
+          : "🔴 Status: OFF",
+        "",
+        enabled
+          ? "Automatic banat has been enabled for this group."
+          : "Automatic banat has been disabled for this group.",
+      ].join("\n"),
+      threadID
+    );
+  } catch (error) {
+    console.error(
+      enabled
+        ? "Failed to enable banat:"
+        : "Failed to disable banat:",
+      error
+    );
+
+    sendReplyWithTyping(
+      api,
+      "❌ Failed to update banat setting.",
+      threadID
+    );
+  }
+
+  return;
+}
+
+
+// -------------------------------------------------------------------------
+// BANAT STATUS
+// -------------------------------------------------------------------------
+
+let roastEnabled = false;
+
+try {
+  roastEnabled =
+    await db.isRoastEnabled(threadId);
+} catch (error) {
+  console.error(
+    "[BANAT] Failed to check roast status:",
+    error
+  );
+
+  roastEnabled = false;
+}
+
+
+// -------------------------------------------------------------------------
+// TARGETED TRIGGER / ROAST
+// ONLY RUN WHEN BANAT IS ON
+// -------------------------------------------------------------------------
+
+if (roastEnabled) {
   try {
     const triggerReply =
       await getTriggerReply(
@@ -1464,55 +1490,44 @@ try {
       error
     );
   }
-
-  if (
-    !RANDOM_ROAST_ENABLED
-  ) {
-    return;
-  }
-
-  try {
-    const roastEnabled =
-      await db.isRoastEnabled(
-        threadId
-      );
-
-    if (!roastEnabled) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "Could not check roast setting:",
-      error
-    );
-
-    return;
-  }
-
-  if (
-    canRandomRoastThread(
-      threadId
-    )
-  ) {
-    const publicReply =
-      getNextPublicReply();
-
-    if (publicReply) {
-      lastRandomRoastByThread.set(
-        threadId,
-        Date.now()
-      );
-
-      sendReplyWithTyping(
-        api,
-        publicReply,
-        threadID,
-        true
-      );
-    }
-  }
 }
 
+  
+// -------------------------------------------------------------------------
+// PUBLIC RANDOM ROAST
+// ONLY RUN WHEN BANAT IS ON
+// -------------------------------------------------------------------------
+
+if (
+  !RANDOM_ROAST_ENABLED ||
+  !roastEnabled
+) {
+  return;
+}
+
+if (
+  canRandomRoastThread(
+    threadId
+  )
+) {
+  const publicReply =
+    getNextPublicReply();
+
+  if (publicReply) {
+    lastRandomRoastByThread.set(
+      threadId,
+      Date.now()
+    );
+
+    sendReplyWithTyping(
+      api,
+      publicReply,
+      threadID,
+      true
+    );
+  }
+}
+  
 // —————————————————————————
 // Game Center fallback
 // —————————————————————————
