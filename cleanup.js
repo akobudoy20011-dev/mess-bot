@@ -20,11 +20,12 @@ const db = require("./db");
 // - Never blindly rewrites source code.
 // - Source optimization produces a report first.
 // - Database cleanup is schema-aware.
+// - Session cleanup ONLY uses explicit expires_at.
 // - Every maintenance run is protected against overlap.
 //
 // ============================================================
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 
 const CLEANUP_INTERVAL_MS =
   24 * 60 * 60 * 1000;
@@ -54,6 +55,10 @@ let cleanupTimer = null;
 let maintenanceRunning = false;
 let lastMaintenanceAt = 0;
 let lastMaintenanceResult = null;
+
+// Cached readiness for the GC activity table.
+let gcActivityTableReady = false;
+let gcActivityTablePromise = null;
 
 const runtimeState = {
   startedAt: Date.now(),
@@ -108,20 +113,17 @@ function now() {
 }
 
 function daysAgo(days) {
-  return now() - days * 24 * 60 * 60 * 1000;
-}
-
-function pushLimited(array, item) {
-  if (array.length < MAX_REPORT_ITEMS) {
-    array.push(item);
-  }
+  return now() -
+    days * 24 * 60 * 60 * 1000;
 }
 
 function isSafeSourcePath(filePath) {
   const normalized =
     path.resolve(filePath);
 
-  for (const blocked of PROTECTED_PATH_PARTS) {
+  for (
+    const blocked of PROTECTED_PATH_PARTS
+  ) {
     if (
       normalized.includes(
         `${path.sep}${blocked}${path.sep}`
@@ -207,35 +209,6 @@ async function tableExists(tableName) {
   }
 }
 
-async function columnExists(
-  tableName,
-  columnName
-) {
-  try {
-    const result =
-      await db.query(
-        `
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = $1
-          AND column_name = $2
-        LIMIT 1
-        `,
-        [
-          tableName,
-          columnName,
-        ]
-      );
-
-    return Boolean(
-      result?.rows?.length
-    );
-  } catch {
-    return false;
-  }
-}
-
 async function getTableColumns(tableName) {
   try {
     const result =
@@ -281,7 +254,9 @@ function cleanDirectory(
         }
       );
 
-    for (const entry of entries) {
+    for (
+      const entry of entries
+    ) {
       if (!entry.isFile()) {
         continue;
       }
@@ -292,7 +267,9 @@ function cleanDirectory(
           entry.name
         );
 
-      if (!isSafeSourcePath(filePath)) {
+      if (
+        !isSafeSourcePath(filePath)
+      ) {
         continue;
       }
 
@@ -304,11 +281,15 @@ function cleanDirectory(
           now() -
           stats.mtime.getTime();
 
-        if (age <= maxAgeMs) {
+        if (
+          age <= maxAgeMs
+        ) {
           continue;
         }
 
-        fs.unlinkSync(filePath);
+        fs.unlinkSync(
+          filePath
+        );
 
         removed++;
 
@@ -337,16 +318,37 @@ function cleanDirectory(
 
 function cleanupTemporaryFiles() {
   const directories = [
-    path.join(__dirname, "tmp"),
-    path.join(__dirname, "temp"),
-    path.join(__dirname, "cache"),
-    path.join(__dirname, "logs"),
-    path.join(__dirname, "debug-logs"),
+    path.join(
+      __dirname,
+      "tmp"
+    ),
+
+    path.join(
+      __dirname,
+      "temp"
+    ),
+
+    path.join(
+      __dirname,
+      "cache"
+    ),
+
+    path.join(
+      __dirname,
+      "logs"
+    ),
+
+    path.join(
+      __dirname,
+      "debug-logs"
+    ),
   ];
 
   let removed = 0;
 
-  for (const directory of directories) {
+  for (
+    const directory of directories
+  ) {
     removed += cleanDirectory(
       directory,
       TEMP_FILE_MAX_AGE_MS
@@ -407,12 +409,6 @@ async function checkNegativeBalances() {
   }
 
   try {
-    let query = `
-      SELECT COUNT(*)::int AS count
-      FROM users
-      WHERE 1 = 0
-    `;
-
     const conditions = [];
 
     if (
@@ -431,16 +427,20 @@ async function checkNegativeBalances() {
       );
     }
 
-    if (conditions.length) {
-      query = `
-        SELECT COUNT(*)::int AS count
-        FROM users
-        WHERE ${conditions.join(" OR ")}
-      `;
+    if (
+      !conditions.length
+    ) {
+      return findings;
     }
 
     const result =
-      await db.query(query);
+      await db.query(
+        `
+        SELECT COUNT(*)::int AS count
+        FROM users
+        WHERE ${conditions.join(" OR ")}
+        `
+      );
 
     const count =
       Number(
@@ -456,7 +456,8 @@ async function checkNegativeBalances() {
     }
   } catch (error) {
     findings.push({
-      type: "negative_balance_check_failed",
+      type:
+        "negative_balance_check_failed",
       error: error.message,
       severity: "warning",
     });
@@ -473,7 +474,9 @@ async function checkRPGIntegrity() {
   const findings = [];
 
   if (
-    await tableExists("rpg_players")
+    await tableExists(
+      "rpg_players"
+    )
   ) {
     const columns =
       await getTableColumns(
@@ -501,14 +504,16 @@ async function checkRPGIntegrity() {
 
         if (count) {
           findings.push({
-            type: "invalid_rpg_levels",
+            type:
+              "invalid_rpg_levels",
             count,
             severity: "medium",
           });
         }
       } catch (error) {
         findings.push({
-          type: "rpg_level_check_failed",
+          type:
+            "rpg_level_check_failed",
           error: error.message,
           severity: "warning",
         });
@@ -517,7 +522,9 @@ async function checkRPGIntegrity() {
   }
 
   if (
-    await tableExists("rpg_inventory")
+    await tableExists(
+      "rpg_inventory"
+    )
   ) {
     const columns =
       await getTableColumns(
@@ -545,14 +552,16 @@ async function checkRPGIntegrity() {
 
         if (count) {
           findings.push({
-            type: "invalid_inventory_quantity",
+            type:
+              "invalid_inventory_quantity",
             count,
             severity: "medium",
           });
         }
       } catch (error) {
         findings.push({
-          type: "inventory_check_failed",
+          type:
+            "inventory_check_failed",
           error: error.message,
           severity: "warning",
         });
@@ -578,7 +587,9 @@ async function checkGameIntegrity() {
     "blackjack_sessions",
   ];
 
-  for (const table of gameTables) {
+  for (
+    const table of gameTables
+  ) {
     if (
       !await tableExists(table)
     ) {
@@ -611,7 +622,8 @@ async function checkGameIntegrity() {
 
       if (count > 0) {
         findings.push({
-          type: "active_game_records",
+          type:
+            "active_game_records",
           table,
           count,
           severity: "info",
@@ -619,7 +631,8 @@ async function checkGameIntegrity() {
       }
     } catch (error) {
       findings.push({
-        type: "game_integrity_check_failed",
+        type:
+          "game_integrity_check_failed",
         table,
         error: error.message,
         severity: "warning",
@@ -668,14 +681,16 @@ async function checkAIIntegrity() {
 
         if (count) {
           findings.push({
-            type: "old_ai_conversations",
+            type:
+              "old_ai_conversations",
             count,
             severity: "info",
           });
         }
       } catch (error) {
         findings.push({
-          type: "ai_integrity_check_failed",
+          type:
+            "ai_integrity_check_failed",
           error: error.message,
           severity: "warning",
         });
@@ -690,17 +705,31 @@ async function checkAIIntegrity() {
 // SESSION CLEANUP
 // ============================================================
 //
-// We only clean a table if its schema actually supports
-// expiration/status fields.
+// IMPORTANT:
 //
-// NEVER use generic "created_at older than 3 days" deletion
-// on arbitrary application tables.
+// Session deletion is intentionally STRICT.
+//
+// A session table is cleaned ONLY when:
+//
+//   1. The table exists.
+//   2. It has an expires_at column.
+//   3. expires_at is explicitly populated.
+//   4. The expiration time has passed.
+//   5. If status exists, status must be active/running.
+//
+// We DO NOT fall back to updated_at.
+//
+// This prevents permanent or long-lived records from being
+// accidentally deleted simply because they have not been
+// modified recently.
 //
 // ============================================================
 
 const SESSION_TABLES = [
   {
-    table: "rpg_combat_sessions",
+    table:
+      "rpg_combat_sessions",
+
     statuses: [
       "active",
       "running",
@@ -708,7 +737,9 @@ const SESSION_TABLES = [
   },
 
   {
-    table: "rpg_dungeon_sessions",
+    table:
+      "rpg_dungeon_sessions",
+
     statuses: [
       "active",
       "running",
@@ -716,7 +747,9 @@ const SESSION_TABLES = [
   },
 
   {
-    table: "rpg_hunt_sessions",
+    table:
+      "rpg_hunt_sessions",
+
     statuses: [
       "active",
       "running",
@@ -724,7 +757,9 @@ const SESSION_TABLES = [
   },
 
   {
-    table: "game_sessions",
+    table:
+      "game_sessions",
+
     statuses: [
       "active",
       "running",
@@ -732,7 +767,9 @@ const SESSION_TABLES = [
   },
 
   {
-    table: "trivia_sessions",
+    table:
+      "trivia_sessions",
+
     statuses: [
       "active",
       "running",
@@ -740,7 +777,9 @@ const SESSION_TABLES = [
   },
 
   {
-    table: "riddle_sessions",
+    table:
+      "riddle_sessions",
+
     statuses: [
       "active",
       "running",
@@ -748,7 +787,9 @@ const SESSION_TABLES = [
   },
 
   {
-    table: "blackjack_sessions",
+    table:
+      "blackjack_sessions",
+
     statuses: [
       "active",
       "running",
@@ -756,7 +797,9 @@ const SESSION_TABLES = [
   },
 ];
 
-async function cleanupSessionTable(rule) {
+async function cleanupSessionTable(
+  rule
+) {
   const {
     table,
     statuses,
@@ -775,21 +818,25 @@ async function cleanupSessionTable(rule) {
   }
 
   const columns =
-    await getTableColumns(table);
+    await getTableColumns(
+      table
+    );
 
-  let condition = null;
-
+  // ----------------------------------------------------------
+  // CRITICAL SAFETY CHECK
+  // ----------------------------------------------------------
+  //
+  // NO expires_at = NO DELETE.
+  //
   if (
-    columns.includes("expires_at")
+    !columns.includes(
+      "expires_at"
+    )
   ) {
-    condition =
-      `expires_at IS NOT NULL AND expires_at < NOW()`;
-  } else if (
-    columns.includes("updated_at")
-  ) {
-    condition =
-      `updated_at < NOW() - INTERVAL '1 day'`;
-  } else {
+    console.log(
+      `[MAINTENANCE] Skipping ${table}: no expires_at column.`
+    );
+
     return 0;
   }
 
@@ -797,13 +844,14 @@ async function cleanupSessionTable(rule) {
 
   if (
     columns.includes("status") &&
+    Array.isArray(statuses) &&
     statuses.length
   ) {
     const escaped =
       statuses
         .map(
           status =>
-            `'${status.replace(
+            `'${String(status).replace(
               /'/g,
               "''"
             )}'`
@@ -819,14 +867,24 @@ async function cleanupSessionTable(rule) {
       await db.query(
         `
         DELETE FROM ${table}
-        WHERE ${condition}
+        WHERE expires_at IS NOT NULL
+          AND expires_at < NOW()
         ${statusCondition}
         `
       );
 
-    return Number(
-      result.rowCount || 0
-    );
+    const removed =
+      Number(
+        result.rowCount || 0
+      );
+
+    if (removed > 0) {
+      console.log(
+        `[MAINTENANCE] Removed ${removed} expired session(s) from ${table}.`
+      );
+    }
+
+    return removed;
   } catch (error) {
     console.error(
       `[MAINTENANCE] ${table} cleanup failed:`,
@@ -855,6 +913,34 @@ async function cleanupExpiredSessions() {
 // ============================================================
 // TRIVIA / RIDDLE STATE VALIDATION
 // ============================================================
+
+function getStateFiles() {
+  return [
+    {
+      name:
+        "riddle-state.json",
+
+      path:
+        path.join(
+          __dirname,
+          "data",
+          "riddle-state.json"
+        ),
+    },
+
+    {
+      name:
+        "trivia-state.json",
+
+      path:
+        path.join(
+          __dirname,
+          "data",
+          "trivia-state.json"
+        ),
+    },
+  ];
+}
 
 function validateStateJSON(
   filePath
@@ -890,6 +976,60 @@ function validateStateJSON(
   }
 
   return result;
+}
+
+// ============================================================
+// STATE BACKUP
+// ============================================================
+//
+// Before repairing corrupt state, preserve the original file.
+//
+// This matters because riddle/trivia state may contain
+// anti-repeat usage history.
+//
+// ============================================================
+
+function backupCorruptState(
+  filePath
+) {
+  try {
+    if (
+      !isFile(filePath)
+    ) {
+      return null;
+    }
+
+    const timestamp =
+      new Date()
+        .toISOString()
+        .replace(
+          /[:.]/g,
+          "-"
+        );
+
+    const backupPath =
+      `${filePath}.corrupt-${timestamp}.bak`;
+
+    fs.copyFileSync(
+      filePath,
+      backupPath
+    );
+
+    console.log(
+      "[MAINTENANCE] Backed up corrupt state:",
+      backupPath
+    );
+
+    return backupPath;
+  } catch (error) {
+    console.error(
+      "[MAINTENANCE] State backup failed:",
+      filePath,
+      error.message
+    );
+
+    return null;
+  }
 }
 
 function repairStateJSON(
@@ -929,30 +1069,8 @@ function repairStateJSON(
 function checkGameStateFiles() {
   const findings = [];
 
-  const stateFiles = [
-    {
-      name: "riddle-state.json",
-      path: path.join(
-        __dirname,
-        "data",
-        "riddle-state.json"
-      ),
-      fallback: {},
-    },
-
-    {
-      name: "trivia-state.json",
-      path: path.join(
-        __dirname,
-        "data",
-        "trivia-state.json"
-      ),
-      fallback: {},
-    },
-  ];
-
   for (
-    const state of stateFiles
+    const state of getStateFiles()
   ) {
     const result =
       validateStateJSON(
@@ -964,10 +1082,20 @@ function checkGameStateFiles() {
       !result.valid
     ) {
       findings.push({
-        type: "invalid_state_json",
-        name: state.name,
-        path: state.path,
-        severity: "medium",
+        type:
+          "invalid_state_json",
+
+        name:
+          state.name,
+
+        path:
+          state.path,
+
+        error:
+          result.error,
+
+        severity:
+          "medium",
       });
     }
   }
@@ -978,28 +1106,8 @@ function checkGameStateFiles() {
 function repairGameStateFiles() {
   const repaired = [];
 
-  const stateFiles = [
-    {
-      name: "riddle-state.json",
-      path: path.join(
-        __dirname,
-        "data",
-        "riddle-state.json"
-      ),
-    },
-
-    {
-      name: "trivia-state.json",
-      path: path.join(
-        __dirname,
-        "data",
-        "trivia-state.json"
-      ),
-    },
-  ];
-
   for (
-    const state of stateFiles
+    const state of getStateFiles()
   ) {
     const result =
       validateStateJSON(
@@ -1007,19 +1115,33 @@ function repairGameStateFiles() {
       );
 
     if (
-      result.exists &&
-      !result.valid
+      !result.exists ||
+      result.valid
     ) {
-      if (
-        repairStateJSON(
-          state.path,
-          {}
-        )
-      ) {
-        repaired.push(
-          state.name
-        );
-      }
+      continue;
+    }
+
+    const backup =
+      backupCorruptState(
+        state.path
+      );
+
+    const repairedSuccessfully =
+      repairStateJSON(
+        state.path,
+        {}
+      );
+
+    if (
+      repairedSuccessfully
+    ) {
+      repaired.push({
+        name:
+          state.name,
+
+        backup:
+          backup || null,
+      });
     }
   }
 
@@ -1072,7 +1194,8 @@ function collectSourceFiles(
       fs.readdirSync(
         directory,
         {
-          withFileTypes: true,
+          withFileTypes:
+            true,
         }
       );
   } catch {
@@ -1117,7 +1240,7 @@ function collectSourceFiles(
       SOURCE_EXTENSIONS.has(
         path.extname(
           entry.name
-        )
+        ).toLowerCase()
       )
     ) {
       output.push(
@@ -1170,8 +1293,10 @@ function findUnusedImports(
     imports.push({
       declaration:
         match[1],
+
       module:
         match[2],
+
       index:
         match.index,
     });
@@ -1191,7 +1316,9 @@ function findUnusedImports(
           value =>
             value
               .trim()
-              .split(/\s+as\s+/i)[0]
+              .split(
+                /\s+as\s+/i
+              )[0]
               .trim()
         )
         .filter(Boolean);
@@ -1219,11 +1346,19 @@ function findUnusedImports(
         occurrences.length <= 1
       ) {
         findings.push({
-          type: "possible_unused_import",
-          file: filePath,
+          type:
+            "possible_unused_import",
+
+          file:
+            filePath,
+
           name,
-          module: item.module,
-          severity: "low",
+
+          module:
+            item.module,
+
+          severity:
+            "low",
         });
       }
     }
@@ -1269,10 +1404,16 @@ function findUnusedFunctions(
       occurrences.length <= 1
     ) {
       findings.push({
-        type: "possible_unused_function",
-        file: filePath,
+        type:
+          "possible_unused_function",
+
+        file:
+          filePath,
+
         name,
-        severity: "low",
+
+        severity:
+          "low",
       });
     }
   }
@@ -1310,10 +1451,16 @@ function findDuplicateConstants(
       declarations.has(name)
     ) {
       findings.push({
-        type: "possible_duplicate_constant",
-        file: filePath,
+        type:
+          "possible_duplicate_constant",
+
+        file:
+          filePath,
+
         name,
-        severity: "low",
+
+        severity:
+          "low",
       });
     } else {
       declarations.set(
@@ -1370,12 +1517,26 @@ function analyzeSourceCode() {
       )
     );
 
+    if (
+      findings.length >=
+      MAX_REPORT_ITEMS
+    ) {
+      break;
+    }
+
     findings.push(
       ...findUnusedFunctions(
         filePath,
         source
       )
     );
+
+    if (
+      findings.length >=
+      MAX_REPORT_ITEMS
+    ) {
+      break;
+    }
 
     findings.push(
       ...findDuplicateConstants(
@@ -1396,29 +1557,52 @@ function analyzeSourceCode() {
 // ============================================================
 
 async function ensureGCActivityTable() {
-  try {
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS bot_gc_activity (
-        thread_id TEXT PRIMARY KEY,
-        first_seen_at BIGINT NOT NULL,
-        last_active_at BIGINT NOT NULL,
-        inactive_since BIGINT,
-        status TEXT NOT NULL DEFAULT 'active',
-        expensive_features_disabled BOOLEAN NOT NULL DEFAULT FALSE,
-        archived_at BIGINT,
-        updated_at BIGINT NOT NULL
-      )
-    `);
-
+  if (
+    gcActivityTableReady
+  ) {
     return true;
-  } catch (error) {
-    console.error(
-      "[MAINTENANCE] Could not ensure GC activity table:",
-      error.message
-    );
-
-    return false;
   }
+
+  if (
+    gcActivityTablePromise
+  ) {
+    return gcActivityTablePromise;
+  }
+
+  gcActivityTablePromise =
+    (async () => {
+      try {
+        await db.query(`
+          CREATE TABLE IF NOT EXISTS bot_gc_activity (
+            thread_id TEXT PRIMARY KEY,
+            first_seen_at BIGINT NOT NULL,
+            last_active_at BIGINT NOT NULL,
+            inactive_since BIGINT,
+            status TEXT NOT NULL DEFAULT 'active',
+            expensive_features_disabled BOOLEAN NOT NULL DEFAULT FALSE,
+            archived_at BIGINT,
+            updated_at BIGINT NOT NULL
+          )
+        `);
+
+        gcActivityTableReady =
+          true;
+
+        return true;
+      } catch (error) {
+        console.error(
+          "[MAINTENANCE] Could not ensure GC activity table:",
+          error.message
+        );
+
+        return false;
+      } finally {
+        gcActivityTablePromise =
+          null;
+      }
+    })();
+
+  return gcActivityTablePromise;
 }
 
 async function updateGCActivity(
@@ -1452,14 +1636,34 @@ async function updateGCActivity(
         updated_at
       )
       VALUES (
-        $1, $2, $2, NULL, 'active', FALSE, NULL, $2
+        $1,
+        $2,
+        $2,
+        NULL,
+        'active',
+        FALSE,
+        NULL,
+        $2
       )
       ON CONFLICT (thread_id)
       DO UPDATE SET
-        last_active_at = EXCLUDED.last_active_at,
-        inactive_since = NULL,
-        status = 'active',
-        updated_at = EXCLUDED.updated_at
+        last_active_at =
+          EXCLUDED.last_active_at,
+
+        inactive_since =
+          NULL,
+
+        status =
+          'active',
+
+        expensive_features_disabled =
+          FALSE,
+
+        archived_at =
+          NULL,
+
+        updated_at =
+          EXCLUDED.updated_at
       `,
       [
         String(threadID),
@@ -1510,10 +1714,13 @@ async function processInactiveGCs() {
         UPDATE bot_gc_activity
         SET
           status = 'inactive',
-          inactive_since = COALESCE(
-            inactive_since,
-            $1
-          ),
+
+          inactive_since =
+            COALESCE(
+              inactive_since,
+              $1
+            ),
+
           updated_at = $2
         WHERE last_active_at < $1
           AND status = 'active'
@@ -1534,10 +1741,13 @@ async function processInactiveGCs() {
         `
         UPDATE bot_gc_activity
         SET
-          expensive_features_disabled = TRUE,
+          expensive_features_disabled =
+            TRUE,
+
           updated_at = $1
         WHERE last_active_at < $2
-          AND expensive_features_disabled = FALSE
+          AND expensive_features_disabled =
+            FALSE
         `,
         [
           now(),
@@ -1556,10 +1766,13 @@ async function processInactiveGCs() {
         UPDATE bot_gc_activity
         SET
           status = 'archived',
-          archived_at = COALESCE(
-            archived_at,
-            $1
-          ),
+
+          archived_at =
+            COALESCE(
+              archived_at,
+              $1
+            ),
+
           updated_at = $1
         WHERE last_active_at < $2
           AND status != 'archived'
@@ -1612,9 +1825,13 @@ async function databaseMaintenance() {
 async function healthCheck() {
   const result = {
     database: false,
+
     requiredTables: {},
+
     sourceDirectory: false,
-    memory: inspectRuntime(),
+
+    memory:
+      inspectRuntime(),
   };
 
   try {
@@ -1622,9 +1839,11 @@ async function healthCheck() {
       "SELECT 1"
     );
 
-    result.database = true;
+    result.database =
+      true;
   } catch {
-    result.database = false;
+    result.database =
+      false;
   }
 
   const importantTables = [
@@ -1639,12 +1858,18 @@ async function healthCheck() {
   for (
     const table of importantTables
   ) {
-    result.requiredTables[table] =
-      await tableExists(table);
+    result.requiredTables[
+      table
+    ] =
+      await tableExists(
+        table
+      );
   }
 
   result.sourceDirectory =
-    fileExists(__dirname);
+    fileExists(
+      __dirname
+    );
 
   return result;
 }
@@ -1655,50 +1880,87 @@ async function healthCheck() {
 
 function createReport() {
   return {
-    version: VERSION,
-    startedAt: new Date().toISOString(),
-    mode: null,
+    version:
+      VERSION,
+
+    startedAt:
+      new Date().toISOString(),
+
+    mode:
+      null,
 
     cleaned: {
-      temporaryFiles: 0,
-      expiredSessions: 0,
+      temporaryFiles:
+        0,
+
+      expiredSessions:
+        0,
     },
 
     repaired: {
-      stateFiles: [],
+      stateFiles:
+        [],
     },
 
     integrity: {
-      economy: [],
-      rpg: [],
-      games: [],
-      ai: [],
-      stateFiles: [],
+      economy:
+        [],
+
+      rpg:
+        [],
+
+      games:
+        [],
+
+      ai:
+        [],
+
+      stateFiles:
+        [],
     },
 
     optimizer: {
-      findings: [],
+      findings:
+        [],
     },
 
     gc: {
-      markedInactive: 0,
-      expensiveFeaturesDisabled: 0,
-      archived: 0,
+      markedInactive:
+        0,
+
+      expensiveFeaturesDisabled:
+        0,
+
+      archived:
+        0,
     },
 
-    health: null,
+    health:
+      null,
 
-    databaseMaintenance: false,
+    databaseMaintenance:
+      false,
 
-    durationMs: 0,
+    durationMs:
+      0,
 
-    errors: [],
+    errors:
+      [],
   };
 }
 
 // ============================================================
 // RUN MAINTENANCE
 // ============================================================
+
+const VALID_MODES =
+  new Set([
+    "monitor",
+    "clean",
+    "repair",
+    "optimize",
+    "full",
+  ]);
 
 async function runCleanup(
   options = {}
@@ -1707,23 +1969,33 @@ async function runCleanup(
     maintenanceRunning
   ) {
     return {
-      skipped: true,
+      skipped:
+        true,
+
       reason:
         "maintenance already running",
     };
   }
 
-  maintenanceRunning = true;
+  const requestedMode =
+    String(
+      options.mode || "clean"
+    ).toLowerCase();
+
+  const mode =
+    VALID_MODES.has(
+      requestedMode
+    )
+      ? requestedMode
+      : "clean";
+
+  maintenanceRunning =
+    true;
 
   const startedAt =
     now();
 
   runtimeState.maintenanceRuns++;
-
-  const mode =
-    String(
-      options.mode || "clean"
-    ).toLowerCase();
 
   const report =
     createReport();
@@ -1784,16 +2056,16 @@ async function runCleanup(
       mode === "optimize" ||
       mode === "full"
     ) {
-      report.cleaned.temporaryFiles =
+      report.cleaned
+        .temporaryFiles =
         cleanupTemporaryFiles();
 
-      report.cleaned.expiredSessions =
+      report.cleaned
+        .expiredSessions =
         await cleanupExpiredSessions();
 
-      const gc =
+      report.gc =
         await processInactiveGCs();
-
-      report.gc = gc;
     }
 
     // --------------------------------------------------------
@@ -1804,7 +2076,8 @@ async function runCleanup(
       mode === "repair" ||
       mode === "full"
     ) {
-      report.repaired.stateFiles =
+      report.repaired
+        .stateFiles =
         repairGameStateFiles();
     }
 
@@ -1816,7 +2089,8 @@ async function runCleanup(
       mode === "optimize" ||
       mode === "full"
     ) {
-      report.optimizer.findings =
+      report.optimizer
+        .findings =
         analyzeSourceCode();
     }
 
@@ -1846,20 +2120,26 @@ async function runCleanup(
       JSON.stringify(
         {
           mode,
+
           files:
             report.cleaned
               .temporaryFiles,
+
           sessions:
             report.cleaned
               .expiredSessions,
+
           repairs:
             report.repaired
               .stateFiles.length,
+
           optimizerFindings:
             report.optimizer
               .findings.length,
+
           gc:
             report.gc,
+
           durationMs:
             report.durationMs,
         },
@@ -1883,6 +2163,9 @@ async function runCleanup(
       now() -
       startedAt;
 
+    lastMaintenanceAt =
+      now();
+
     lastMaintenanceResult =
       report;
 
@@ -1899,25 +2182,29 @@ async function runCleanup(
 
 async function previewCleanup() {
   return runCleanup({
-    mode: "monitor",
+    mode:
+      "monitor",
   });
 }
 
 async function repairCleanup() {
   return runCleanup({
-    mode: "repair",
+    mode:
+      "repair",
   });
 }
 
 async function optimizeCleanup() {
   return runCleanup({
-    mode: "optimize",
+    mode:
+      "optimize",
   });
 }
 
 async function fullMaintenance() {
   return runCleanup({
-    mode: "full",
+    mode:
+      "full",
   });
 }
 
@@ -1926,36 +2213,50 @@ async function fullMaintenance() {
 // ============================================================
 
 function startCleanupScheduler() {
-  if (cleanupTimer) {
+  if (
+    cleanupTimer
+  ) {
     return;
   }
 
   console.log(
-    `[MAINTENANCE] Scheduler started.`
+    "[MAINTENANCE] Scheduler started."
   );
 
-  setTimeout(() => {
-    runCleanup({
-      mode: "clean",
-    }).catch(error => {
-      console.error(
-        "[MAINTENANCE] Startup maintenance failed:",
-        error
+  setTimeout(
+    () => {
+      runCleanup({
+        mode:
+          "clean",
+      }).catch(
+        error => {
+          console.error(
+            "[MAINTENANCE] Startup maintenance failed:",
+            error
+          );
+        }
       );
-    });
-  }, 30 * 1000);
+    },
+    30 * 1000
+  );
 
   cleanupTimer =
-    setInterval(() => {
-      runCleanup({
-        mode: "clean",
-      }).catch(error => {
-        console.error(
-          "[MAINTENANCE] Scheduled maintenance failed:",
-          error
+    setInterval(
+      () => {
+        runCleanup({
+          mode:
+            "clean",
+        }).catch(
+          error => {
+            console.error(
+              "[MAINTENANCE] Scheduled maintenance failed:",
+              error
+            );
+          }
         );
-      });
-    }, CLEANUP_INTERVAL_MS);
+      },
+      CLEANUP_INTERVAL_MS
+    );
 
   if (
     typeof cleanupTimer.unref ===
@@ -1966,7 +2267,9 @@ function startCleanupScheduler() {
 }
 
 function stopCleanupScheduler() {
-  if (!cleanupTimer) {
+  if (
+    !cleanupTimer
+  ) {
     return;
   }
 
@@ -1974,7 +2277,8 @@ function stopCleanupScheduler() {
     cleanupTimer
   );
 
-  cleanupTimer = null;
+  cleanupTimer =
+    null;
 
   console.log(
     "[MAINTENANCE] Scheduler stopped."
@@ -1999,13 +2303,16 @@ async function registerGCActivity(
 
 function getCleanupStatus() {
   return {
-    version: VERSION,
+    version:
+      VERSION,
 
     running:
       maintenanceRunning,
 
     schedulerActive:
-      Boolean(cleanupTimer),
+      Boolean(
+        cleanupTimer
+      ),
 
     lastCleanupAt:
       lastMaintenanceAt
@@ -2052,12 +2359,17 @@ module.exports = {
   VERSION,
 
   runCleanup,
+
   previewCleanup,
+
   repairCleanup,
+
   optimizeCleanup,
+
   fullMaintenance,
 
   startCleanupScheduler,
+
   stopCleanupScheduler,
 
   getCleanupStatus,
