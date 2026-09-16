@@ -19,6 +19,11 @@ const {
 
 const { handleRpgCommand } = require("./rpg");
 
+const {
+  handleTrainingCommand,
+  observeMessage
+} = require("./ai/adaptation");
+
 // ============================================================
 // PICTURES
 // ============================================================
