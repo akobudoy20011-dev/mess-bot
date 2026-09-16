@@ -28,6 +28,10 @@ const {
   handleDebugCommand,
 } = require("./debug");
 
+const {
+  startCleanupScheduler,
+} = require("./cleanup");
+
 // ============================================================
 // PICTURES
 // ============================================================
