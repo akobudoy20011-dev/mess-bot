@@ -24,6 +24,10 @@ const {
   observeMessage
 } = require("./ai/adaptation");
 
+const {
+  handleDebugCommand,
+} = require("./debug");
+
 // ============================================================
 // PICTURES
 // ============================================================
