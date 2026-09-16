@@ -1,3 +1,7 @@
+// ============================================================
+// TRIGGERS / BANAT SYSTEM
+// ============================================================
+
 const groups = [
   {
     name: "jaiden",
@@ -110,12 +114,12 @@ const groups = [
       "weak",
       "laro",
       "tanginamo",
-      " lala",
+      "lala",
       "patawa",
       "gago",
       "bobo",
       "tanga",
-      "HAHAHAAH ",
+      "hahahaa",
       "pake ko",
       "sino yan",
     ],
@@ -149,7 +153,14 @@ const groups = [
 
   {
     name: "casual-comebacks",
-    triggers: ["ano", "sino ba", "ano na naman", "weh", "bakit", "sige"],
+    triggers: [
+      "ano",
+      "sino ba",
+      "ano na naman",
+      "weh",
+      "bakit",
+      "sige",
+    ],
     index: 0,
     replies: [
       "bat ka galit? kain ka muna lugaw",
@@ -175,32 +186,18 @@ const groups = [
     ],
   },
 
-  {
-    name: "one-liners",
-    triggers: ["k", "lol", "haha", "o"],
-    index: 0,
-    replies: [
-      "k",
-      "wew",
-      "okay po master",
-      "lods panalo ka na",
-      "weep weep",
-      "teh kalma",
-      "yawn... tapos na?",
-      "nod nod",
-      "sana okay ka lang",
-      "next topic please",
-      "drama mo",
-      "hahahaha sige na nga",
-      "ay wow",
-      "grabe siya oh",
-      "wala man lang substance",
-    ],
-  },
+  // ==========================================================
+  // NO ONE-LINERS GROUP
+  // k / lol / haha / o ARE INTENTIONALLY NOT TRIGGERS
+  // ==========================================================
 
   {
     name: "deflections",
-    triggers: ["sino", "sino ka", "saan"],
+    triggers: [
+      "sino",
+      "sino ka",
+      "saan",
+    ],
     index: 0,
     replies: [
       "tanong mo sa kapitbahay niyo",
@@ -223,7 +220,11 @@ const groups = [
 
   {
     name: "vincent",
-    triggers: ["og vincent", "øg vincent", "vincent"],
+    triggers: [
+      "og vincent",
+      "øg vincent",
+      "vincent",
+    ],
     index: 0,
     replies: [
       "vincent na naman",
@@ -272,16 +273,8 @@ const groups = [
 
 
 // ============================================================
-// PUBLIC ROAST GROUP
+// PUBLIC ROAST
 // ============================================================
-//
-// Unlike the named groups above, this one has NO trigger words —
-// it is never matched inside the normal trigger-matching loop.
-// Instead, index.js calls getNextPublicReply() directly whenever
-// a message comes from someone who is NOT a matched named target
-// and didn't hit any trigger word, so anyone in the chat can get
-// roasted without needing to type a specific word.
-//
 
 const publicRoastGroup = {
   name: "public",
@@ -353,88 +346,44 @@ const jaidenGroupForClones = groups.find(
 );
 
 if (jaidenGroupForClones) {
-  groups.push({
-    name: "jeo",
-    triggers: ["jeø", "jeo"],
-    index: 0,
-    replies: jaidenGroupForClones.replies.map((reply) =>
-      reply.replace(/\bjaiden\b/gi, "Jeø")
-    ),
-  });
+  const clones = [
+    ["jeo", ["jeø", "jeo"], "Jeø"],
+    ["aeix", ["aeix"], "Aeix"],
+    ["kikay", ["kikay"], "Kikay"],
+    ["sylora", ["sylora"], "Sylora"],
+    ["rishan", ["rishan"], "Rishan"],
+    ["marcellus", ["marcellus"], "Marcellus"],
+    ["theone", ["theone"], "Theone"],
+  ];
 
-  groups.push({
-    name: "aeix",
-    triggers: ["aeix"],
-    index: 0,
-    replies: jaidenGroupForClones.replies.map((reply) =>
-      reply.replace(/\bjaiden\b/gi, "Aeix")
-    ),
-  });
-
-  groups.push({
-    name: "kikay",
-    triggers: ["kikay"],
-    index: 0,
-    replies: jaidenGroupForClones.replies.map((reply) =>
-      reply.replace(/\bjaiden\b/gi, "Kikay")
-    ),
-  });
-
-  groups.push({
-    name: "sylora",
-    triggers: ["sylora"],
-    index: 0,
-    replies: jaidenGroupForClones.replies.map((reply) =>
-      reply.replace(/\bjaiden\b/gi, "Sylora")
-    ),
-  });
-
-  groups.push({
-    name: "rishan",
-    triggers: ["rishan"],
-    index: 0,
-    replies: jaidenGroupForClones.replies.map((reply) =>
-      reply.replace(/\bjaiden\b/gi, "Rishan")
-    ),
-  });
-
-  groups.push({
-    name: "marcellus",
-    triggers: ["marcellus"],
-    index: 0,
-    replies: jaidenGroupForClones.replies.map((reply) =>
-      reply.replace(/\bjaiden\b/gi, "Marcellus")
-    ),
-  });
-
-  groups.push({
-    name: "theone",
-    triggers: ["theone"],
-    index: 0,
-    replies: jaidenGroupForClones.replies.map((reply) =>
-      reply.replace(/\bjaiden\b/gi, "Theone")
-    ),
-  });
+  for (const [name, triggers, replacement] of clones) {
+    groups.push({
+      name,
+      triggers,
+      index: 0,
+      replies: jaidenGroupForClones.replies.map((reply) =>
+        String(reply).replace(
+          /\bjaiden\b/gi,
+          replacement
+        )
+      ),
+    });
+  }
 }
 
 
 // ============================================================
-// SANTA BISAYA SPECIAL GROUP
+// SANTA BISAYA
 // ============================================================
-//
-// Santa Bisaya is different from the normal Jaiden clones.
-//
-// Santa gets EVERY reply from EVERY group above (including the
-// new public group), from top to bottom, instead of only the
-// Jaiden replies.
-//
-// The replies are copied after all normal groups and clones
-// have been created, so Santa's pool contains everything.
-//
 
 const santaBisayaGroup = {
   name: "santa-bisaya",
-  triggers: ["santa bisaya", "santa-bisaya"],
+
+  triggers: [
+    "santa bisaya",
+    "santa-bisaya",
+  ],
+
   index: 0,
 
   replies: groups
@@ -444,7 +393,10 @@ const santaBisayaGroup = {
         : []
     )
     .map((reply) =>
-      reply.replace(/\bjaiden\b/gi, "Santa Bisaya")
+      String(reply).replace(
+        /\bjaiden\b/gi,
+        "Santa Bisaya"
+      )
     ),
 };
 
@@ -452,44 +404,93 @@ groups.push(santaBisayaGroup);
 
 
 // ============================================================
+// TRIGGER MATCHING
+// ============================================================
+
+function matchesTrigger(text, trigger) {
+  const normalizedText =
+    normalizeText(text);
+
+  const normalizedTrigger =
+    normalizeText(trigger);
+
+  if (
+    !normalizedText ||
+    !normalizedTrigger
+  ) {
+    return false;
+  }
+
+  const escaped =
+    escapeRegExp(normalizedTrigger);
+
+  // Proper Unicode boundaries.
+  // Prevents:
+  // bot -> matching "bottom"
+  // sino -> matching "sinong"
+  // laro -> matching "laro123"
+  //
+  // Still matches:
+  // "bot!"
+  // "hey bot"
+  // "sino?"
+  // "laro tayo"
+
+  const regex = new RegExp(
+    `(^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`,
+    "iu"
+  );
+
+  return regex.test(normalizedText);
+}
+
+
+// ============================================================
 // TRIGGER / ID MATCHING
 // ============================================================
 
-function getTriggerReply(rawText, senderId) {
+function getTriggerReply(
+  rawText,
+  senderId
+) {
   if (!rawText) {
     return null;
   }
 
-  const text = String(rawText).toLowerCase();
-  const normalizedSenderId = normalizeId(senderId);
+  const text =
+    normalizeText(rawText);
+
+  const normalizedSenderId =
+    normalizeId(senderId);
+
+
+  // ----------------------------------------------------------
+  // EXPLICIT WORD / PHRASE TRIGGERS
+  // ----------------------------------------------------------
 
   for (const group of groups) {
-    const hit = group.triggers.some((trigger) => {
-      const normalizedTrigger = String(trigger).toLowerCase();
+    if (
+      !Array.isArray(group.triggers) ||
+      group.triggers.length === 0
+    ) {
+      continue;
+    }
 
-      if (normalizedTrigger.includes(" ")) {
-        return text.includes(normalizedTrigger);
-      }
+    if (
+      !Array.isArray(group.replies) ||
+      group.replies.length === 0
+    ) {
+      continue;
+    }
 
-      // JavaScript's \b does not handle the ø character correctly.
-      if (/[^\x00-\x7F]/.test(normalizedTrigger)) {
-        const unicodeBoundary = new RegExp(
-          `(?:^|[^\\p{L}\\p{N}_])${escapeRegExp(
-            normalizedTrigger
-          )}(?=$|[^\\p{L}\\p{N}_])`,
-          "iu"
-        );
-
-        return unicodeBoundary.test(text);
-      }
-
-      const wordBoundary = new RegExp(
-        `\\b${escapeRegExp(normalizedTrigger)}\\b`,
-        "i"
+    const hit =
+      group.triggers.some(
+        (trigger) =>
+          matchesTrigger(
+            text,
+            trigger
+          )
       );
-
-      return wordBoundary.test(text);
-    });
 
     if (hit) {
       return getNextReply(group);
@@ -497,110 +498,129 @@ function getTriggerReply(rawText, senderId) {
   }
 
 
-  // ==========================================================
-  // MATCH PEOPLE BY MESSENGER ID
-  // ==========================================================
+  // ----------------------------------------------------------
+  // MESSENGER ID TARGETS
+  // ----------------------------------------------------------
 
   const roastTargets = {};
 
-  if (process.env.JAIDEN_ID) {
-    roastTargets.jaiden = normalizeId(process.env.JAIDEN_ID);
-  }
+  const envMap = {
+    jaiden: [
+      "JAIDEN_ID",
+      "JAYDEN_ID",
+    ],
 
-  if (process.env.SYLORA_ID) {
-    roastTargets.sylora = normalizeId(process.env.SYLORA_ID);
-  }
-
-  if (process.env.MARCELLUS_ID) {
-    roastTargets.marcellus = normalizeId(process.env.MARCELLUS_ID);
-  }
-
-  if (process.env.THEONE_ID) {
-    roastTargets.theone = normalizeId(process.env.THEONE_ID);
-  }
-
-  if (process.env.VINCENT_ID) {
-    roastTargets.vincent = normalizeId(process.env.VINCENT_ID);
-  }
-
-  if (process.env.ASELM_ID) {
-    roastTargets.aselm = normalizeId(process.env.ASELM_ID);
-  }
-
-  if (process.env.JEO_ID) {
-    roastTargets.jeo = normalizeId(process.env.JEO_ID);
-  }
-
-  if (process.env.AEIX_ID) {
-    roastTargets.aeix = normalizeId(process.env.AEIX_ID);
-  }
-
-  if (process.env.KIKAY_ID) {
-    roastTargets.kikay = normalizeId(process.env.KIKAY_ID);
-  }
-
-  if (process.env.MIZZY_ID) {
-    roastTargets.mizzy = normalizeId(process.env.MIZZY_ID);
-  }
-
-  // Santa Bisaya
-  if (process.env.SANTA_BISAYA_ID) {
-    roastTargets["santa-bisaya"] = normalizeId(
-      process.env.SANTA_BISAYA_ID
-    );
-  }
-
-  // Keep the old XETH_ID option working.
-  if (process.env.XETH_ID) {
-    roastTargets.xeth = normalizeId(process.env.XETH_ID);
-  }
-
-
-  // ==========================================================
-  // OPTIONAL ADDITIONAL TARGETS
-  // ROAST_TARGET_IDS=group:id,group:id
-  // ==========================================================
+    sylora: ["SYLORA_ID"],
+    marcellus: ["MARCELLUS_ID"],
+    theone: ["THEONE_ID"],
+    vincent: ["VINCENT_ID"],
+    aselm: ["ASELM_ID"],
+    jeo: ["JEO_ID"],
+    aeix: ["AEIX_ID"],
+    kikay: ["KIKAY_ID"],
+    mizzy: ["MIZZY_ID"],
+    "santa-bisaya": [
+      "SANTA_BISAYA_ID",
+    ],
+    xeth: ["XETH_ID"],
+  };
 
   for (
-    const entry of (process.env.ROAST_TARGET_IDS || "").split(",")
+    const [groupName, envNames]
+    of Object.entries(envMap)
   ) {
-    const separatorIndex = entry.indexOf(":");
+    for (const envName of envNames) {
+      const configuredId =
+        normalizeId(
+          process.env[envName]
+        );
 
-    if (separatorIndex === -1) {
+      if (configuredId) {
+        roastTargets[groupName] =
+          configuredId;
+
+        break;
+      }
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // ADDITIONAL TARGETS
+  //
+  // ROAST_TARGET_IDS=
+  // jaiden:123,vincent:456
+  // ----------------------------------------------------------
+
+  const additionalTargets =
+    String(
+      process.env.ROAST_TARGET_IDS ||
+      ""
+    );
+
+  for (
+    const entry
+    of additionalTargets.split(",")
+  ) {
+    const separator =
+      entry.indexOf(":");
+
+    if (separator === -1) {
       continue;
     }
 
-    const groupName = entry
-      .slice(0, separatorIndex)
-      .trim()
-      .toLowerCase();
+    const groupName =
+      entry
+        .slice(0, separator)
+        .trim()
+        .toLowerCase();
 
-    const targetId = normalizeId(
-      entry.slice(separatorIndex + 1)
-    );
+    const targetId =
+      normalizeId(
+        entry.slice(
+          separator + 1
+        )
+      );
 
-    if (groupName && targetId) {
-      roastTargets[groupName] = targetId;
+    if (
+      groupName &&
+      targetId
+    ) {
+      roastTargets[groupName] =
+        targetId;
     }
   }
 
 
-  // ==========================================================
-  // ID MATCH
-  // ==========================================================
+  // ----------------------------------------------------------
+  // CHECK SENDER ID
+  // ----------------------------------------------------------
 
-  for (
-    const [groupName, targetId]
-    of Object.entries(roastTargets)
-  ) {
-    if (normalizeId(targetId) === normalizedSenderId) {
+  if (normalizedSenderId) {
+    for (
+      const [groupName, targetId]
+      of Object.entries(
+        roastTargets
+      )
+    ) {
+      if (
+        targetId !==
+        normalizedSenderId
+      ) {
+        continue;
+      }
 
-      const targetGroup = groups.find(
-        (group) => group.name === groupName
-      );
+      const targetGroup =
+        groups.find(
+          (group) =>
+            group.name ===
+            groupName
+        );
 
       if (targetGroup) {
-        return getNextReply(targetGroup);
+        return getNextReply(
+          targetGroup
+        );
       }
     }
   }
@@ -610,23 +630,16 @@ function getTriggerReply(rawText, senderId) {
 
 
 // ============================================================
-// PUBLIC REPLY (for anyone who isn't a matched trigger/target)
+// PUBLIC ROAST
 // ============================================================
 
 function getNextPublicReply() {
-  const group = groups.find((g) => g.name === "public");
+  const group =
+    groups.find(
+      (g) => g.name === "public"
+    );
+
   return getNextReply(group);
-}
-
-
-// ============================================================
-// NORMALIZE ID
-// ============================================================
-
-function normalizeId(value) {
-  return String(value || "")
-    .trim()
-    .replace(/^["']|["']$/g, "");
 }
 
 
@@ -635,27 +648,29 @@ function normalizeId(value) {
 // ============================================================
 
 function getRandomRoastReply() {
-  // Only use generic groups here.
-  // Name-specific groups stay tied to their
-  // trigger or configured target ID.
+  const genericGroups =
+    groups.filter(
+      (group) =>
+        group.name === "trash-talk"
+    );
 
-  const genericRoastGroups = groups.filter(
-    (group) => ["trash-talk"].includes(group.name)
-  );
-
-  const replies = genericRoastGroups.flatMap(
-    (group) =>
-      Array.isArray(group.replies)
-        ? group.replies
-        : []
-  );
+  const replies =
+    genericGroups.flatMap(
+      (group) =>
+        Array.isArray(group.replies)
+          ? group.replies
+          : []
+    );
 
   if (replies.length === 0) {
     return null;
   }
 
   return replies[
-    Math.floor(Math.random() * replies.length)
+    Math.floor(
+      Math.random() *
+      replies.length
+    )
   ];
 }
 
@@ -673,12 +688,46 @@ function getNextReply(group) {
     return null;
   }
 
-  const reply = group.replies[group.index];
+  if (
+    !Number.isInteger(group.index)
+  ) {
+    group.index = 0;
+  }
+
+  const reply =
+    group.replies[
+      group.index %
+      group.replies.length
+    ];
 
   group.index =
-    (group.index + 1) % group.replies.length;
+    (group.index + 1) %
+    group.replies.length;
 
   return reply;
+}
+
+
+// ============================================================
+// NORMALIZATION
+// ============================================================
+
+function normalizeText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+function normalizeId(value) {
+  return String(value || "")
+    .trim()
+    .replace(
+      /^["']|["']$/g,
+      ""
+    );
 }
 
 
@@ -687,7 +736,7 @@ function getNextReply(group) {
 // ============================================================
 
 function escapeRegExp(str) {
-  return str.replace(
+  return String(str).replace(
     /[.*+?^${}()|[\]\\]/g,
     "\\$&"
   );
@@ -702,5 +751,11 @@ module.exports = {
   getTriggerReply,
   getRandomRoastReply,
   getNextPublicReply,
+
+  normalizeText,
+  normalizeId,
+  matchesTrigger,
+
   groups,
+  publicRoastGroup,
 };
