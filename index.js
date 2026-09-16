@@ -33,6 +33,7 @@ const {
   startCleanupScheduler,
   getCleanupStatus,
   registerGCActivity,
+  getGCStatus,
 } = require("./cleanup");
 
 // ============================================================
