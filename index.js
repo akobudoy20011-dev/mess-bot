@@ -278,7 +278,7 @@ async function sendAudioTrack(
     const video = await withTimeout(
       () => searchYouTube(requestedSong),
       YOUTUBE_SEARCH_TIMEOUT_MS,
-      "YouTube search timed out after 30 seconds. Please try again."
+      "YouTube search timed out after 3 seconds. Please try again."
     );
 
     if (!video || !video.url) {
@@ -646,33 +646,35 @@ async function handleMessage(
   const senderId =
     String(senderID || "").trim();
 
-// ============================================================
-// AI TRAINING / ADAPTATION
-// ============================================================
+  // ============================================================
+  // AI TRAINING / ADAPTATION
+  // ============================================================
 
-try {
-  const trainingHandled =
-    await handleTrainingCommand(
-      senderId,
-      threadId,
+  try {
+    const trainingHandled =
+      await handleTrainingCommand(
+        api,
+        event,
+        text,
+        originalText
+      );
+
+    if (trainingHandled) {
+      return;
+    }
+
+    await observeMessage(
+      api,
+      event,
+      text,
       originalText
     );
-
-  if (trainingHandled) {
-    return;
+  } catch (error) {
+    console.error(
+      "[AI ADAPTATION] Training/observation failed:",
+      error
+    );
   }
-
-  await observeMessage({
-    senderID: senderId,
-    threadID: threadId,
-    body: originalText,
-  });
-} catch (error) {
-  console.error(
-    "[AI ADAPTATION] Training/observation failed:",
-    error
-  );
-}
   
   // ———————————————————————
   // GLOBAL BOT CONTROL
@@ -1374,160 +1376,158 @@ try {
     );
   }
 
-if (
-  text === "!banat on" ||
-  text === "!banat off"
-) {
   if (
-    !ADMIN_IDS.includes(senderId)
+    text === "!banat on" ||
+    text === "!banat off"
   ) {
-    sendReplyWithTyping(
-      api,
-      "❌ Only the bot admin can turn banat on or off.",
-      threadID
-    );
-
-    return;
-  }
-
-  const enabled =
-    text === "!banat on";
-
-  try {
-    await db.setRoastEnabled(
-      threadId,
-      enabled
-    );
-
-    if (!enabled) {
-      lastRandomRoastByThread.delete(
-        threadId
-      );
-    }
-
-    sendReplyWithTyping(
-      api,
-      [
-        "╭━━━━━━━━━━━━━━╮",
-        "      🔥 BANAT",
-        "╰━━━━━━━━━━━━━━╯",
-        "",
-        enabled
-          ? "🟢 Status: ON"
-          : "🔴 Status: OFF",
-        "",
-        enabled
-          ? "Automatic banat has been enabled for this group."
-          : "Automatic banat has been disabled for this group.",
-      ].join("\n"),
-      threadID
-    );
-  } catch (error) {
-    console.error(
-      enabled
-        ? "Failed to enable banat:"
-        : "Failed to disable banat:",
-      error
-    );
-
-    sendReplyWithTyping(
-      api,
-      "❌ Failed to update banat setting.",
-      threadID
-    );
-  }
-
-  return;
-}
-
-
-// -------------------------------------------------------------------------
-// BANAT STATUS
-// -------------------------------------------------------------------------
-
-let roastEnabled = false;
-
-try {
-  roastEnabled =
-    await db.isRoastEnabled(threadId);
-} catch (error) {
-  console.error(
-    "[BANAT] Failed to check roast status:",
-    error
-  );
-
-  roastEnabled = false;
-}
-
-
-// -------------------------------------------------------------------------
-// TARGETED TRIGGER / ROAST
-// ONLY RUN WHEN BANAT IS ON
-// -------------------------------------------------------------------------
-
-if (roastEnabled) {
-  try {
-    const triggerReply =
-      await getTriggerReply(
-        body,
-        senderId,
-        threadId
-      );
-
-    if (triggerReply) {
+    if (
+      !ADMIN_IDS.includes(senderId)
+    ) {
       sendReplyWithTyping(
         api,
-        triggerReply,
-        threadID,
-        true
+        "❌ Only the bot admin can turn banat on or off.",
+        threadID
       );
 
       return;
     }
+
+    const enabled =
+      text === "!banat on";
+
+    try {
+      await db.setRoastEnabled(
+        threadId,
+        enabled
+      );
+
+      if (!enabled) {
+        lastRandomRoastByThread.delete(
+          threadId
+        );
+      }
+
+      sendReplyWithTyping(
+        api,
+        [
+          "╭━━━━━━━━━━━━━━╮",
+          "      🔥 BANAT",
+          "╰━━━━━━━━━━━━━━╯",
+          "",
+          enabled
+            ? "🟢 Status: ON"
+            : "🔴 Status: OFF",
+          "",
+          enabled
+            ? "Automatic banat has been enabled for this group."
+            : "Automatic banat has been disabled for this group.",
+        ].join("\n"),
+        threadID
+      );
+    } catch (error) {
+      console.error(
+        enabled
+          ? "Failed to enable banat:"
+          : "Failed to disable banat:",
+        error
+      );
+
+      sendReplyWithTyping(
+        api,
+        "❌ Failed to update banat setting.",
+        threadID
+      );
+    }
+
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // BANAT STATUS
+  // -------------------------------------------------------------------------
+
+  let roastEnabled = false;
+
+  try {
+    roastEnabled =
+      await db.isRoastEnabled(threadId);
   } catch (error) {
     console.error(
-      "Trigger system failed:",
+      "[BANAT] Failed to check roast status:",
       error
     );
+
+    roastEnabled = false;
+  }
+
+  // -------------------------------------------------------------------------
+  // TARGETED TRIGGER / ROAST
+  // ONLY RUN WHEN BANAT IS ON
+  // -------------------------------------------------------------------------
+
+  if (roastEnabled) {
+    try {
+      const triggerReply =
+        await getTriggerReply(
+          body,
+          senderId,
+          threadId
+        );
+
+      if (triggerReply) {
+        sendReplyWithTyping(
+          api,
+          triggerReply,
+          threadID,
+          true
+        );
+
+        return;
+      }
+    } catch (error) {
+      console.error(
+        "Trigger system failed:",
+        error
+      );
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // PUBLIC RANDOM ROAST
+  // ONLY RUN WHEN BANAT IS ON
+  // -------------------------------------------------------------------------
+
+  if (
+    !RANDOM_ROAST_ENABLED ||
+    !roastEnabled
+  ) {
+    return;
+  }
+
+  if (
+    canRandomRoastThread(
+      threadId
+    )
+  ) {
+    const publicReply =
+      getNextPublicReply();
+
+    if (publicReply) {
+      lastRandomRoastByThread.set(
+        threadId,
+        Date.now()
+      );
+
+      sendReplyWithTyping(
+        api,
+        publicReply,
+        threadID,
+        true
+      );
+    }
   }
 }
 
-  
-// -------------------------------------------------------------------------
-// PUBLIC RANDOM ROAST
-// ONLY RUN WHEN BANAT IS ON
-// -------------------------------------------------------------------------
-
-if (
-  !RANDOM_ROAST_ENABLED ||
-  !roastEnabled
-) {
-  return;
-}
-
-if (
-  canRandomRoastThread(
-    threadId
-  )
-) {
-  const publicReply =
-    getNextPublicReply();
-
-  if (publicReply) {
-    lastRandomRoastByThread.set(
-      threadId,
-      Date.now()
-    );
-
-    sendReplyWithTyping(
-      api,
-      publicReply,
-      threadID,
-      true
-    );
-  }
-}
-  
 // —————————————————————————
 // Game Center fallback
 // —————————————————————————
