@@ -646,33 +646,33 @@ async function handleMessage(
   const senderId =
     String(senderID || "").trim();
 
-  // ============================================================
-  // AI TRAINING / ADAPTATION
-  // ============================================================
+// ============================================================
+// AI TRAINING / ADAPTATION
+// ============================================================
 
-  try {
-    const trainingHandled =
-      await handleTrainingCommand({
-        threadId,
-        senderId,
-        originalText,
-      });
-
-    if (trainingHandled) {
-      return;
-    }
-
-    await observeMessage({
-      threadId,
+try {
+  const trainingHandled =
+    await handleTrainingCommand(
       senderId,
-      body: originalText,
-    });
-  } catch (error) {
-    console.error(
-      "[AI ADAPTATION] Training/observation failed:",
-      error
+      threadId,
+      originalText
     );
+
+  if (trainingHandled) {
+    return;
   }
+
+  await observeMessage({
+    senderID: senderId,
+    threadID: threadId,
+    body: originalText,
+  });
+} catch (error) {
+  console.error(
+    "[AI ADAPTATION] Training/observation failed:",
+    error
+  );
+}
   
   // ———————————————————————
   // GLOBAL BOT CONTROL
