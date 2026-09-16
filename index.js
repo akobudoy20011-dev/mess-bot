@@ -679,6 +679,52 @@ async function handleMessage(
       error
     );
   }
+
+  try {
+    const trainingHandled =
+      await handleTrainingCommand(
+        senderId,
+        threadId,
+        originalText
+      );
+
+    if (trainingHandled) {
+      return;
+    }
+
+    await observeMessage({
+      senderID: senderId,
+      threadID: threadId,
+      body: originalText,
+    });
+  } catch (error) {
+    console.error(
+      "[AI ADAPTATION] Training/observation failed:",
+      error
+    );
+  }
+
+  // ============================================================
+  // ECLIPSE SYSTEM CONSOLE
+  // ============================================================
+
+  try {
+    if (
+      await handleDebugCommand(
+        api,
+        event,
+        text,
+        originalText
+      )
+    ) {
+      return;
+    }
+  } catch (error) {
+    console.error(
+      "[DEBUG] Handler failed:",
+      error
+    );
+  }
   
   // ———————————————————————
   // GLOBAL BOT CONTROL
