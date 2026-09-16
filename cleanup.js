@@ -2297,6 +2297,82 @@ async function registerGCActivity(
   );
 }
 
+async function getGCStatus() {
+  const ready =
+    await ensureGCActivityTable();
+
+  if (!ready) {
+    return {
+      total: 0,
+      active: 0,
+      inactive: 0,
+      featuresDisabled: 0,
+      archived: 0,
+    };
+  }
+
+  try {
+    const result =
+      await db.query(`
+        SELECT
+          COUNT(*)::int AS total,
+
+          COUNT(*) FILTER (
+            WHERE status = 'active'
+          )::int AS active,
+
+          COUNT(*) FILTER (
+            WHERE status = 'inactive'
+          )::int AS inactive,
+
+          COUNT(*) FILTER (
+            WHERE expensive_features_disabled = TRUE
+          )::int AS features_disabled,
+
+          COUNT(*) FILTER (
+            WHERE archived_at IS NOT NULL
+          )::int AS archived
+
+        FROM bot_gc_activity
+      `);
+
+    const row =
+      result.rows?.[0] || {};
+
+    return {
+      total:
+        Number(row.total || 0),
+
+      active:
+        Number(row.active || 0),
+
+      inactive:
+        Number(row.inactive || 0),
+
+      featuresDisabled:
+        Number(
+          row.features_disabled || 0
+        ),
+
+      archived:
+        Number(row.archived || 0),
+    };
+  } catch (error) {
+    console.error(
+      "[MAINTENANCE] GC status failed:",
+      error.message
+    );
+
+    return {
+      total: 0,
+      active: 0,
+      inactive: 0,
+      featuresDisabled: 0,
+      archived: 0,
+    };
+  }
+}
+
 // ============================================================
 // STATUS
 // ============================================================
