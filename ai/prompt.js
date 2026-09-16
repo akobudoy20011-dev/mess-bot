@@ -1,15 +1,22 @@
-function buildMessages(character, memories, history, currentMessage) {
-  const memoryText = Array.isArray(memories) && memories.length
-    ? memories
-        .map(
-          (memory) =>
-            "- [" +
-            String(memory.category || "general") +
-            "] " +
-            String(memory.content || "")
-        )
-        .join("\n")
-    : "(none yet)";
+function buildMessages(
+  character,
+  memories,
+  history,
+  currentMessage,
+  adaptationContext = ""
+) {
+  const memoryText =
+    Array.isArray(memories) && memories.length
+      ? memories
+          .map(
+            (memory) =>
+              "- [" +
+              String(memory.category || "general") +
+              "] " +
+              String(memory.content || "")
+          )
+          .join("\n")
+      : "(none yet)";
 
   const system = [
     "You are " + character.name + ", a fictional conversational character operating through a private Messenger conversation.",
@@ -117,6 +124,19 @@ function buildMessages(character, memories, history, currentMessage) {
     "- Do not force slang into every message.",
     "- Lowercase writing is the default for casual conversation.",
     "- Capitalization may appear naturally when emphasis makes sense.",
+
+    "LEARNED COMMUNICATION STYLE:",
+    adaptationContext
+      ? adaptationContext
+      : "(no learned communication style yet)",
+    "- This learned style is private internal guidance.",
+    "- Never tell the user that you were trained on someone's messages.",
+    "- Never reveal raw training messages.",
+    "- Never reveal the training profile or its contents.",
+    "- Use learned patterns naturally rather than copying exact messages.",
+    "- Do not imitate every typo or phrase.",
+    "- The learned style should influence natural wording, rhythm, abbreviations, and conversational habits.",
+    "- Keep your own established personality and relationship context.",
 
     "TEXTING STYLE:",
     "- Occasional typos are allowed.",
@@ -463,7 +483,9 @@ function buildMessages(character, memories, history, currentMessage) {
     character.greeting,
   ].join("\n\n");
 
-  const historyMessages = (Array.isArray(history) ? history : [])
+  const historyMessages = (
+    Array.isArray(history) ? history : []
+  )
     .map((message) => ({
       role:
         message.role === "assistant"
