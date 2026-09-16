@@ -21,7 +21,7 @@ const { handleRpgCommand } = require("./rpg");
 
 const {
   handleTrainingCommand,
-  observeMessage
+  observeMessage,
 } = require("./ai/adaptation");
 
 const {
@@ -106,9 +106,9 @@ const {
   getNextPublicReply,
 } = require("./triggers");
 
-// —————————————————————————
-// Configuration
-// —————————————————————————
+// ============================================================
+// CONFIGURATION
+// ============================================================
 
 const YOUTUBE_SEARCH_TIMEOUT_MS = 30_000;
 const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 180_000;
@@ -136,9 +136,9 @@ const RANDOM_ROAST_COOLDOWN_MS =
 const lastRandomRoastByThread = new Map();
 const activeThreads = new Set();
 
-// ===============================
+// ============================================================
 // MEMORY MONITOR
-// ===============================
+// ============================================================
 
 setInterval(() => {
   const m = process.memoryUsage();
@@ -159,17 +159,17 @@ setInterval(() => {
   );
 }, 60_000);
 
-// —————————————————————————
-// Global bot state
-// —————————————————————————
+// ============================================================
+// GLOBAL BOT STATE
+// ============================================================
 
 if (typeof global.botDisabled !== "boolean") {
   global.botDisabled = false;
 }
 
-// —————————————————————————
-// Timeout helper
-// —————————————————————————
+// ============================================================
+// TIMEOUT HELPER
+// ============================================================
 
 function withTimeout(
   operation,
@@ -182,7 +182,9 @@ function withTimeout(
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
-        reject(new Error(timeoutMessage));
+        reject(
+          new Error(timeoutMessage)
+        );
       }
     }, timeoutMs);
 
@@ -207,9 +209,9 @@ function withTimeout(
   });
 }
 
-// —————————————————————————
-// Messenger Promise wrapper
-// —————————————————————————
+// ============================================================
+// MESSENGER PROMISE WRAPPER
+// ============================================================
 
 function sendMessengerMessage(
   api,
@@ -235,9 +237,9 @@ function sendMessengerMessage(
   });
 }
 
-// —————————————————————————
-// YouTube audio
-// —————————————————————————
+// ============================================================
+// YOUTUBE AUDIO
+// ============================================================
 
 async function sendAudioTrack(
   api,
@@ -286,7 +288,7 @@ async function sendAudioTrack(
     const video = await withTimeout(
       () => searchYouTube(requestedSong),
       YOUTUBE_SEARCH_TIMEOUT_MS,
-      "YouTube search timed out after 3 seconds. Please try again."
+      "YouTube search timed out. Please try again."
     );
 
     if (!video || !video.url) {
@@ -302,7 +304,7 @@ async function sendAudioTrack(
           temporaryFile
         ),
       YOUTUBE_DOWNLOAD_TIMEOUT_MS,
-      "YouTube download timed out after 3 minutes. Please try again."
+      "YouTube download timed out. Please try again."
     );
 
     const fileInfo = await fsp.stat(
@@ -359,9 +361,9 @@ async function sendAudioTrack(
   }
 }
 
-// —————————————————————————
-// Render health-check web server
-// —————————————————————————
+// ============================================================
+// RENDER HEALTH-CHECK WEB SERVER
+// ============================================================
 
 const app = express();
 
@@ -405,9 +407,9 @@ server.on("error", (error) => {
   process.exitCode = 1;
 });
 
-// —————————————————————————
-// Facebook cookies
-// —————————————————————————
+// ============================================================
+// FACEBOOK COOKIES
+// ============================================================
 
 function readAppState() {
   const rawCookies =
@@ -490,9 +492,9 @@ try {
   process.exit(1);
 }
 
-// —————————————————————————
-// Login to Facebook
-// —————————————————————————
+// ============================================================
+// LOGIN TO FACEBOOK
+// ============================================================
 
 login(
   appState,
@@ -525,6 +527,10 @@ login(
       "Logged in successfully."
     );
 
+    // ========================================================
+    // DATABASE CONNECTION
+    // ========================================================
+
     try {
       await db.connect();
 
@@ -539,6 +545,34 @@ login(
 
       process.exit(1);
     }
+
+    // ========================================================
+    // AUTOMATIC CLEANUP
+    // ========================================================
+    //
+    // Starts ONLY after the database connection succeeds.
+    //
+    // cleanup.js is responsible for temporary/session/cache
+    // cleanup. Permanent RPG/economy progress is not supposed
+    // to be deleted by the cleanup system.
+    // ========================================================
+
+    try {
+      startCleanupScheduler();
+
+      console.log(
+        "[CLEANUP] Cleanup scheduler started."
+      );
+    } catch (error) {
+      console.error(
+        "[CLEANUP] Failed to start cleanup scheduler:",
+        error
+      );
+    }
+
+    // ========================================================
+    // FACEBOOK LISTENER OPTIONS
+    // ========================================================
 
     api.setOptions({
       listenEvents: true,
@@ -620,9 +654,9 @@ login(
   }
 );
 
-// —————————————————————————
-// Message handling
-// —————————————————————————
+// ============================================================
+// MESSAGE HANDLING
+// ============================================================
 
 async function handleMessage(
   api,
@@ -657,32 +691,20 @@ async function handleMessage(
   // ============================================================
   // AI TRAINING / ADAPTATION
   // ============================================================
-
-  try {
-    const trainingHandled =
-      await handleTrainingCommand(
-        api,
-        event,
-        text,
-        originalText
-      );
-
-    if (trainingHandled) {
-      return;
-    }
-
-    await observeMessage(
-      api,
-      event,
-      text,
-      originalText
-    );
-  } catch (error) {
-    console.error(
-      "[AI ADAPTATION] Training/observation failed:",
-      error
-    );
-  }
+  //
+  // IMPORTANT:
+  // This is the ONLY adaptation block.
+  //
+  // !lucien from BOT OWNER:
+  //   toggles training silently.
+  //
+  // Other users:
+  //   !lucien continues through the normal AI system.
+  //
+  // During training:
+  //   only OWNER messages are observed.
+  //
+  // ============================================================
 
   try {
     const trainingHandled =
@@ -729,10 +751,10 @@ async function handleMessage(
       error
     );
   }
-  
-  // ———————————————————————
+
+  // ============================================================
   // GLOBAL BOT CONTROL
-  // ———————————————————————
+  // ============================================================
 
   if (
     /^!(shutdown|startup)$/i.test(
@@ -816,16 +838,12 @@ async function handleMessage(
       (isStartup || isShutdown)
     ) {
       // Continue.
-    }
-
-    else if (
+    } else if (
       isAdmin &&
       isGameToggle
     ) {
       // Continue.
-    }
-
-    else if (
+    } else if (
       /^!(?:game|games|play)\b/i.test(
         trimmedText
       )
@@ -849,16 +867,14 @@ async function handleMessage(
       if (!gamesEnabled) {
         return;
       }
-    }
-
-    else {
+    } else {
       return;
     }
   }
 
-  // ———————————————————————
+  // ============================================================
   // SIMPLE DIRECT COMMANDS
-  // ———————————————————————
+  // ============================================================
 
   if (text === "!ping") {
     sendReplyWithTyping(
@@ -870,9 +886,9 @@ async function handleMessage(
     return;
   }
 
-  // ———————————————————————
+  // ============================================================
   // PUBLIC HELP
-  // ———————————————————————
+  // ============================================================
 
   if (text === "!help") {
     sendReplyWithTyping(
@@ -1001,9 +1017,9 @@ async function handleMessage(
     return;
   }
 
-  // ———————————————————————
+  // ============================================================
   // MUSIC
-  // ———————————————————————
+  // ============================================================
 
   if (
     text === "!play" ||
@@ -1026,7 +1042,6 @@ async function handleMessage(
   // ============================================================
   // RANDOM PICTURE
   // ============================================================
-  // IMPORTANT:
   // This uses pictures.js -> pictures/
   //
   // It NEVER calls getRandomMemePath().
@@ -1061,9 +1076,9 @@ async function handleMessage(
     return;
   }
 
-  // ———————————————————————
+  // ============================================================
   // BROADCAST
-  // ———————————————————————
+  // ============================================================
 
   if (
     text.startsWith("!broadcast ")
@@ -1109,9 +1124,9 @@ async function handleMessage(
     return;
   }
 
-  // ------------------------------------------------------------
-  // EVERYTHING BELOW THIS POINT REMAINS YOUR EXISTING CODE
-  // ------------------------------------------------------------
+  // ============================================================
+  // MODERATION
+  // ============================================================
 
   try {
     if (
@@ -1131,6 +1146,10 @@ async function handleMessage(
     );
   }
 
+  // ============================================================
+  // AI
+  // ============================================================
+
   try {
     if (
       await handleAiMessage(
@@ -1148,6 +1167,10 @@ async function handleMessage(
       error
     );
   }
+
+  // ============================================================
+  // RPG CHARACTER AI
+  // ============================================================
 
   try {
     if (
@@ -1167,6 +1190,10 @@ async function handleMessage(
     );
   }
 
+  // ============================================================
+  // GAME RESPONSE
+  // ============================================================
+
   try {
     if (
       await handleGameResponse(
@@ -1185,7 +1212,15 @@ async function handleMessage(
     );
   }
 
+  // ============================================================
+  // RPG / LOVE QUEST / GAMES / ECONOMY
+  // ============================================================
+
   try {
+    // ==========================================================
+    // RPG
+    // ==========================================================
+
     if (
       /^!rpg(?:\s|$)/i.test(
         originalText
@@ -1198,6 +1233,10 @@ async function handleMessage(
 
       const rpgArgs =
         rpgParts.slice(1);
+
+      // ========================================================
+      // LOVE QUEST
+      // ========================================================
 
       if (
         isSpecialPlayer(senderId)
@@ -1232,6 +1271,10 @@ async function handleMessage(
         }
       }
 
+      // ========================================================
+      // RPG EXPLORE
+      // ========================================================
+
       const isRpgExplore =
         /^!rpg\s+explore(?:\s|$)/i.test(
           originalText
@@ -1248,6 +1291,10 @@ async function handleMessage(
       if (
         rpgHandled
       ) {
+        // ======================================================
+        // LOVE QUEST DISCOVERY AFTER RPG EXPLORE
+        // ======================================================
+
         if (
           isRpgExplore &&
           isSpecialPlayer(senderId)
@@ -1269,6 +1316,10 @@ async function handleMessage(
         return;
       }
     }
+
+    // ==========================================================
+    // GAME TOGGLE
+    // ==========================================================
 
     const gameToggleMatch =
       text.match(
@@ -1321,6 +1372,10 @@ async function handleMessage(
       return;
     }
 
+    // ==========================================================
+    // GAME COMMANDS
+    // ==========================================================
+
     const gameMatch =
       text.match(
         /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
@@ -1336,6 +1391,10 @@ async function handleMessage(
               .trim()
               .split(/\s+/)
           : [];
+
+      // ========================================================
+      // GAME CENTER
+      // ========================================================
 
       if (
         gameCommand === "games"
@@ -1382,6 +1441,10 @@ async function handleMessage(
         return;
       }
 
+      // ========================================================
+      // CHECK GAME STATE
+      // ========================================================
+
       const gamesEnabled =
         await db.isGameEnabled(
           threadID
@@ -1401,6 +1464,10 @@ async function handleMessage(
         return;
       }
 
+      // ========================================================
+      // HANDLE GAME
+      // ========================================================
+
       if (
         await handleGamesCommand(
           api,
@@ -1412,6 +1479,10 @@ async function handleMessage(
         return;
       }
     }
+
+    // ==========================================================
+    // ECONOMY
+    // ==========================================================
 
     if (
       await handleEconomyCommand(
@@ -1429,6 +1500,10 @@ async function handleMessage(
       error
     );
   }
+
+  // ============================================================
+  // BANAT TOGGLE
+  // ============================================================
 
   if (
     text === "!banat on" ||
@@ -1455,6 +1530,7 @@ async function handleMessage(
         enabled
       );
 
+      // Clear cooldown when Banat is turned off.
       if (!enabled) {
         lastRandomRoastByThread.delete(
           threadId
@@ -1496,28 +1572,34 @@ async function handleMessage(
     return;
   }
 
-  // -------------------------------------------------------------------------
+  // ============================================================
   // BANAT STATUS
-  // -------------------------------------------------------------------------
+  // ============================================================
 
   let roastEnabled = false;
 
   try {
     roastEnabled =
-      await db.isRoastEnabled(threadId);
+      await db.isRoastEnabled(
+        threadId
+      );
   } catch (error) {
     console.error(
       "[BANAT] Failed to check roast status:",
       error
     );
 
+    // Fail closed.
+    //
+    // If the database check fails, Banat stays OFF rather
+    // than accidentally roasting someone.
     roastEnabled = false;
   }
 
-  // -------------------------------------------------------------------------
+  // ============================================================
   // TARGETED TRIGGER / ROAST
   // ONLY RUN WHEN BANAT IS ON
-  // -------------------------------------------------------------------------
+  // ============================================================
 
   if (roastEnabled) {
     try {
@@ -1546,10 +1628,10 @@ async function handleMessage(
     }
   }
 
-  // -------------------------------------------------------------------------
+  // ============================================================
   // PUBLIC RANDOM ROAST
   // ONLY RUN WHEN BANAT IS ON
-  // -------------------------------------------------------------------------
+  // ============================================================
 
   if (
     !RANDOM_ROAST_ENABLED ||
@@ -1582,9 +1664,9 @@ async function handleMessage(
   }
 }
 
-// —————————————————————————
-// Game Center fallback
-// —————————————————————————
+// ============================================================
+// GAME CENTER FALLBACK
+// ============================================================
 
 function sendGameCenter(
   api,
@@ -1642,9 +1724,9 @@ function sendGameCenter(
   );
 }
 
-// —————————————————————————
-// Random roast cooldown
-// —————————————————————————
+// ============================================================
+// RANDOM ROAST COOLDOWN
+// ============================================================
 
 function canRandomRoastThread(
   threadID
@@ -1663,6 +1745,7 @@ function canRandomRoastThread(
     return false;
   }
 
+  // Prevent unlimited growth of the Map.
   if (
     lastRandomRoastByThread.size >
     1000
@@ -1692,9 +1775,9 @@ function canRandomRoastThread(
   return true;
 }
 
-// —————————————————————————
-// Broadcast
-// —————————————————————————
+// ============================================================
+// BROADCAST
+// ============================================================
 
 function broadcastToAllThreads(
   api,
@@ -1760,9 +1843,9 @@ function broadcastToAllThreads(
   );
 }
 
-// —————————————————————————
-// Safe reply helper
-// —————————————————————————
+// ============================================================
+// SAFE REPLY HELPER
+// ============================================================
 
 function sendReplyWithTyping(
   api,
@@ -1835,9 +1918,9 @@ function sendReplyWithTyping(
   }, typingDelayMs);
 }
 
-// —————————————————————————
-// Meme helper
-// —————————————————————————
+// ============================================================
+// MEME HELPER
+// ============================================================
 
 function getRandomMemePath() {
   const memeDirectory =
