@@ -1,158 +1,126 @@
 "use strict";
 
 const os = require("os");
-
-// ============================================================
-// ECLIPSE SYSTEM CONSOLE
-// ============================================================
-//
-// Admin-only diagnostic system.
-//
-// Commands:
-// !debug
-// !debug ai
-// !debug adaptation
-// !debug banat
-// !debug rpg
-// !debug games
-// !debug env
-// !debug memory
-//
-// Never exposes:
-// - API keys
-// - cookies
-// - passwords
-// - raw training messages
-// - private adaptation data
-// ============================================================
-
 const db = require("./db");
 
-const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+const ADMIN_IDS = String(
+  process.env.ADMIN_IDS || ""
+)
   .split(",")
   .map((id) => id.trim())
   .filter(Boolean);
 
-const startedAt = Date.now();
-
-
 // ============================================================
-// SAFE HELPERS
+// HELPERS
 // ============================================================
 
 function safeRequire(path) {
   try {
-    const module = require(path);
-
     return {
       ok: true,
-      module,
+      module: require(path),
     };
   } catch (error) {
     return {
       ok: false,
-      error,
+      error: error.message,
     };
   }
 }
 
-
 function status(ok) {
-  return ok ? "🟢 ONLINE" : "🔴 OFFLINE";
+  return ok ? "🟢 ONLINE" : "🔴 ERROR";
 }
-
 
 function configured(value) {
-  return (
-    typeof value === "string" &&
-    value.trim().length > 0
-  );
+  return value && String(value).trim()
+    ? "🟢 CONFIGURED"
+    : "🔴 MISSING";
 }
 
-
 function formatUptime(seconds) {
-  const days = Math.floor(seconds / 86400);
+  seconds = Math.floor(seconds);
 
+  const days = Math.floor(seconds / 86400);
   seconds %= 86400;
 
   const hours = Math.floor(seconds / 3600);
-
   seconds %= 3600;
 
   const minutes = Math.floor(seconds / 60);
-
-  const secs = Math.floor(seconds % 60);
+  seconds %= 60;
 
   const parts = [];
 
-  if (days) {
-    parts.push(`${days}d`);
-  }
-
-  if (hours) {
-    parts.push(`${hours}h`);
-  }
-
-  if (minutes) {
-    parts.push(`${minutes}m`);
-  }
-
-  parts.push(`${secs}s`);
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (minutes) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
 
   return parts.join(" ");
 }
 
-
 function memoryStats() {
-  const memory = process.memoryUsage();
+  const mem = process.memoryUsage();
+
+  const total = os.totalmem();
+  const free = os.freemem();
+
+  const rssMB =
+    mem.rss / 1024 / 1024;
+
+  const heapUsedMB =
+    mem.heapUsed / 1024 / 1024;
+
+  const heapTotalMB =
+    mem.heapTotal / 1024 / 1024;
+
+  const externalMB =
+    mem.external / 1024 / 1024;
+
+  const totalMB =
+    total / 1024 / 1024;
+
+  const freeMB =
+    free / 1024 / 1024;
+
+  const usedMB =
+    totalMB - freeMB;
+
+  const ramUsagePercent =
+    total > 0
+      ? (usedMB / totalMB) * 100
+      : 0;
 
   return {
-    rss: Math.round(
-      memory.rss / 1024 / 1024
-    ),
+    rssMB: rssMB.toFixed(0),
+    heapUsedMB: heapUsedMB.toFixed(0),
+    heapTotalMB: heapTotalMB.toFixed(0),
+    externalMB: externalMB.toFixed(0),
 
-    heapUsed: Math.round(
-      memory.heapUsed / 1024 / 1024
-    ),
+    totalMB: totalMB.toFixed(0),
+    freeMB: freeMB.toFixed(0),
+    usedMB: usedMB.toFixed(0),
 
-    heapTotal: Math.round(
-      memory.heapTotal / 1024 / 1024
-    ),
-
-    external: Math.round(
-      memory.external / 1024 / 1024
-    ),
+    ramUsagePercent:
+      ramUsagePercent.toFixed(1),
   };
 }
-
 
 function moduleStatus(path) {
   const result = safeRequire(path);
 
-  if (!result.ok) {
-    return {
-      ok: false,
-      detail: result.error?.message || "Load failed",
-    };
-  }
-
   return {
-    ok: true,
-    detail: "Loaded",
+    ok: result.ok,
+    error: result.error || null,
   };
 }
 
-
-// ============================================================
-// ADMIN CHECK
-// ============================================================
-
 function isAdmin(senderID) {
   return ADMIN_IDS.includes(
-    String(senderID || "").trim()
+    String(senderID)
   );
 }
-
 
 // ============================================================
 // DATABASE CHECK
@@ -166,7 +134,8 @@ async function checkDatabase() {
     ) {
       return {
         ok: false,
-        detail: "db.query unavailable",
+        detail:
+          "db.query() is unavailable",
       };
     }
 
@@ -176,83 +145,70 @@ async function checkDatabase() {
 
     return {
       ok: true,
-      detail: "Neon PostgreSQL responded",
+      detail: "PostgreSQL responding",
     };
   } catch (error) {
     return {
       ok: false,
-      detail:
-        error?.message || "Database query failed",
+      detail: error.message,
     };
   }
 }
-
 
 // ============================================================
 // AI CHECK
 // ============================================================
 
 function checkAI() {
-  const character =
-    moduleStatus("./ai/characters");
+  const modules = {
+    characters:
+      moduleStatus("./ai/characters"),
 
-  const prompt =
-    moduleStatus("./ai/prompt");
+    prompt:
+      moduleStatus("./ai/prompt"),
 
-  const provider =
-    moduleStatus("./ai/provider");
+    provider:
+      moduleStatus("./ai/provider"),
 
-  const memory =
-    moduleStatus("./ai/memory");
+    memory:
+      moduleStatus("./ai/memory"),
 
-  const history =
-    moduleStatus("./ai/history");
+    history:
+      moduleStatus("./ai/history"),
 
-  const access =
-    moduleStatus("./ai/access");
+    access:
+      moduleStatus("./ai/access"),
+  };
+
+  const ok = Object.values(
+    modules
+  ).every((item) => item.ok);
 
   return {
-    ok:
-      character.ok &&
-      prompt.ok &&
-      provider.ok &&
-      memory.ok &&
-      history.ok &&
-      access.ok,
-
-    character,
-    prompt,
-    provider,
-    memory,
-    history,
-    access,
+    ok,
+    modules,
   };
 }
-
 
 // ============================================================
 // ADAPTATION CHECK
 // ============================================================
 
 function checkAdaptation() {
-  const adaptation =
+  const result =
     safeRequire("./ai/adaptation");
 
-  if (!adaptation.ok) {
+  if (!result.ok) {
     return {
       ok: false,
-      loaded: false,
-      ownerConfigured:
-        configured(
-          process.env.BOT_OWNER_ID
-        ),
-      detail:
-        adaptation.error?.message ||
-        "Could not load adaptation.js",
+      error: result.error,
     };
   }
 
-  const requiredFunctions = [
+  const adaptation =
+    result.module;
+
+  const required = [
     "handleTrainingCommand",
     "observeMessage",
     "getAdaptation",
@@ -261,110 +217,131 @@ function checkAdaptation() {
   ];
 
   const missing =
-    requiredFunctions.filter(
+    required.filter(
       (name) =>
-        typeof adaptation.module[name] !==
+        typeof adaptation[name] !==
         "function"
     );
 
   return {
     ok: missing.length === 0,
-
-    loaded: true,
-
-    ownerConfigured:
-      configured(
-        process.env.BOT_OWNER_ID
-      ),
-
     missing,
   };
 }
-
 
 // ============================================================
 // RPG CHECK
 // ============================================================
 
 function checkRPG() {
-  const rpg =
-    moduleStatus("./rpg");
+  const modules = {
+    main:
+      moduleStatus("./rpg"),
 
-  const character =
-    moduleStatus("./rpg/character-ai");
+    characterAI:
+      moduleStatus("./rpg/character-ai"),
 
-  const loveQuest =
-    moduleStatus("./rpg/love-quest");
+    loveQuest:
+      moduleStatus("./rpg/love-quest"),
 
-  const classes =
-    moduleStatus("./rpg/classes");
+    classes:
+      moduleStatus("./rpg/classes"),
+  };
+
+  const ok = Object.values(
+    modules
+  ).every((item) => item.ok);
 
   return {
-    ok:
-      rpg.ok &&
-      character.ok &&
-      loveQuest.ok &&
-      classes.ok,
-
-    rpg,
-    character,
-    loveQuest,
-    classes,
+    ok,
+    modules,
   };
 }
-
 
 // ============================================================
 // GAMES CHECK
 // ============================================================
 
 function checkGames() {
-  return moduleStatus("./games");
-}
+  const games =
+    moduleStatus("./games");
 
+  const trivia =
+    moduleStatus("./trivia-manager");
+
+  const riddles =
+    moduleStatus("./riddle-manager");
+
+  return {
+    ok:
+      games.ok &&
+      trivia.ok &&
+      riddles.ok,
+
+    games,
+    trivia,
+    riddles,
+  };
+}
 
 // ============================================================
 // MODERATION CHECK
 // ============================================================
 
 function checkModeration() {
-  return moduleStatus("./moderation");
-}
+  const moderation =
+    moduleStatus("./moderation");
 
+  return {
+    ok: moderation.ok,
+    moderation,
+  };
+}
 
 // ============================================================
 // TRIGGER CHECK
 // ============================================================
 
 function checkTriggers() {
-  return moduleStatus("./triggers");
-}
+  const triggers =
+    moduleStatus("./triggers");
 
+  return {
+    ok: triggers.ok,
+    triggers,
+  };
+}
 
 // ============================================================
 // ENVIRONMENT CHECK
 // ============================================================
-//
-// Only says CONFIGURED / MISSING.
-// NEVER prints values.
-// ============================================================
 
 function checkEnvironment() {
-  const variables = {
+  return {
     ADMIN_IDS:
-      configured(process.env.ADMIN_IDS),
+      configured(
+        process.env.ADMIN_IDS
+      ),
 
     BOT_OWNER_ID:
-      configured(process.env.BOT_OWNER_ID),
+      configured(
+        process.env.BOT_OWNER_ID
+      ),
 
     FB_COOKIES:
-      configured(process.env.FB_COOKIES),
+      configured(
+        process.env.FB_COOKIES
+      ),
 
     PORT:
-      configured(process.env.PORT),
+      configured(
+        process.env.PORT
+      ),
 
     RANDOM_ROAST:
-      configured(process.env.RANDOM_ROAST),
+      configured(
+        process.env.RANDOM_ROAST
+      ),
 
     RANDOM_ROAST_COOLDOWN_MS:
       configured(
@@ -376,19 +353,19 @@ function checkEnvironment() {
         process.env.STARTUP_THREAD_ID
       ),
   };
-
-  return variables;
 }
 
-
 // ============================================================
-// THREAD STATUS
+// THREAD CHECK
 // ============================================================
 
-async function checkThread(threadID) {
+async function checkThread(
+  threadID
+) {
   const result = {
-    banat: false,
-    games: false,
+    ok: true,
+    banat: "UNKNOWN",
+    games: "UNKNOWN",
   };
 
   try {
@@ -396,15 +373,18 @@ async function checkThread(threadID) {
       typeof db.isRoastEnabled ===
       "function"
     ) {
-      result.banat =
+      const enabled =
         await db.isRoastEnabled(
           threadID
         );
+
+      result.banat = enabled
+        ? "🟢 ON"
+        : "🔴 OFF";
     }
   } catch (error) {
-    result.banat = null;
-    result.banatError =
-      error?.message || "Banat check failed";
+    result.ok = false;
+    result.banat = "❌ ERROR";
   }
 
   try {
@@ -412,71 +392,55 @@ async function checkThread(threadID) {
       typeof db.isGameEnabled ===
       "function"
     ) {
-      result.games =
+      const enabled =
         await db.isGameEnabled(
           threadID
         );
+
+      result.games = enabled
+        ? "🟢 ON"
+        : "🔴 OFF";
     }
   } catch (error) {
-    result.games = null;
-    result.gamesError =
-      error?.message || "Games check failed";
+    result.ok = false;
+    result.games = "❌ ERROR";
   }
 
   return result;
 }
 
-
 // ============================================================
-// FULL SYSTEM SCAN
+// FULL REPORT
 // ============================================================
 
-async function buildFullReport(threadID) {
-  const database =
-    await checkDatabase();
+async function buildFullReport(
+  threadID
+) {
+  const [
+    database,
+    ai,
+    adaptation,
+    rpg,
+    games,
+    moderation,
+    triggers,
+    thread,
+  ] = await Promise.all([
+    checkDatabase(),
+    checkAI(),
+    checkAdaptation(),
+    checkRPG(),
+    checkGames(),
+    checkModeration(),
+    checkTriggers(),
+    checkThread(threadID),
+  ]);
 
-  const ai =
-    checkAI();
-
-  const adaptation =
-    checkAdaptation();
-
-  const rpg =
-    checkRPG();
-
-  const games =
-    checkGames();
-
-  const moderation =
-    checkModeration();
-
-  const triggers =
-    checkTriggers();
-
-  const environment =
+  const env =
     checkEnvironment();
-
-  const thread =
-    await checkThread(threadID);
 
   const memory =
     memoryStats();
-
-  const uptime =
-    process.uptime();
-
-  const systems = [
-    database.ok,
-    ai.ok,
-    adaptation.ok,
-    rpg.ok,
-    games.ok,
-    moderation.ok,
-    triggers.ok,
-  ];
-
-  const online =
-    systems.filter(Boolean).length;
 
   return {
     database,
@@ -486,372 +450,362 @@ async function buildFullReport(threadID) {
     games,
     moderation,
     triggers,
-    environment,
     thread,
+    env,
     memory,
-    uptime,
-    online,
-    total: systems.length,
   };
 }
-
 
 // ============================================================
 // MAIN DEBUG REPORT
 // ============================================================
 
-function buildMainReport(report) {
-  const env = report.environment;
+function buildMainReport(
+  report
+) {
+  const allSystems = [
+    report.database.ok,
+    report.ai.ok,
+    report.adaptation.ok,
+    report.rpg.ok,
+    report.games.ok,
+    report.moderation.ok,
+    report.triggers.ok,
+  ];
 
-  const adaptationOwner =
-    env.BOT_OWNER_ID
-      ? "CONFIGURED"
-      : "MISSING";
+  const online =
+    allSystems.filter(Boolean)
+      .length;
+
+  const total =
+    allSystems.length;
 
   return [
     "╭━━━━━━━━━━━━━━━━━━━━━━╮",
-    "      🌑 ECLIPSE",
+    "       🌑 ECLIPSE",
     "     SYSTEM CONSOLE",
     "╰━━━━━━━━━━━━━━━━━━━━━━╯",
     "",
-    `⚡ CORE HEALTH`,
-    `${status(report.database.ok)} DATABASE`,
-    `${status(report.ai.ok)} AI SYSTEM`,
-    `${status(report.adaptation.ok)} ADAPTATION`,
-    `${status(report.rpg.ok)} RPG SYSTEM`,
-    `${status(report.games.ok)} GAME ENGINE`,
-    `${status(report.moderation.ok)} MODERATION`,
-    `${status(report.triggers.ok)} TRIGGERS`,
+    `SYSTEMS     ${online}/${total} ONLINE`,
     "",
-    `📡 SYSTEMS: ${report.online}/${report.total} ONLINE`,
-    "",
-    "━━━━━━━━━━━━━━━━━━━━━━",
-    "🌐 CURRENT GC",
-    "",
-    `🔥 BANAT: ${
-      report.thread.banat === true
-        ? "🟢 ON"
-        : report.thread.banat === false
-        ? "🔴 OFF"
-        : "⚠️ UNKNOWN"
-    }`,
-    "",
-    `🎮 GAMES: ${
-      report.thread.games === true
-        ? "🟢 ON"
-        : report.thread.games === false
-        ? "🔴 OFF"
-        : "⚠️ UNKNOWN"
-    }`,
-    "",
-    "━━━━━━━━━━━━━━━━━━━━━━",
-    "🧠 AI CONFIG",
-    "",
-    `Character: ${
-      report.ai.character.ok
-        ? "🟢 loaded"
-        : "🔴 failed"
-    }`,
-    `Provider: ${
-      report.ai.provider.ok
-        ? "🟢 loaded"
-        : "🔴 failed"
-    }`,
-    `Memory: ${
-      report.ai.memory.ok
-        ? "🟢 loaded"
-        : "🔴 failed"
-    }`,
-    `History: ${
-      report.ai.history.ok
-        ? "🟢 loaded"
-        : "🔴 failed"
-    }`,
-    "",
-    "━━━━━━━━━━━━━━━━━━━━━━",
-    "🧬 ADAPTATION",
-    "",
-    `Module: ${
-      report.adaptation.loaded
-        ? "🟢 loaded"
-        : "🔴 failed"
-    }`,
-    `Owner: ${adaptationOwner}`,
-    `Profile API: ${
+    `Database    ${status(
+      report.database.ok
+    )}`,
+    `AI Core     ${status(
+      report.ai.ok
+    )}`,
+    `Adaptation  ${status(
       report.adaptation.ok
-        ? "🟢 ready"
-        : "🔴 incomplete"
-    }`,
+    )}`,
+    `RPG Core    ${status(
+      report.rpg.ok
+    )}`,
+    `Games       ${status(
+      report.games.ok
+    )}`,
+    `Moderation  ${status(
+      report.moderation.ok
+    )}`,
+    `Triggers    ${status(
+      report.triggers.ok
+    )}`,
+    "",
+    `Banat       ${report.thread.banat}`,
+    `Games       ${report.thread.games}`,
+    "",
+    `Uptime      ${formatUptime(
+      process.uptime()
+    )}`,
     "",
     "━━━━━━━━━━━━━━━━━━━━━━",
-    "🖥️ PROCESS",
-    "",
-    `Uptime: ${formatUptime(report.uptime)}`,
-    `RAM: ${report.memory.rss} MB RSS`,
-    `Heap: ${report.memory.heapUsed}/${report.memory.heapTotal} MB`,
-    `Host: ${os.platform()} ${os.arch()}`,
-    "",
-    "━━━━━━━━━━━━━━━━━━━━━━",
-    "🔐 ENVIRONMENT",
-    "",
-    `ADMIN_IDS: ${
-      env.ADMIN_IDS
-        ? "🟢"
-        : "🔴"
-    }`,
-    `BOT_OWNER_ID: ${
-      env.BOT_OWNER_ID
-        ? "🟢"
-        : "🔴"
-    }`,
-    `FB_COOKIES: ${
-      env.FB_COOKIES
-        ? "🟢"
-        : "🔴"
-    }`,
-    "",
-    "━━━━━━━━━━━━━━━━━━━━━━",
-    "🛠️ COMMANDS",
-    "",
-    "!debug",
-    "!debug ai",
-    "!debug adaptation",
-    "!debug banat",
-    "!debug rpg",
-    "!debug games",
-    "!debug env",
-    "!debug memory",
-    "",
-    "╰━━━━━━━━━━━━━━━━━━━━━━╯",
   ].join("\n");
 }
-
 
 // ============================================================
 // AI REPORT
 // ============================================================
 
-function buildAIReport(report) {
+function buildAIReport(
+  report
+) {
+  const m =
+    report.ai.modules;
+
   return [
     "╭━━━━━━━━━━━━━━━━━━━━━━╮",
     "       🌑 ECLIPSE",
-    "       AI DIAGNOSTIC",
+    "          AI CORE",
     "╰━━━━━━━━━━━━━━━━━━━━━━╯",
     "",
-    `Character   ${status(report.character.ok)}`,
-    `Prompt      ${status(report.prompt.ok)}`,
-    `Provider    ${status(report.provider.ok)}`,
-    `Memory      ${status(report.memory.ok)}`,
-    `History     ${status(report.history.ok)}`,
-    `Access      ${status(report.access.ok)}`,
+    `Characters  ${status(
+      m.characters.ok
+    )}`,
+    `Prompt      ${status(
+      m.prompt.ok
+    )}`,
+    `Provider    ${status(
+      m.provider.ok
+    )}`,
+    `Memory      ${status(
+      m.memory.ok
+    )}`,
+    `History     ${status(
+      m.history.ok
+    )}`,
+    `Access      ${status(
+      m.access.ok
+    )}`,
     "",
-    `Overall: ${
-      report.ok
-        ? "🟢 AI STACK READY"
-        : "🔴 AI STACK HAS ERRORS"
-    }`,
+    "AI modules loaded.",
     "",
     "━━━━━━━━━━━━━━━━━━━━━━",
   ].join("\n");
 }
-
 
 // ============================================================
 // ADAPTATION REPORT
 // ============================================================
 
-function buildAdaptationReport(report) {
-  const missing =
-    report.missing?.length
-      ? report.missing.join(", ")
-      : "none";
+function buildAdaptationReport(
+  report
+) {
+  const a =
+    report.adaptation;
+
+  if (!a.ok) {
+    return [
+      "╭━━━━━━━━━━━━━━━━━━━━━━╮",
+      "       🌑 ECLIPSE",
+      "       ADAPTATION",
+      "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      "🔴 Adaptation system error.",
+      "",
+      `Error: ${
+        a.error ||
+        "Missing functions"
+      }`,
+      "",
+      a.missing &&
+      a.missing.length
+        ? `Missing: ${a.missing.join(
+            ", "
+          )}`
+        : "",
+      "",
+      "━━━━━━━━━━━━━━━━━━━━━━",
+    ].join("\n");
+  }
 
   return [
     "╭━━━━━━━━━━━━━━━━━━━━━━╮",
     "       🌑 ECLIPSE",
-    "   ADAPTATION CONSOLE",
+    "       ADAPTATION",
     "╰━━━━━━━━━━━━━━━━━━━━━━╯",
     "",
-    `Module: ${
-      report.loaded
-        ? "🟢 LOADED"
-        : "🔴 FAILED"
-    }`,
-    `Owner ID: ${
-      report.ownerConfigured
-        ? "🟢 CONFIGURED"
-        : "🔴 MISSING"
-    }`,
-    `API: ${
-      report.ok
-        ? "🟢 COMPLETE"
-        : "🔴 INCOMPLETE"
-    }`,
+    "🟢 Module loaded.",
     "",
-    `Missing: ${missing}`,
+    "Training commands  ✓",
+    "Message observer   ✓",
+    "Profile storage    ✓",
+    "Prompt context     ✓",
+    "Reset system       ✓",
+    "",
+    "🔒 Training data protected.",
     "",
     "━━━━━━━━━━━━━━━━━━━━━━",
-    "",
-    report.ok
-      ? "🧬 Learning interface is ready."
-      : "⚠️ Adaptation needs attention.",
-    "",
   ].join("\n");
 }
-
 
 // ============================================================
 // BANAT REPORT
 // ============================================================
 
-function buildBanatReport(report) {
+function buildBanatReport(
+  report
+) {
   return [
     "╭━━━━━━━━━━━━━━━━━━━━━━╮",
     "       🌑 ECLIPSE",
-    "      BANAT SCAN",
+    "        BANAT",
     "╰━━━━━━━━━━━━━━━━━━━━━━╯",
     "",
-    `Current GC: ${
-      report.banat === true
-        ? "🟢 BANAT ON"
-        : report.banat === false
-        ? "🔴 BANAT OFF"
-        : "⚠️ UNKNOWN"
-    }`,
+    `Current GC     ${report.thread.banat}`,
     "",
-    `Random Roast: ${
-      /^(0|false|no|off)$/i.test(
-        process.env.RANDOM_ROAST || ""
-      )
-        ? "🔴 disabled"
-        : "🟢 enabled"
-    }`,
-    "",
-    `Trigger Module: ${
+    "Trigger system",
+    `             ${status(
       report.triggers.ok
-        ? "🟢 loaded"
-        : "🔴 failed"
-    }`,
+    )}`,
     "",
-    "Targeted triggers are",
-    "gated by the current GC",
-    "Banat status.",
+    "Automatic roast",
+    `             ${report.thread.banat}`,
     "",
     "━━━━━━━━━━━━━━━━━━━━━━",
   ].join("\n");
 }
-
 
 // ============================================================
 // RPG REPORT
 // ============================================================
 
-function buildRPGReport(report) {
+function buildRPGReport(
+  report
+) {
+  const r =
+    report.rpg.modules;
+
   return [
     "╭━━━━━━━━━━━━━━━━━━━━━━╮",
     "       🌑 ECLIPSE",
-    "      RPG DIAGNOSTIC",
+    "        RPG CORE",
     "╰━━━━━━━━━━━━━━━━━━━━━━╯",
     "",
-    `RPG Core       ${status(report.rpg.ok)}`,
-    `Character AI   ${status(report.character.ok)}`,
-    `Love Quest     ${status(report.loveQuest.ok)}`,
-    `Classes        ${status(report.classes.ok)}`,
-    "",
-    report.ok
-      ? "⚔️ RPG STACK READY"
-      : "⚠️ RPG STACK HAS ERRORS",
+    `Main RPG      ${status(
+      r.main.ok
+    )}`,
+    `Character AI  ${status(
+      r.characterAI.ok
+    )}`,
+    `Love Quest     ${status(
+      r.loveQuest.ok
+    )}`,
+    `Classes        ${status(
+      r.classes.ok
+    )}`,
     "",
     "━━━━━━━━━━━━━━━━━━━━━━",
   ].join("\n");
 }
-
 
 // ============================================================
 // GAMES REPORT
 // ============================================================
 
-function buildGamesReport(report, threadState) {
+function buildGamesReport(
+  report
+) {
   return [
     "╭━━━━━━━━━━━━━━━━━━━━━━╮",
     "       🌑 ECLIPSE",
-    "     GAME DIAGNOSTIC",
+    "       GAME CENTER",
     "╰━━━━━━━━━━━━━━━━━━━━━━╯",
     "",
-    `Module: ${
-      report.ok
-        ? "🟢 loaded"
-        : "🔴 failed"
-    }`,
+    `Games          ${status(
+      report.games.games.ok
+    )}`,
+    `Trivia         ${status(
+      report.games.trivia.ok
+    )}`,
+    `Riddles        ${status(
+      report.games.riddles.ok
+    )}`,
     "",
-    `Current GC: ${
-      threadState.games === true
-        ? "🟢 ENABLED"
-        : threadState.games === false
-        ? "🔴 DISABLED"
-        : "⚠️ UNKNOWN"
-    }`,
+    `GC Games       ${report.thread.games}`,
     "",
     "━━━━━━━━━━━━━━━━━━━━━━",
   ].join("\n");
 }
-
 
 // ============================================================
 // ENV REPORT
 // ============================================================
 
-function buildEnvReport(env) {
+function buildEnvReport(
+  report
+) {
+  const e =
+    report.env;
+
   return [
     "╭━━━━━━━━━━━━━━━━━━━━━━╮",
     "       🌑 ECLIPSE",
-    "    CONFIGURATION SCAN",
+    "     ENVIRONMENT",
     "╰━━━━━━━━━━━━━━━━━━━━━━╯",
     "",
-    `ADMIN_IDS: ${env.ADMIN_IDS ? "🟢 SET" : "🔴 MISSING"}`,
-    `BOT_OWNER_ID: ${env.BOT_OWNER_ID ? "🟢 SET" : "🔴 MISSING"}`,
-    `FB_COOKIES: ${env.FB_COOKIES ? "🟢 SET" : "🔴 MISSING"}`,
-    `PORT: ${env.PORT ? "🟢 SET" : "⚪ DEFAULT"}`,
-    `RANDOM_ROAST: ${env.RANDOM_ROAST ? "🟢 SET" : "⚪ DEFAULT"}`,
-    `ROAST COOLDOWN: ${env.RANDOM_ROAST_COOLDOWN_MS ? "🟢 SET" : "⚪ DEFAULT"}`,
-    `STARTUP THREAD: ${env.STARTUP_THREAD_ID ? "🟢 SET" : "⚪ OPTIONAL"}`,
+    `ADMIN_IDS        ${e.ADMIN_IDS}`,
+    `BOT_OWNER_ID     ${e.BOT_OWNER_ID}`,
+    `FB_COOKIES       ${e.FB_COOKIES}`,
+    `PORT             ${e.PORT}`,
+    `RANDOM_ROAST     ${e.RANDOM_ROAST}`,
+    `ROAST COOLDOWN   ${e.RANDOM_ROAST_COOLDOWN_MS}`,
+    `STARTUP THREAD   ${e.STARTUP_THREAD_ID}`,
     "",
-    "🔐 Values are intentionally hidden.",
+    "🔒 Values hidden for security.",
     "",
     "━━━━━━━━━━━━━━━━━━━━━━",
   ].join("\n");
 }
 
-
 // ============================================================
 // MEMORY REPORT
 // ============================================================
 
-function buildMemoryReport(memory) {
+function buildMemoryReport() {
+  const m =
+    memoryStats();
+
+  const usage =
+    Number(
+      m.ramUsagePercent
+    );
+
+  let indicator =
+    "🟢 Memory usage looks normal.";
+
+  if (usage >= 80) {
+    indicator =
+      "🔴 High system RAM usage.";
+  } else if (usage >= 65) {
+    indicator =
+      "🟡 Memory usage is elevated.";
+  }
+
   return [
     "╭━━━━━━━━━━━━━━━━━━━━━━╮",
     "       🌑 ECLIPSE",
     "     MEMORY MONITOR",
     "╰━━━━━━━━━━━━━━━━━━━━━━╯",
     "",
-    `RSS       ${memory.rss} MB`,
-    `Heap Used ${memory.heapUsed} MB`,
-    `Heap Max  ${memory.heapTotal} MB`,
-    `External  ${memory.external} MB`,
+    `RSS          ${m.rssMB} MB`,
+    `Heap Used    ${m.heapUsedMB} MB`,
+    `Heap Max     ${m.heapTotalMB} MB`,
+    `External     ${m.externalMB} MB`,
     "",
-    memory.rss < 450
-      ? "🟢 Memory usage looks normal."
-      : memory.rss < 650
-      ? "🟡 Memory usage is elevated."
-      : "🔴 Memory usage is high.",
+    `RAM Usage    ${m.ramUsagePercent}%`,
+    `RAM Free     ${m.freeMB} MB`,
+    `RAM Total    ${m.totalMB} MB`,
+    "",
+    indicator,
     "",
     "━━━━━━━━━━━━━━━━━━━━━━",
   ].join("\n");
 }
 
+// ============================================================
+// MEMORY / DATABASE REPORT
+// ============================================================
+
+function buildDatabaseReport(
+  report
+) {
+  return [
+    "╭━━━━━━━━━━━━━━━━━━━━━━╮",
+    "       🌑 ECLIPSE",
+    "       DATABASE",
+    "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+    "",
+    status(
+      report.database.ok
+    ),
+    "",
+    report.database.detail,
+    "",
+    "━━━━━━━━━━━━━━━━━━━━━━",
+  ].join("\n");
+}
 
 // ============================================================
-// COMMAND HANDLER
+// DEBUG COMMAND HANDLER
 // ============================================================
 
 async function handleDebugCommand(
@@ -860,193 +814,166 @@ async function handleDebugCommand(
   text,
   originalText
 ) {
-  const senderID =
+  const cleanText =
     String(
-      event?.senderID || ""
-    ).trim();
+      originalText ||
+        text ||
+        ""
+    )
+      .trim()
+      .toLowerCase();
 
   if (
-    !/^!debug(?:\s|$)/i.test(
-      originalText
+    !cleanText.startsWith(
+      "!debug"
     )
   ) {
     return false;
   }
 
-  // Admin only.
+  const senderID =
+    String(
+      event.senderID ||
+        event.senderId ||
+        ""
+    );
+
+  // Non-admin users cannot use debug.
   if (!isAdmin(senderID)) {
     return true;
   }
 
-  const args =
-    originalText
-      .trim()
-      .split(/\s+/)
-      .slice(1);
+  const threadID =
+    String(
+      event.threadID ||
+        event.threadId ||
+        ""
+    );
 
-  const subcommand =
-    (
-      args[0] || ""
-    ).toLowerCase();
+  const parts =
+    cleanText
+      .split(/\s+/)
+      .filter(Boolean);
+
+  const command =
+    parts[1] || "main";
 
   try {
-    let message = "";
+    const report =
+      await buildFullReport(
+        threadID
+      );
 
-    if (!subcommand) {
-      const report =
-        await buildFullReport(
-          String(event.threadID)
-        );
+    let response;
 
-      message =
-        buildMainReport(report);
-    }
-
-    else if (
-      subcommand === "ai"
-    ) {
-      const report =
-        checkAI();
-
-      message =
-        buildAIReport(report);
-    }
-
-    else if (
-      subcommand === "adaptation"
-    ) {
-      const report =
-        checkAdaptation();
-
-      message =
-        buildAdaptationReport(
-          report
-        );
-    }
-
-    else if (
-      subcommand === "banat"
-    ) {
-      const thread =
-        await checkThread(
-          String(event.threadID)
-        );
-
-      const triggers =
-        checkTriggers();
-
-      message =
-        buildBanatReport({
-          ...thread,
-          triggers,
-        });
-    }
-
-    else if (
-      subcommand === "rpg"
-    ) {
-      const report =
-        checkRPG();
-
-      message =
-        buildRPGReport(report);
-    }
-
-    else if (
-      subcommand === "games"
-    ) {
-      const report =
-        checkGames();
-
-      const thread =
-        await checkThread(
-          String(event.threadID)
-        );
-
-      message =
-        buildGamesReport(
-          report,
-          thread
-        );
-    }
-
-    else if (
-      subcommand === "env"
-    ) {
-      message =
-        buildEnvReport(
-          checkEnvironment()
-        );
-    }
-
-    else if (
-      subcommand === "memory"
-    ) {
-      message =
-        buildMemoryReport(
-          memoryStats()
-        );
-    }
-
-    else {
-      message = [
-        "╭━━━━━━━━━━━━━━━━━━━━━━╮",
-        "       🌑 ECLIPSE",
-        "    UNKNOWN DIAGNOSTIC",
-        "╰━━━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        `Unknown module: ${subcommand}`,
-        "",
-        "Available:",
-        "!debug",
-        "!debug ai",
-        "!debug adaptation",
-        "!debug banat",
-        "!debug rpg",
-        "!debug games",
-        "!debug env",
-        "!debug memory",
-      ].join("\n");
-    }
-
-    api.sendMessage(
-      message,
-      event.threadID,
-      (error) => {
-        if (error) {
-          console.error(
-            "[DEBUG] Send failed:",
-            error
+    switch (command) {
+      case "ai":
+        response =
+          buildAIReport(
+            report
           );
-        }
-      }
-    );
+        break;
+
+      case "adaptation":
+      case "adapt":
+      case "training":
+        response =
+          buildAdaptationReport(
+            report
+          );
+        break;
+
+      case "banat":
+      case "roast":
+        response =
+          buildBanatReport(
+            report
+          );
+        break;
+
+      case "rpg":
+        response =
+          buildRPGReport(
+            report
+          );
+        break;
+
+      case "games":
+      case "game":
+        response =
+          buildGamesReport(
+            report
+          );
+        break;
+
+      case "env":
+      case "environment":
+        response =
+          buildEnvReport(
+            report
+          );
+        break;
+
+      case "memory":
+      case "ram":
+        response =
+          buildMemoryReport();
+        break;
+
+      case "db":
+      case "database":
+        response =
+          buildDatabaseReport(
+            report
+          );
+        break;
+
+      case "main":
+      default:
+        response =
+          buildMainReport(
+            report
+          );
+        break;
+    }
+
+    if (
+      typeof api.sendMessage ===
+      "function"
+    ) {
+      await api.sendMessage(
+        response,
+        threadID
+      );
+    }
+
+    return true;
   } catch (error) {
     console.error(
-      "[DEBUG] Diagnostic failed:",
+      "[DEBUG] Handler failed:",
       error
     );
 
-    api.sendMessage(
-      [
-        "🌑 ECLIPSE SYSTEM CONSOLE",
-        "",
-        "🔴 Diagnostic failed.",
-        "",
-        "Check Render logs for details.",
-      ].join("\n"),
-      event.threadID,
-      () => {}
-    );
+    try {
+      if (
+        typeof api.sendMessage ===
+        "function"
+      ) {
+        await api.sendMessage(
+          "❌ ECLIPSE DEBUG encountered an internal error. Check Render logs.",
+          threadID
+        );
+      }
+    } catch (sendError) {
+      console.error(
+        "[DEBUG] Failed to send error:",
+        sendError
+      );
+    }
+
+    return true;
   }
-
-  return true;
 }
-
-
-// ============================================================
-// EXPORT
-// ============================================================
 
 module.exports = {
   handleDebugCommand,
