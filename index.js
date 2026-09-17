@@ -196,6 +196,7 @@ function withTimeout(
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
+
         reject(
           new Error(timeoutMessage)
         );
@@ -226,6 +227,11 @@ function withTimeout(
 // ============================================================
 // MESSENGER PROMISE WRAPPER
 // ============================================================
+//
+// IMPORTANT:
+// The callback's messageInfo is returned so music can capture
+// the message ID and edit the original status message.
+// ============================================================
 
 function sendMessengerMessage(
   api,
@@ -237,6 +243,54 @@ function sendMessengerMessage(
       api.sendMessage(
         message,
         threadID,
+        (error, messageInfo) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve(
+              messageInfo || null
+            );
+          }
+        }
+      );
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// ============================================================
+// EDIT MESSENGER MESSAGE
+// ============================================================
+//
+// Used by music so SEARCHING / PREPARING / DOWNLOADING all
+// reuse the exact same Messenger message.
+// ============================================================
+
+function editMessengerMessage(
+  api,
+  message,
+  messageID
+) {
+  return new Promise((resolve, reject) => {
+    if (
+      !messageID ||
+      typeof api.editMessage !==
+        "function"
+    ) {
+      reject(
+        new Error(
+          "Messenger editMessage is unavailable."
+        )
+      );
+
+      return;
+    }
+
+    try {
+      api.editMessage(
+        message,
+        messageID,
         (error) => {
           if (error) {
             reject(error);
@@ -281,43 +335,50 @@ function buildMusicPanel({
     pending: {
       icon: "୨୧",
       label: "PENDING",
-      detail: "waiting for an available music slot ♡",
+      detail:
+        "waiting for an available music slot ♡",
     },
 
     searching: {
       icon: "୨୧",
       label: "SEARCHING YOUTUBE",
-      detail: "finding your song ♡",
+      detail:
+        "finding your song ♡",
     },
 
     processing: {
       icon: "♡",
       label: "PREPARING AUDIO",
-      detail: "softly processing your track ♡",
+      detail:
+        "softly processing your track ♡",
     },
 
     downloading: {
       icon: "୨୧",
       label: "DOWNLOADING",
-      detail: "getting your song ready ♡",
+      detail:
+        "getting your song ready ♡",
     },
 
     streaming: {
       icon: "♡",
       label: "NOW PLAYING",
-      detail: "enjoy your music ♡",
+      detail:
+        "enjoy your music ♡",
     },
 
     failed: {
       icon: "୨୧",
       label: "PLAYBACK FAILED",
-      detail: "try another search ♡",
+      detail:
+        "try another search ♡",
     },
 
     cancelled: {
       icon: "୨୧",
       label: "CANCELLED",
-      detail: "music request was cancelled ♡",
+      detail:
+        "music request was cancelled ♡",
     },
   };
 
@@ -327,7 +388,9 @@ function buildMusicPanel({
 
   const queueLine =
     position !== null &&
-    Number.isFinite(Number(position))
+    Number.isFinite(
+      Number(position)
+    )
       ? `│ ♡ queue   #${Number(position)}`
       : null;
 
@@ -388,14 +451,20 @@ function getMusicStats() {
     totalJobs += queue.length;
 
     for (const job of queue) {
-      if (job.status === "pending") {
+      if (
+        job.status ===
+        "pending"
+      ) {
         pendingJobs++;
       }
 
       if (
-        job.status === "searching" ||
-        job.status === "processing" ||
-        job.status === "downloading"
+        job.status ===
+          "searching" ||
+        job.status ===
+          "processing" ||
+        job.status ===
+          "downloading"
       ) {
         activeJobs++;
       }
@@ -508,7 +577,9 @@ function formatMusicBytes(bytes) {
   }
 
   return `${value.toFixed(
-    unitIndex === 0 ? 0 : 1
+    unitIndex === 0
+      ? 0
+      : 1
   )} ${units[unitIndex]}`;
 }
 
@@ -538,7 +609,8 @@ function processMusicQueue() {
 
     if (
       job.cancelled ||
-      job.status !== "pending"
+      job.status !==
+        "pending"
     ) {
       continue;
     }
@@ -566,6 +638,18 @@ function processMusicQueue() {
 // ============================================================
 // MUSIC JOB
 // ============================================================
+//
+// FLOW:
+//
+// 1. SEND ONE "SEARCHING YOUTUBE" MESSAGE.
+// 2. SEARCH.
+// 3. EDIT SAME MESSAGE → "PREPARING AUDIO".
+// 4. EDIT SAME MESSAGE → "DOWNLOADING".
+// 5. DOWNLOAD.
+// 6. SEND NEW MESSAGE containing the actual audio.
+// 7. On failure, EDIT the original status message.
+//
+// ============================================================
 
 async function processMusicJob(job) {
   const {
@@ -582,6 +666,9 @@ async function processMusicJob(job) {
   job.temporaryFile =
     temporaryFile;
 
+  let statusMessageID =
+    null;
+
   try {
     if (
       global.botDisabled === true
@@ -590,17 +677,47 @@ async function processMusicJob(job) {
       return;
     }
 
+    // ========================================================
+    // STEP 1
+    // CREATE ONE STATUS MESSAGE
+    // ========================================================
+
     job.status =
       "searching";
 
-    await sendMessengerMessage(
-      api,
-      buildMusicPanel({
-        title: job.requestedSong,
-        state: "searching",
-      }),
-      threadID
-    );
+    const statusMessage =
+      await sendMessengerMessage(
+        api,
+        buildMusicPanel({
+          title:
+            job.requestedSong,
+          state:
+            "searching",
+        }),
+        threadID
+      );
+
+    // ws3-fca normally exposes the message ID as messageID.
+    // The fallbacks make this safer across versions.
+    statusMessageID =
+      statusMessage?.messageID ||
+      statusMessage?.messageId ||
+      statusMessage?.id ||
+      null;
+
+    job.statusMessageID =
+      statusMessageID;
+
+    if (!statusMessageID) {
+      console.warn(
+        `[Music] Job ${job.id}: Messenger did not return a message ID.`
+      );
+    }
+
+    // ========================================================
+    // STEP 2
+    // SEARCH YOUTUBE
+    // ========================================================
 
     const video =
       await withTimeout(
@@ -645,23 +762,44 @@ async function processMusicJob(job) {
       duration = "--:--";
     }
 
-    job.title = title;
-    job.author = author;
-    job.duration = duration;
+    job.title =
+      title;
+
+    job.author =
+      author;
+
+    job.duration =
+      duration;
+
+    // ========================================================
+    // STEP 3
+    // EDIT SAME MESSAGE
+    // SEARCHING → PREPARING AUDIO
+    // ========================================================
 
     job.status =
       "processing";
 
-    await sendMessengerMessage(
-      api,
-      buildMusicPanel({
-        title,
-        author,
-        duration,
-        state: "processing",
-      }),
-      threadID
-    );
+    if (statusMessageID) {
+      try {
+        await editMessengerMessage(
+          api,
+          buildMusicPanel({
+            title,
+            author,
+            duration,
+            state:
+              "processing",
+          }),
+          statusMessageID
+        );
+      } catch (editError) {
+        console.error(
+          `[Music] Failed to edit status to processing for job ${job.id}:`,
+          editError
+        );
+      }
+    }
 
     if (
       global.botDisabled === true
@@ -670,19 +808,40 @@ async function processMusicJob(job) {
       return;
     }
 
+    // ========================================================
+    // STEP 4
+    // EDIT SAME MESSAGE
+    // PREPARING AUDIO → DOWNLOADING
+    // ========================================================
+
     job.status =
       "downloading";
 
-    await sendMessengerMessage(
-      api,
-      buildMusicPanel({
-        title,
-        author,
-        duration,
-        state: "downloading",
-      }),
-      threadID
-    );
+    if (statusMessageID) {
+      try {
+        await editMessengerMessage(
+          api,
+          buildMusicPanel({
+            title,
+            author,
+            duration,
+            state:
+              "downloading",
+          }),
+          statusMessageID
+        );
+      } catch (editError) {
+        console.error(
+          `[Music] Failed to edit status to downloading for job ${job.id}:`,
+          editError
+        );
+      }
+    }
+
+    // ========================================================
+    // STEP 5
+    // DOWNLOAD AUDIO
+    // ========================================================
 
     await withTimeout(
       () =>
@@ -693,6 +852,11 @@ async function processMusicJob(job) {
       MUSIC_DOWNLOAD_TIMEOUT_MS,
       "YouTube audio download timed out."
     );
+
+    // ========================================================
+    // STEP 6
+    // VERIFY AUDIO
+    // ========================================================
 
     const fileInfo =
       await fsp.stat(
@@ -728,6 +892,12 @@ async function processMusicJob(job) {
       return;
     }
 
+    // ========================================================
+    // STEP 7
+    // SEND NEW MESSAGE
+    // THIS IS THE ACTUAL SONG
+    // ========================================================
+
     job.status =
       "streaming";
 
@@ -736,7 +906,8 @@ async function processMusicJob(job) {
         title,
         author,
         duration,
-        state: "streaming",
+        state:
+          "streaming",
       });
 
     await withTimeout(
@@ -746,6 +917,7 @@ async function processMusicJob(job) {
           {
             body:
               playerMessage,
+
             attachment:
               fs.createReadStream(
                 temporaryFile
@@ -781,7 +953,8 @@ async function processMusicJob(job) {
       String(error);
 
     if (
-      errorMessage.length > 500
+      errorMessage.length >
+      500
     ) {
       errorMessage =
         errorMessage.slice(
@@ -790,27 +963,49 @@ async function processMusicJob(job) {
         );
     }
 
+    // ========================================================
+    // FAILURE
+    // REUSE ORIGINAL STATUS MESSAGE
+    // ========================================================
+
+    const failedPanel =
+      buildMusicPanel({
+        title:
+          job.title ||
+          job.requestedSong,
+
+        author:
+          job.author ||
+          "",
+
+        duration:
+          job.duration ||
+          "--:--",
+
+        state:
+          "failed",
+      }) +
+      `\n\n♡ ${errorMessage}`;
+
     try {
-      await sendMessengerMessage(
-        api,
-        [
-          "╭─────── ୨୧ ♡ ୨୧ ───────╮",
-          "          🎀 MUSIC",
-          "╰─────── ୨୧ ♡ ୨୧ ───────╯",
-          "",
-          "୨୧  PLAYBACK FAILED",
-          "",
-          `♡ ${errorMessage}`,
-          "",
-          "୨୧ try another song ♡",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
+      if (
+        statusMessageID
+      ) {
+        await editMessengerMessage(
+          api,
+          failedPanel,
+          statusMessageID
+        );
+      } else {
+        await sendMessengerMessage(
+          api,
+          failedPanel,
+          threadID
+        );
+      }
     } catch (sendError) {
       console.error(
-        "[Music] Failed to send error message:",
+        "[Music] Failed to update error message:",
         sendError
       );
     }
@@ -822,6 +1017,9 @@ async function processMusicJob(job) {
       .catch(() => {});
 
     job.temporaryFile =
+      null;
+
+    job.statusMessageID =
       null;
   }
 }
@@ -861,30 +1059,52 @@ function enqueueMusic(
   const job = {
     id:
       ++musicJobCounter,
+
     api,
+
     threadID:
       String(threadID),
+
     requestedSong:
       requestedSong.trim(),
+
     title:
       requestedSong.trim(),
+
     author: "",
-    duration: "--:--",
-    status: "pending",
+
+    duration:
+      "--:--",
+
+    status:
+      "pending",
+
     createdAt:
       Date.now(),
-    temporaryFile: null,
-    cancelled: false,
+
+    temporaryFile:
+      null,
+
+    statusMessageID:
+      null,
+
+    cancelled:
+      false,
   };
 
   queue.push(job);
   musicPendingJobs.push(job);
 
   return {
-    accepted: true,
+    accepted:
+      true,
+
     job,
+
     position:
-      getMusicQueuePosition(job),
+      getMusicQueuePosition(
+        job
+      ),
   };
 }
 
@@ -1046,9 +1266,6 @@ function handleMusicCommand(
     position,
   } = result;
 
-  const queue =
-    getMusicQueue(threadID);
-
   if (
     position > 1
   ) {
@@ -1057,8 +1274,10 @@ function handleMusicCommand(
       buildMusicPanel({
         title:
           cleanSong,
+
         state:
           "pending",
+
         position,
       }),
       threadID
@@ -1650,6 +1869,9 @@ async function handleMessage(
       pauseMatch[1] ===
       "status"
     ) {
+      const music =
+        getMusicStats();
+
       sendReplyWithTyping(
         api,
         [
@@ -1667,12 +1889,10 @@ async function handleMessage(
           "",
           "୨୧ music",
           `    ♡ active downloads: ${
-            getMusicStats()
-              .activeDownloads
+            music.activeDownloads
           }/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
           `    ♡ pending: ${
-            getMusicStats()
-              .waitingGlobal
+            music.waitingGlobal
           }`,
           "",
           "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
@@ -1781,6 +2001,9 @@ async function handleMessage(
       rawControl ===
       "bot status"
     ) {
+      const music =
+        getMusicStats();
+
       sendReplyWithTyping(
         api,
         [
@@ -1801,8 +2024,8 @@ async function handleMessage(
           }`,
           "",
           "୨୧ music protection",
-          `    ♡ global downloads: ${getMusicStats().activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
-          `    ♡ global pending: ${getMusicStats().waitingGlobal}`,
+          `    ♡ global downloads: ${music.activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
+          `    ♡ global pending: ${music.waitingGlobal}`,
           "",
           "୨୧ controls",
           "    ♡ !bot on",
@@ -3524,6 +3747,7 @@ function sendReplyWithTyping(
             ? {
                 body:
                   message,
+
                 attachment:
                   fs.createReadStream(
                     memePath
