@@ -3,14 +3,33 @@
  * ==========
  * Messenger Economy System
  *
- * Fixed:
+ * Features:
  * - strict amount parsing
  * - atomic deposit/withdraw via db.js
  * - safer admin arithmetic
  * - safer payment parsing
  * - admin !economy menu
  * - admin !xp menu
+ * - admin money/bank/XP commands support @mentions
  * - preserves RPG shop/inventory integration
+ *
+ * Admin targeting:
+ *   !addmoney 5000
+ *   !addmoney @user 5000
+ *
+ *   !removemoney 5000
+ *   !removemoney @user 5000
+ *
+ *   !setmoney 5000
+ *   !setmoney @user 5000
+ *
+ *   !addbank @user 5000
+ *   !removebank @user 5000
+ *   !setbank @user 5000
+ *
+ *   !addxp @user 5000
+ *   !removexp @user 5000
+ *   !setxp @user 5000
  *
  * NOTE:
  * This is a virtual game economy.
@@ -260,6 +279,93 @@ function randInt(min, max) {
   );
 }
 
+/**
+ * Get the target user from a Messenger @mention.
+ *
+ * If no mention exists, the command targets the admin
+ * who sent the command. This preserves the old behavior.
+ *
+ * Messenger event.mentions can be shaped differently
+ * depending on the FCA version, so this supports:
+ *
+ *   event.mentions = { "123": "Name" }
+ *
+ * and similar object-based mention structures.
+ */
+function getMentionedUserID(event) {
+  if (
+    !event ||
+    !event.mentions ||
+    typeof event.mentions !== "object"
+  ) {
+    return null;
+  }
+
+  const ids =
+    Object.keys(event.mentions);
+
+  if (!ids.length) {
+    return null;
+  }
+
+  return String(ids[0]);
+}
+
+/**
+ * Resolve:
+ *
+ *   !command 5000
+ *
+ * as:
+ *   target = sender
+ *   amount = 5000
+ *
+ * and:
+ *
+ *   !command @user 5000
+ *
+ * as:
+ *   target = mentioned user
+ *   amount = 5000
+ *
+ * The amount is taken from the first numeric argument
+ * after the command/mention.
+ */
+function resolveAdminTarget(event, args) {
+  const mentionedID =
+    getMentionedUserID(event);
+
+  if (mentionedID) {
+    const amountInput =
+      args.find(
+        (arg) =>
+          /^\d[\d,]*$/.test(
+            String(arg).trim()
+          )
+      );
+
+    return {
+      targetID: mentionedID,
+      amountInput
+    };
+  }
+
+  return {
+    targetID: String(event.senderID),
+    amountInput: args[0]
+  };
+}
+
+async function getTargetUser(
+  threadID,
+  targetID
+) {
+  return db.getUser(
+    threadID,
+    targetID
+  );
+}
+
 // ============================================================================
 // ADMIN MENUS
 // ============================================================================
@@ -270,13 +376,19 @@ function createEconomyAdminMenu() {
     [
       "୨୧ money",
       "    ♡ !addmoney <amount>",
+      "    ♡ !addmoney @user <amount>",
       "    ♡ !removemoney <amount>",
+      "    ♡ !removemoney @user <amount>",
       "    ♡ !setmoney <amount>",
+      "    ♡ !setmoney @user <amount>",
       "",
       "୨୧ bank",
       "    ♡ !addbank <amount>",
+      "    ♡ !addbank @user <amount>",
       "    ♡ !removebank <amount>",
+      "    ♡ !removebank @user <amount>",
       "    ♡ !setbank <amount>",
+      "    ♡ !setbank @user <amount>",
       "",
       "୨୧ maintenance",
       "    ♡ !resetmoney",
@@ -297,12 +409,11 @@ function createXpAdminMenu() {
     [
       "୨୧ controls",
       "    ♡ !addxp <amount>",
+      "    ♡ !addxp @user <amount>",
       "    ♡ !removexp <amount>",
+      "    ♡ !removexp @user <amount>",
       "    ♡ !setxp <amount>",
-      "",
-      "୨୧ player",
-      "    ♡ !profile",
-      "    ♡ !rpg profile",
+      "    ♡ !setxp @user <amount>",
       "",
       "୨୧ information",
       "    ♡ add XP directly",
@@ -1501,9 +1612,18 @@ async function handleAddMoney(
     );
   }
 
+  const {
+    targetID,
+    amountInput
+  } =
+    resolveAdminTarget(
+      event,
+      args
+    );
+
   const amount =
     parseAdminAmount(
-      args[0]
+      amountInput
     );
 
   if (
@@ -1513,7 +1633,7 @@ async function handleAddMoney(
       api,
       threadID,
       createError(
-        "Usage: !addmoney <amount>\n\nExample:\n!addmoney 1000000"
+        "Usage:\n!addmoney <amount>\n!addmoney @user <amount>\n\nExample:\n!addmoney @user 1000000"
       )
     );
   }
@@ -1522,15 +1642,18 @@ async function handleAddMoney(
     const newBalance =
       await db.addBalance(
         threadID,
-        senderID,
+        targetID,
         amount
       );
 
     const user =
-      await db.getUser(
+      await getTargetUser(
         threadID,
-        senderID
+        targetID
       );
+
+    const targetName =
+      getDisplayName(user);
 
     await reply(
       api,
@@ -1538,7 +1661,7 @@ async function handleAddMoney(
       createBox(
         "👑 ADMIN — ADD MONEY",
         [
-          `👤 ${getDisplayName(user)}`,
+          `👤 ${targetName}`,
           "",
           `💰 Added: +${formatCoins(amount)} coins`,
           `💵 New Wallet: ${formatCoins(newBalance)} coins`
@@ -1586,9 +1709,18 @@ async function handleRemoveMoney(
     );
   }
 
+  const {
+    targetID,
+    amountInput
+  } =
+    resolveAdminTarget(
+      event,
+      args
+    );
+
   const amount =
     parseAdminAmount(
-      args[0]
+      amountInput
     );
 
   if (
@@ -1598,16 +1730,40 @@ async function handleRemoveMoney(
       api,
       threadID,
       createError(
-        "Usage: !removemoney <amount>\n\nExample:\n!removemoney 5000"
+        "Usage:\n!removemoney <amount>\n!removemoney @user <amount>\n\nExample:\n!removemoney @user 5000"
       )
     );
   }
 
   try {
+    const targetUser =
+      await getTargetUser(
+        threadID,
+        targetID
+      );
+
+    const currentBalance =
+      Number(
+        targetUser.balance
+      ) || 0;
+
+    if (
+      amount >
+      currentBalance
+    ) {
+      return reply(
+        api,
+        threadID,
+        createError(
+          `${getDisplayName(targetUser)} only has ${formatCoins(currentBalance)} coins in their wallet.`
+        )
+      );
+    }
+
     const newBalance =
       await db.addBalance(
         threadID,
-        senderID,
+        targetID,
         -amount
       );
 
@@ -1617,6 +1773,8 @@ async function handleRemoveMoney(
       createBox(
         "👑 ADMIN — REMOVE MONEY",
         [
+          `👤 ${getDisplayName(targetUser)}`,
+          "",
           `💸 Removed: -${formatCoins(amount)} coins`,
           `💵 New Wallet: ${formatCoins(newBalance)} coins`
         ]
@@ -1633,7 +1791,7 @@ async function handleRemoveMoney(
       threadID,
       createError(
         error.message ||
-        "Failed to remove money. Make sure your wallet has enough coins."
+        "Failed to remove money."
       )
     );
   }
@@ -1663,9 +1821,18 @@ async function handleSetMoney(
     );
   }
 
+  const {
+    targetID,
+    amountInput
+  } =
+    resolveAdminTarget(
+      event,
+      args
+    );
+
   const amount =
     parseAdminAmount(
-      args[0],
+      amountInput,
       true
     );
 
@@ -1676,7 +1843,7 @@ async function handleSetMoney(
       api,
       threadID,
       createError(
-        "Usage: !setmoney <amount>\n\nExample:\n!setmoney 999999999"
+        "Usage:\n!setmoney <amount>\n!setmoney @user <amount>\n\nExample:\n!setmoney @user 999999999"
       )
     );
   }
@@ -1684,11 +1851,17 @@ async function handleSetMoney(
   try {
     await db.updateUser(
       threadID,
-      senderID,
+      targetID,
       {
         balance: amount
       }
     );
+
+    const user =
+      await getTargetUser(
+        threadID,
+        targetID
+      );
 
     await reply(
       api,
@@ -1696,6 +1869,8 @@ async function handleSetMoney(
       createBox(
         "👑 ADMIN — SET MONEY",
         [
+          `👤 ${getDisplayName(user)}`,
+          "",
           `💵 Wallet set to: ${formatCoins(amount)} coins`
         ]
       )
@@ -1742,9 +1917,18 @@ async function handleAdminBank(
     );
   }
 
+  const {
+    targetID,
+    amountInput
+  } =
+    resolveAdminTarget(
+      event,
+      args
+    );
+
   const amount =
     parseAdminAmount(
-      args[0],
+      amountInput,
       mode === "setbank"
     );
 
@@ -1755,16 +1939,16 @@ async function handleAdminBank(
       api,
       threadID,
       createError(
-        `Usage: !${mode} <amount>\n\nExample:\n!${mode} 100000`
+        `Usage:\n!${mode} <amount>\n!${mode} @user <amount>\n\nExample:\n!${mode} @user 100000`
       )
     );
   }
 
   try {
     const user =
-      await db.getUser(
+      await getTargetUser(
         threadID,
-        senderID
+        targetID
       );
 
     const currentBank =
@@ -1793,7 +1977,7 @@ async function handleAdminBank(
           api,
           threadID,
           createError(
-            `You only have ${formatCoins(currentBank)} coins in your bank.`
+            `${getDisplayName(user)} only has ${formatCoins(currentBank)} coins in their bank.`
           )
         );
       }
@@ -1808,7 +1992,7 @@ async function handleAdminBank(
 
     await db.updateUser(
       threadID,
-      senderID,
+      targetID,
       {
         bank_balance:
           newBank
@@ -1821,6 +2005,8 @@ async function handleAdminBank(
       createBox(
         `👑 ADMIN — ${mode.toUpperCase()}`,
         [
+          `👤 ${getDisplayName(user)}`,
+          "",
           `🏦 Bank: ${formatCoins(newBank)} coins`
         ]
       )
@@ -1867,9 +2053,18 @@ async function handleAdminXp(
     );
   }
 
+  const {
+    targetID,
+    amountInput
+  } =
+    resolveAdminTarget(
+      event,
+      args
+    );
+
   const amount =
     parseAdminAmount(
-      args[0],
+      amountInput,
       mode === "setxp"
     );
 
@@ -1880,16 +2075,16 @@ async function handleAdminXp(
       api,
       threadID,
       createError(
-        `Usage: !${mode} <amount>\n\nExample:\n!${mode} 50000`
+        `Usage:\n!${mode} <amount>\n!${mode} @user <amount>\n\nExample:\n!${mode} @user 50000`
       )
     );
   }
 
   try {
     const user =
-      await db.getUser(
+      await getTargetUser(
         threadID,
-        senderID
+        targetID
       );
 
     const currentXp =
@@ -1923,7 +2118,7 @@ async function handleAdminXp(
 
     await db.updateUser(
       threadID,
-      senderID,
+      targetID,
       {
         xp: newXp
       }
@@ -1935,6 +2130,8 @@ async function handleAdminXp(
       createBox(
         `👑 ADMIN — ${mode.toUpperCase()}`,
         [
+          `👤 ${getDisplayName(user)}`,
+          "",
           `✨ XP: ${formatCoins(newXp)}`
         ]
       )
@@ -2052,7 +2249,7 @@ async function handleEconomyCommand(
   }
 
   // --------------------------------------------------------------------------
-  // ADMIN
+  // ADMIN MONEY
   // --------------------------------------------------------------------------
 
   if (
@@ -2094,6 +2291,10 @@ async function handleEconomyCommand(
     return true;
   }
 
+  // --------------------------------------------------------------------------
+  // ADMIN RESET
+  // --------------------------------------------------------------------------
+
   if (
     economyCommand ===
     "!resetmoney"
@@ -2106,6 +2307,10 @@ async function handleEconomyCommand(
 
     return true;
   }
+
+  // --------------------------------------------------------------------------
+  // ADMIN BANK
+  // --------------------------------------------------------------------------
 
   if (
     economyCommand ===
@@ -2148,6 +2353,10 @@ async function handleEconomyCommand(
 
     return true;
   }
+
+  // --------------------------------------------------------------------------
+  // ADMIN XP
+  // --------------------------------------------------------------------------
 
   if (
     economyCommand ===
