@@ -11,25 +11,52 @@
  * - admin !economy menu
  * - admin !xp menu
  * - admin money/bank/XP commands support @mentions
+ * - admin money/bank/XP commands support message replies
  * - preserves RPG shop/inventory integration
  *
- * Admin targeting:
+ * Admin targeting priority:
+ *
+ *   1. Reply target
+ *      Reply to someone's message:
+ *      !removemoney 8000
+ *
+ *   2. @mention target
+ *      !removemoney @user 8000
+ *
+ *   3. Sender
+ *      !removemoney 8000
+ *
+ * Examples:
+ *
  *   !addmoney 5000
  *   !addmoney @user 5000
+ *   [reply] !addmoney 5000
  *
  *   !removemoney 5000
  *   !removemoney @user 5000
+ *   [reply] !removemoney 5000
  *
  *   !setmoney 5000
  *   !setmoney @user 5000
+ *   [reply] !setmoney 5000
  *
  *   !addbank @user 5000
+ *   [reply] !addbank 5000
+ *
  *   !removebank @user 5000
+ *   [reply] !removebank 5000
+ *
  *   !setbank @user 5000
+ *   [reply] !setbank 5000
  *
  *   !addxp @user 5000
+ *   [reply] !addxp 5000
+ *
  *   !removexp @user 5000
+ *   [reply] !removexp 5000
+ *
  *   !setxp @user 5000
+ *   [reply] !setxp 5000
  *
  * NOTE:
  * This is a virtual game economy.
@@ -279,69 +306,152 @@ function randInt(min, max) {
   );
 }
 
+// ============================================================================
+// ADMIN TARGET RESOLUTION
+// ============================================================================
+
 /**
  * Get the target user from a Messenger @mention.
  *
- * If no mention exists, the command targets the admin
- * who sent the command. This preserves the old behavior.
+ * Normal FCA/ws3-fca format:
  *
- * Messenger event.mentions can be shaped differently
- * depending on the FCA version, so this supports:
+ *   event.mentions = {
+ *     "123456789": "Username"
+ *   }
  *
- *   event.mentions = { "123": "Name" }
- *
- * and similar object-based mention structures.
+ * Some versions can expose slightly different structures,
+ * so this also supports object entries containing an ID.
  */
 function getMentionedUserID(event) {
+  const mentions = event?.mentions;
+
   if (
-    !event ||
-    !event.mentions ||
-    typeof event.mentions !== "object"
+    !mentions ||
+    typeof mentions !== "object"
   ) {
     return null;
   }
 
-  const ids =
-    Object.keys(event.mentions);
+  // Standard FCA format:
+  // { "123456789": "Username" }
+  const ids = Object.keys(mentions);
 
-  if (!ids.length) {
-    return null;
+  if (ids.length) {
+    return String(ids[0]);
   }
 
-  return String(ids[0]);
+  // Compatibility with array-based mention formats.
+  if (Array.isArray(mentions)) {
+    for (const mention of mentions) {
+      if (
+        !mention ||
+        typeof mention !== "object"
+      ) {
+        continue;
+      }
+
+      const id =
+        mention.id ??
+        mention.userID ??
+        mention.userId ??
+        mention.senderID ??
+        mention.senderId;
+
+      if (id != null) {
+        return String(id);
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
- * Resolve:
+ * Resolve the target for an admin economy command.
  *
- *   !command 5000
+ * Priority:
  *
- * as:
- *   target = sender
- *   amount = 5000
+ * 1. MESSAGE REPLY
  *
- * and:
+ *    Reply to someone's message:
  *
- *   !command @user 5000
+ *      !removemoney 8000
  *
- * as:
- *   target = mentioned user
- *   amount = 5000
+ *    The person whose message was replied to becomes
+ *    the target.
  *
- * The amount is taken from the first numeric argument
- * after the command/mention.
+ * 2. @MENTION
+ *
+ *      !removemoney @user 8000
+ *
+ * 3. SENDER
+ *
+ *      !removemoney 8000
+ *
+ *    With no reply or mention, the command affects the
+ *    admin who sent it. This preserves the old behavior.
+ *
+ * The amount is detected from the first numeric argument.
+ *
+ * Examples:
+ *
+ *   args = ["8000"]
+ *   reply target exists
+ *   => target = replied user
+ *   => amount = 8000
+ *
+ *   args = ["@user", "8000"]
+ *   mention exists
+ *   => target = mentioned user
+ *   => amount = 8000
+ *
+ *   args = ["8000"]
+ *   no reply/mention
+ *   => target = sender
+ *   => amount = 8000
  */
 function resolveAdminTarget(event, args) {
+  args = Array.isArray(args)
+    ? args
+    : [];
+
+  // --------------------------------------------------------------------------
+  // 1. REPLY TARGET
+  // --------------------------------------------------------------------------
+
+  const replyTargetID =
+    event?.messageReply?.senderID ??
+    event?.messageReply?.senderId ??
+    event?.messageReply?.authorID ??
+    event?.messageReply?.authorId;
+
+  if (replyTargetID != null) {
+    const amountInput =
+      args.find((arg) =>
+        /^\d[\d,]*$/.test(
+          String(arg).trim()
+        )
+      );
+
+    return {
+      targetID: String(replyTargetID),
+      amountInput
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // 2. @MENTION TARGET
+  // --------------------------------------------------------------------------
+
   const mentionedID =
     getMentionedUserID(event);
 
   if (mentionedID) {
     const amountInput =
-      args.find(
-        (arg) =>
-          /^\d[\d,]*$/.test(
-            String(arg).trim()
-          )
+      args.find((arg) =>
+        /^\d[\d,]*$/.test(
+          String(arg).trim()
+        )
       );
 
     return {
@@ -349,6 +459,10 @@ function resolveAdminTarget(event, args) {
       amountInput
     };
   }
+
+  // --------------------------------------------------------------------------
+  // 3. DEFAULT TO SENDER
+  // --------------------------------------------------------------------------
 
   return {
     targetID: String(event.senderID),
@@ -377,18 +491,24 @@ function createEconomyAdminMenu() {
       "୨୧ money",
       "    ♡ !addmoney <amount>",
       "    ♡ !addmoney @user <amount>",
+      "    ♡ reply + !addmoney <amount>",
       "    ♡ !removemoney <amount>",
       "    ♡ !removemoney @user <amount>",
+      "    ♡ reply + !removemoney <amount>",
       "    ♡ !setmoney <amount>",
       "    ♡ !setmoney @user <amount>",
+      "    ♡ reply + !setmoney <amount>",
       "",
       "୨୧ bank",
       "    ♡ !addbank <amount>",
       "    ♡ !addbank @user <amount>",
+      "    ♡ reply + !addbank <amount>",
       "    ♡ !removebank <amount>",
       "    ♡ !removebank @user <amount>",
+      "    ♡ reply + !removebank <amount>",
       "    ♡ !setbank <amount>",
       "    ♡ !setbank @user <amount>",
+      "    ♡ reply + !setbank <amount>",
       "",
       "୨୧ maintenance",
       "    ♡ !resetmoney",
@@ -410,10 +530,13 @@ function createXpAdminMenu() {
       "୨୧ controls",
       "    ♡ !addxp <amount>",
       "    ♡ !addxp @user <amount>",
+      "    ♡ reply + !addxp <amount>",
       "    ♡ !removexp <amount>",
       "    ♡ !removexp @user <amount>",
+      "    ♡ reply + !removexp <amount>",
       "    ♡ !setxp <amount>",
       "    ♡ !setxp @user <amount>",
+      "    ♡ reply + !setxp <amount>",
       "",
       "୨୧ information",
       "    ♡ add XP directly",
@@ -1633,7 +1756,7 @@ async function handleAddMoney(
       api,
       threadID,
       createError(
-        "Usage:\n!addmoney <amount>\n!addmoney @user <amount>\n\nExample:\n!addmoney @user 1000000"
+        "Usage:\n!addmoney <amount>\n!addmoney @user <amount>\n\nReply to a user's message:\n!addmoney <amount>\n\nExample:\n!addmoney @user 1000000"
       )
     );
   }
@@ -1730,7 +1853,7 @@ async function handleRemoveMoney(
       api,
       threadID,
       createError(
-        "Usage:\n!removemoney <amount>\n!removemoney @user <amount>\n\nExample:\n!removemoney @user 5000"
+        "Usage:\n!removemoney <amount>\n!removemoney @user <amount>\n\nReply to a user's message:\n!removemoney <amount>\n\nExample:\n!removemoney @user 5000"
       )
     );
   }
@@ -1843,7 +1966,7 @@ async function handleSetMoney(
       api,
       threadID,
       createError(
-        "Usage:\n!setmoney <amount>\n!setmoney @user <amount>\n\nExample:\n!setmoney @user 999999999"
+        "Usage:\n!setmoney <amount>\n!setmoney @user <amount>\n\nReply to a user's message:\n!setmoney <amount>\n\nExample:\n!setmoney @user 999999999"
       )
     );
   }
@@ -1939,7 +2062,7 @@ async function handleAdminBank(
       api,
       threadID,
       createError(
-        `Usage:\n!${mode} <amount>\n!${mode} @user <amount>\n\nExample:\n!${mode} @user 100000`
+        `Usage:\n!${mode} <amount>\n!${mode} @user <amount>\n\nReply to a user's message:\n!${mode} <amount>\n\nExample:\n!${mode} @user 100000`
       )
     );
   }
@@ -2075,7 +2198,7 @@ async function handleAdminXp(
       api,
       threadID,
       createError(
-        `Usage:\n!${mode} <amount>\n!${mode} @user <amount>\n\nExample:\n!${mode} @user 50000`
+        `Usage:\n!${mode} <amount>\n!${mode} @user <amount>\n\nReply to a user's message:\n!${mode} <amount>\n\nExample:\n!${mode} @user 50000`
       )
     );
   }
