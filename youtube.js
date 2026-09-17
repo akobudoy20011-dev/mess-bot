@@ -191,6 +191,16 @@ async function searchYouTube(query) {
     `[YouTube] Found: ${video.title || cleanQuery}`
   );
 
+  /*
+   * Return the YouTube video ID as well.
+   *
+   * lyrics.js uses this to look for:
+   *
+   * data/lyrics/<videoId>.lrc
+   *
+   * This is more reliable than matching only the
+   * YouTube title.
+   */
   return {
     title:
       video.title ||
@@ -198,6 +208,10 @@ async function searchYouTube(query) {
 
     url:
       video.url,
+
+    videoId:
+      video.videoId ||
+      null,
 
     duration:
       video.duration ||
