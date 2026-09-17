@@ -231,13 +231,13 @@ async function connect() {
       severity INTEGER NOT NULL,
       confidence REAL NOT NULL,
       suggested_action TEXT NOT NULL DEFAULT 'none',
-      action TEXT NOT NULL,    ALTER TABLE automod_incidents
-      ADD COLUMN IF NOT EXISTS suggested_action TEXT NOT NULL DEFAULT 'none';
-
-
+      action TEXT NOT NULL,
       reason TEXT,
       created_at BIGINT NOT NULL
     );
+
+    ALTER TABLE automod_incidents
+      ADD COLUMN IF NOT EXISTS suggested_action TEXT NOT NULL DEFAULT 'none';
 
     CREATE INDEX IF NOT EXISTS idx_automod_incidents_user
       ON automod_incidents(thread_id, user_id, created_at);
