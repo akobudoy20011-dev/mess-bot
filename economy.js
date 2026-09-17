@@ -3,40 +3,12 @@
  * ==========
  * Messenger Economy System
  *
- * Commands:
- *   !balance / !bal
- *   !bank
- *   !deposit / !dep <amount|all>
- *   !withdraw / !wd <amount|all>
- *   !daily
- *   !work
- *   !pay <amount>       — reply to someone's message
- *   !leaderboard / !lb
- *   !shop
- *   !buy <item>
- *   !inventory / !inv
- *   !use <item>
- *
- * Admin:
- *   !addmoney <amount>
- *   !removemoney <amount>
- *   !setmoney <amount>
- *   !resetmoney
- *   !resetmoney confirm
- *   !resetmoney bank confirm
- *   !addbank <amount>
- *   !removebank <amount>
- *   !setbank <amount>
- *   !addxp <amount>
- *   !removexp <amount>
- *   !setxp <amount>
- *
- * Design:
- *   - Consistent boxed Messenger UI
- *   - Display names instead of raw user IDs
- *   - Wallet + bank + total money display
- *   - Clean success/error/status messages
- *   - Compatible with the current db.js
+ * Fixed:
+ * - strict amount parsing
+ * - atomic deposit/withdraw via db.js
+ * - safer admin arithmetic
+ * - safer payment parsing
+ * - preserves RPG shop/inventory integration
  *
  * NOTE:
  * This is a virtual game economy.
@@ -55,7 +27,7 @@ const {
 } = require("./rpg/shop");
 
 // ============================================================================
-// ADMIN CONFIGURATION
+// ADMIN
 // ============================================================================
 
 const ADMIN_IDS = new Set(
@@ -70,88 +42,158 @@ function isAdmin(senderID) {
 }
 
 // ============================================================================
-// ECONOMY CONSTANTS
+// CONSTANTS
 // ============================================================================
 
 const DAILY_AMOUNT = 200;
 const DAILY_STREAK_BONUS = 25;
 const DAILY_STREAK_CAP = 20;
 
-const DAILY_COOLDOWN_MS =
-  24 * 60 * 60 * 1000;
-
-const DAILY_GRACE_MS =
-  48 * 60 * 60 * 1000;
+const DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const DAILY_GRACE_MS = 48 * 60 * 60 * 1000;
 
 const WORK_MIN = 50;
 const WORK_MAX = 150;
-
-const WORK_COOLDOWN_MS =
-  60 * 60 * 1000;
+const WORK_COOLDOWN_MS = 60 * 60 * 1000;
 
 // ============================================================================
-// SHOP
+// LEGACY SHOP
 // ============================================================================
 
 const SHOP_ITEMS = {
   cookie: {
     name: "🍪 Cookie",
-    price: 100,
+    price: 100
   },
 
   crown: {
     name: "👑 Crown",
-    price: 1000,
+    price: 1000
   },
 
   diamond: {
     name: "💎 Diamond",
-    price: 2500,
+    price: 2500
   },
 
   trophy: {
     name: "🏆 Trophy",
-    price: 5000,
+    price: 5000
   },
 
   mystery_box: {
     name: "🎁 Mystery Box",
-    price: 2500,
-  },
+    price: 2500
+  }
 };
 
 // ============================================================================
-// DISPLAY & UTILITY HELPERS
+// HELPERS
 // ============================================================================
 
 function formatCoins(amount) {
   return Number(amount || 0).toLocaleString();
 }
 
+/**
+ * Strict amount parser.
+ *
+ * Accepted:
+ *   500
+ *   1,000
+ *   all
+ *   max
+ *
+ * Rejected:
+ *   500abc
+ *   1.5
+ *   -500
+ *   5k
+ *   500.00
+ */
 function parseAmountInput(input, maxAmount) {
-  if (!input) return 0;
+  const raw = String(input ?? "")
+    .trim()
+    .toLowerCase();
 
-  const str =
-    String(input)
-      .toLowerCase()
-      .trim();
-
-  if (
-    str === "all" ||
-    str === "max"
-  ) {
-    return maxAmount;
+  if (!raw) {
+    return null;
   }
 
-  const cleaned =
-    str.replace(/[^0-9]/g, "");
+  if (raw === "all" || raw === "max") {
+    const max = Number(maxAmount);
 
-  const val =
-    parseInt(cleaned, 10);
+    if (
+      !Number.isSafeInteger(max) ||
+      max <= 0
+    ) {
+      return null;
+    }
 
-  return isNaN(val)
-    ? 0
-    : val;
+    return max;
+  }
+
+  const normalized = raw.replace(/,/g, "");
+
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+
+  const amount = Number(normalized);
+
+  if (
+    !Number.isSafeInteger(amount) ||
+    amount <= 0
+  ) {
+    return null;
+  }
+
+  return amount;
+}
+
+function parseAdminAmount(input, allowZero = false) {
+  const raw = String(input ?? "").trim();
+
+  if (!raw) {
+    return null;
+  }
+
+  const cleaned = raw.replace(/,/g, "");
+
+  if (!/^\d+$/.test(cleaned)) {
+    return null;
+  }
+
+  const amount = Number(cleaned);
+
+  if (!Number.isSafeInteger(amount)) {
+    return null;
+  }
+
+  if (
+    allowZero
+      ? amount < 0
+      : amount <= 0
+  ) {
+    return null;
+  }
+
+  return amount;
+}
+
+function safeAdd(a, b) {
+  const result = Number(a) + Number(b);
+
+  if (
+    !Number.isSafeInteger(result) ||
+    result < 0
+  ) {
+    throw new Error(
+      "The resulting value is too large."
+    );
+  }
+
+  return result;
 }
 
 function getDisplayName(user) {
@@ -175,10 +217,7 @@ function getDisplayName(user) {
   return "Player";
 }
 
-function createBox(
-  title,
-  lines = []
-) {
+function createBox(title, lines = []) {
   return [
     "╭━━━━━━━━━━━━━━━━━━━━╮",
     `        ${title}`,
@@ -186,7 +225,7 @@ function createBox(
     "",
     ...lines,
     "",
-    "━━━━━━━━━━━━━━━━━━━━━━",
+    "━━━━━━━━━━━━━━━━━━━━━━"
   ].join("\n");
 }
 
@@ -198,37 +237,27 @@ function createError(message) {
     "",
     message,
     "",
-    "━━━━━━━━━━━━━━━━━━━━━━",
+    "━━━━━━━━━━━━━━━━━━━━━━"
   ].join("\n");
 }
 
-// ============================================================================
-// RANDOM INTEGER
-// ============================================================================
-
-function randInt(
-  min,
-  max
-) {
+function randInt(min, max) {
   return (
     Math.floor(
       Math.random() *
-        (max - min + 1)
+      (max - min + 1)
     ) + min
   );
 }
 
 // ============================================================================
-// BALANCE & BANK
+// BALANCE
 // ============================================================================
 
-async function handleBalance(
-  api,
-  event
-) {
+async function handleBalance(api, event) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
   const user =
@@ -246,24 +275,25 @@ async function handleBalance(
   const total =
     wallet + bank;
 
-  const name =
-    getDisplayName(user);
-
   await reply(
     api,
     threadID,
     createBox(
       "💳 BANK ACCOUNT",
       [
-        `👤 ${name}`,
+        `👤 ${getDisplayName(user)}`,
         "",
         `💵 Wallet: ${formatCoins(wallet)} coins`,
         `🏦 Bank: ${formatCoins(bank)} coins`,
-        `💎 Total: ${formatCoins(total)} coins`,
+        `💎 Total: ${formatCoins(total)} coins`
       ]
     )
   );
 }
+
+// ============================================================================
+// DEPOSIT
+// ============================================================================
 
 async function handleDeposit(
   api,
@@ -272,7 +302,7 @@ async function handleDeposit(
 ) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
   const user =
@@ -284,16 +314,13 @@ async function handleDeposit(
   const wallet =
     Number(user.balance) || 0;
 
-  const bank =
-    Number(user.bank_balance) || 0;
-
   const amount =
     parseAmountInput(
       args[0],
       wallet
     );
 
-  if (amount <= 0) {
+  if (amount === null) {
     return reply(
       api,
       threadID,
@@ -303,7 +330,7 @@ async function handleDeposit(
     );
   }
 
-  if (wallet < amount) {
+  if (amount > wallet) {
     return reply(
       api,
       threadID,
@@ -313,41 +340,54 @@ async function handleDeposit(
           "You do not have enough coins in your wallet.",
           "",
           `💵 Wallet: ${formatCoins(wallet)} coins`,
-          `💵 Deposit Amount: ${formatCoins(amount)} coins`,
+          `💵 Deposit Amount: ${formatCoins(amount)} coins`
         ]
       )
     );
   }
 
-  const newWallet =
-    wallet - amount;
+  try {
+    // db.deposit() already uses a transaction + row lock.
+    const result =
+      await db.deposit(
+        threadID,
+        senderID,
+        amount
+      );
 
-  const newBank =
-    bank + amount;
+    await reply(
+      api,
+      threadID,
+      createBox(
+        "📥 DEPOSIT COMPLETE",
+        [
+          `💰 Deposited: +${formatCoins(amount)} coins`,
+          "",
+          `💵 Wallet: ${formatCoins(result.balance)} coins`,
+          `🏦 Bank: ${formatCoins(result.bank_balance)} coins`
+        ]
+      )
+    );
+  } catch (error) {
+    console.error(
+      "[economy deposit]",
+      error
+    );
 
-  await db.updateUser(
-    threadID,
-    senderID,
-    {
-      balance: newWallet,
-      bank_balance: newBank,
-    }
-  );
-
-  await reply(
-    api,
-    threadID,
-    createBox(
-      "📥 DEPOSIT COMPLETE",
-      [
-        `💰 Deposited: +${formatCoins(amount)} coins`,
-        "",
-        `💵 Wallet: ${formatCoins(newWallet)} coins`,
-        `🏦 Bank: ${formatCoins(newBank)} coins`,
-      ]
-    )
-  );
+    await reply(
+      api,
+      threadID,
+      createError(
+        error.message ||
+        "The deposit could not be completed."
+      )
+    );
+  }
 }
+
+// ============================================================================
+// WITHDRAW
+// ============================================================================
 
 async function handleWithdraw(
   api,
@@ -356,7 +396,7 @@ async function handleWithdraw(
 ) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
   const user =
@@ -364,9 +404,6 @@ async function handleWithdraw(
       threadID,
       senderID
     );
-
-  const wallet =
-    Number(user.balance) || 0;
 
   const bank =
     Number(user.bank_balance) || 0;
@@ -377,7 +414,7 @@ async function handleWithdraw(
       bank
     );
 
-  if (amount <= 0) {
+  if (amount === null) {
     return reply(
       api,
       threadID,
@@ -387,7 +424,7 @@ async function handleWithdraw(
     );
   }
 
-  if (bank < amount) {
+  if (amount > bank) {
     return reply(
       api,
       threadID,
@@ -397,40 +434,49 @@ async function handleWithdraw(
           "You do not have enough coins in your bank balance.",
           "",
           `🏦 Bank Balance: ${formatCoins(bank)} coins`,
-          `💵 Requested: ${formatCoins(amount)} coins`,
+          `💵 Requested: ${formatCoins(amount)} coins`
         ]
       )
     );
   }
 
-  const newWallet =
-    wallet + amount;
+  try {
+    // db.withdraw() already uses a transaction + row lock.
+    const result =
+      await db.withdraw(
+        threadID,
+        senderID,
+        amount
+      );
 
-  const newBank =
-    bank - amount;
+    await reply(
+      api,
+      threadID,
+      createBox(
+        "📤 WITHDRAW COMPLETE",
+        [
+          `💰 Withdrawn: +${formatCoins(amount)} coins`,
+          "",
+          `💵 Wallet: ${formatCoins(result.balance)} coins`,
+          `🏦 Bank: ${formatCoins(result.bank_balance)} coins`
+        ]
+      )
+    );
+  } catch (error) {
+    console.error(
+      "[economy withdraw]",
+      error
+    );
 
-  await db.updateUser(
-    threadID,
-    senderID,
-    {
-      balance: newWallet,
-      bank_balance: newBank,
-    }
-  );
-
-  await reply(
-    api,
-    threadID,
-    createBox(
-      "📤 WITHDRAW COMPLETE",
-      [
-        `💰 Withdrawn: +${formatCoins(amount)} coins`,
-        "",
-        `💵 Wallet: ${formatCoins(newWallet)} coins`,
-        `🏦 Bank: ${formatCoins(newBank)} coins`,
-      ]
-    )
-  );
+    await reply(
+      api,
+      threadID,
+      createError(
+        error.message ||
+        "The withdrawal could not be completed."
+      )
+    );
+  }
 }
 
 // ============================================================================
@@ -443,7 +489,7 @@ async function handleDaily(
 ) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
   const user =
@@ -482,7 +528,7 @@ async function handleDaily(
           "",
           `🕐 Come back in ${fmtTime(remaining)}.`,
           "",
-          "🔥 Keep your streak alive!",
+          "🔥 Keep your streak alive!"
         ]
       )
     );
@@ -516,8 +562,15 @@ async function handleDaily(
     DAILY_STREAK_BONUS;
 
   const reward =
-    DAILY_AMOUNT + bonus;
+    DAILY_AMOUNT +
+    bonus;
 
+  /*
+   * NOTE:
+   * Daily's final concurrency protection belongs in db.js.
+   * This file keeps the existing command behavior and does not invent
+   * a db function that is not currently present.
+   */
   const newBalance =
     await db.addBalance(
       threadID,
@@ -530,7 +583,7 @@ async function handleDaily(
     senderID,
     {
       last_daily: now,
-      daily_streak: streak,
+      daily_streak: streak
     }
   );
 
@@ -550,7 +603,7 @@ async function handleDaily(
         `🎁 Total earned: +${formatCoins(reward)}`,
         "",
         `🔥 Streak: ${streakText}`,
-        `💵 Balance: ${formatCoins(newBalance)} coins`,
+        `💵 Balance: ${formatCoins(newBalance)} coins`
       ]
     )
   );
@@ -566,7 +619,7 @@ async function handleWork(
 ) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
   const user =
@@ -604,7 +657,7 @@ async function handleWork(
           "",
           `⏳ Try again in ${fmtTime(remaining)}.`,
           "",
-          "Take a little break.",
+          "Take a little break."
         ]
       )
     );
@@ -629,7 +682,7 @@ async function handleWork(
     threadID,
     senderID,
     {
-      last_work: now,
+      last_work: now
     }
   );
 
@@ -642,7 +695,7 @@ async function handleWork(
         "💼 You finished your shift.",
         "",
         `💰 Earned: +${formatCoins(earned)} coins`,
-        `💵 Balance: ${formatCoins(newBalance)} coins`,
+        `💵 Balance: ${formatCoins(newBalance)} coins`
       ]
     )
   );
@@ -660,43 +713,59 @@ async function handlePay(
   const {
     threadID,
     senderID,
-    messageReply,
+    messageReply
   } = event;
 
-  const amount =
-    parseInt(
-      args[0],
-      10
-    );
+  const rawAmount =
+    String(
+      args[0] ?? ""
+    )
+      .trim()
+      .replace(/,/g, "");
 
   if (
-    !Number.isInteger(amount) ||
-    amount <= 0
+    !/^\d+$/.test(
+      rawAmount
+    )
   ) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
-        "Usage: reply to someone's message with\n`!pay <amount>`"
+        "Usage: reply to someone's message with\n!pay <amount>"
       )
     );
+  }
 
-    return;
+  const amount =
+    Number(rawAmount);
+
+  if (
+    !Number.isSafeInteger(
+      amount
+    ) ||
+    amount <= 0
+  ) {
+    return reply(
+      api,
+      threadID,
+      createError(
+        "The payment amount must be a valid positive integer."
+      )
+    );
   }
 
   if (
     !messageReply ||
     !messageReply.senderID
   ) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         "Reply to the person's message to pay them.\n\nExample:\n!pay 500"
       )
     );
-
-    return;
   }
 
   const recipientID =
@@ -711,57 +780,20 @@ async function handlePay(
     recipientID ===
     senderIDString
   ) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         "You can't transfer coins to yourself."
       )
     );
-
-    return;
-  }
-
-  const sender =
-    await db.getUser(
-      threadID,
-      senderID
-    );
-
-  const recipient =
-    await db.getUser(
-      threadID,
-      recipientID
-    );
-
-  const senderBalance =
-    Number(sender.balance) || 0;
-
-  if (
-    senderBalance < amount
-  ) {
-    await reply(
-      api,
-      threadID,
-      createBox(
-        "💸 PAYMENT",
-        [
-          "Transfer failed.",
-          "",
-          `💰 Your balance: ${formatCoins(senderBalance)} coins`,
-          `💵 Required: ${formatCoins(amount)} coins`,
-          "",
-          `You need ${formatCoins(
-            amount - senderBalance
-          )} more coins.`,
-        ]
-      )
-    );
-
-    return;
   }
 
   try {
+    /*
+     * db.transfer() performs the real balance check while holding
+     * row locks, so a stale balance read cannot authorize an overspend.
+     */
     await db.transfer(
       threadID,
       senderIDString,
@@ -770,20 +802,18 @@ async function handlePay(
     );
   } catch (error) {
     console.error(
-      "Payment transfer failed:",
+      "[economy pay]",
       error
     );
 
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         error.message ||
-          "The payment could not be completed."
+        "The payment could not be completed."
       )
     );
-
-    return;
   }
 
   const updatedSender =
@@ -798,30 +828,18 @@ async function handlePay(
       recipientID
     );
 
-  const senderName =
-    getDisplayName(
-      updatedSender
-    );
-
-  const recipientName =
-    getDisplayName(
-      updatedRecipient
-    );
-
   await reply(
     api,
     threadID,
     createBox(
       "💸 PAYMENT SENT",
       [
-        `👤 From: ${senderName}`,
-        `🎯 To: ${recipientName}`,
+        `👤 From: ${getDisplayName(updatedSender)}`,
+        `🎯 To: ${getDisplayName(updatedRecipient)}`,
         "",
         `💰 Amount: ${formatCoins(amount)} coins`,
         "",
-        `💵 Your balance: ${formatCoins(
-          updatedSender.balance
-        )} coins`,
+        `💵 Your balance: ${formatCoins(updatedSender.balance)} coins`
       ]
     )
   );
@@ -836,7 +854,7 @@ async function handleLeaderboard(
   event
 ) {
   const {
-    threadID,
+    threadID
   } = event;
 
   const top =
@@ -848,7 +866,7 @@ async function handleLeaderboard(
   if (
     top.length === 0
   ) {
-    await reply(
+    return reply(
       api,
       threadID,
       createBox(
@@ -857,18 +875,16 @@ async function handleLeaderboard(
           "No economy data yet.",
           "",
           "Start earning coins with",
-          "`!daily` or `!work`.",
+          "!daily or !work."
         ]
       )
     );
-
-    return;
   }
 
   const medals = [
     "🥇",
     "🥈",
-    "🥉",
+    "🥉"
   ];
 
   const lines = [];
@@ -891,7 +907,9 @@ async function handleLeaderboard(
           : `Player ${row.user_id}`;
 
       const balance =
-        Number(row.balance) || 0;
+        Number(
+          row.balance
+        ) || 0;
 
       lines.push(
         `${position} ${name}`,
@@ -926,22 +944,19 @@ async function handleShop(
     "🎁 COLLECTIBLES",
     "",
     "These legacy economy collectibles remain available:",
-    "",
+    ""
   ];
 
   Object.entries(
     SHOP_ITEMS
   ).forEach(
-    ([id, item]) =>
+    ([id, item]) => {
       lines.push(
-        item.name +
-          " · " +
-          formatCoins(item.price) +
-          " coins",
-        "   Buy: !buy " +
-          id,
+        `${item.name} · ${formatCoins(item.price)} coins`,
+        `   Buy: !buy ${id}`,
         ""
-      )
+      );
+    }
   );
 
   await reply(
@@ -970,27 +985,32 @@ async function handleBuy(
       .trim()
       .toLowerCase();
 
-  const quantity =
-    Math.max(
-      1,
-      Math.min(
-        99,
-        Math.floor(
-          Number(args[1]) || 1
-        )
-      )
+  const parsedQuantity =
+    Number(
+      args[1]
     );
 
+  const quantity =
+    Number.isFinite(
+      parsedQuantity
+    ) &&
+    parsedQuantity >= 1
+      ? Math.min(
+          99,
+          Math.floor(
+            parsedQuantity
+          )
+        )
+      : 1;
+
   if (!input) {
-    await reply(
+    return reply(
       api,
       event.threadID,
       createError(
         "Usage: !buy <item number or item id> [quantity]\n\nUse !shop to see available items."
       )
     );
-
-    return;
   }
 
   const rpgItem =
@@ -1009,60 +1029,42 @@ async function handleBuy(
           quantity
         );
 
-      await reply(
+      return reply(
         api,
         event.threadID,
         createBox(
           "🛍️ RPG PURCHASE COMPLETE",
           [
-            "🎁 " +
-              result.item.name +
-              " ×" +
-              result.quantity,
-
-            "💰 Cost: " +
-              formatCoins(
-                result.total
-              ) +
-              " coins",
-
-            "💵 Remaining Gold: " +
-              formatCoins(
-                result.balance
-              ) +
-              " coins",
-
-            "✨ Added to your RPG inventory.",
+            `🎁 ${result.item.name} ×${result.quantity}`,
+            `💰 Cost: ${formatCoins(result.total)} coins`,
+            `💵 Remaining Gold: ${formatCoins(result.balance)} coins`,
+            "✨ Added to your RPG inventory."
           ]
         )
       );
     } catch (error) {
-      await reply(
+      return reply(
         api,
         event.threadID,
         createError(
           error.message ||
-            "The RPG purchase could not be completed."
+          "The RPG purchase could not be completed."
         )
       );
     }
-
-    return;
   }
 
   const item =
     SHOP_ITEMS[input];
 
   if (!item) {
-    await reply(
+    return reply(
       api,
       event.threadID,
       createError(
         "That item does not exist. Use !shop to view the available items."
       )
     );
-
-    return;
   }
 
   const user =
@@ -1072,61 +1074,63 @@ async function handleBuy(
     );
 
   const balance =
-    Number(user.balance) || 0;
+    Number(
+      user.balance
+    ) || 0;
 
   if (
     balance <
     item.price
   ) {
-    await reply(
+    return reply(
       api,
       event.threadID,
       createBox(
         "🛒 SHOP",
         [
-          "You cannot afford " +
-            item.name +
-            ".",
+          `You cannot afford ${item.name}.`,
           "",
-          "💰 Price: " +
-            formatCoins(
-              item.price
-            ) +
-            " coins",
-
-          "💵 Balance: " +
-            formatCoins(
-              balance
-            ) +
-            " coins",
-
-          "📉 Missing: " +
-            formatCoins(
-              item.price -
-                balance
-            ) +
-            " coins",
+          `💰 Price: ${formatCoins(item.price)} coins`,
+          `💵 Balance: ${formatCoins(balance)} coins`,
+          `📉 Missing: ${formatCoins(item.price - balance)} coins`
         ]
       )
     );
-
-    return;
   }
 
-  await db.spendBalance(
-    event.threadID,
-    event.senderID,
-    item.price,
-    "Economy shop: " +
-      input
-  );
+  try {
+    /*
+     * Current db.js exposes spendBalance() and addItem() separately.
+     * The deeper atomic purchase fix belongs in db.js.
+     */
+    await db.spendBalance(
+      event.threadID,
+      event.senderID,
+      item.price,
+      `Economy shop: ${input}`
+    );
 
-  await db.addItem(
-    event.threadID,
-    event.senderID,
-    input,
-    1
-  );
+    await db.addItem(
+      event.threadID,
+      event.senderID,
+      input,
+      1
+    );
+  } catch (error) {
+    console.error(
+      "[economy shop purchase]",
+      error
+    );
+
+    return reply(
+      api,
+      event.threadID,
+      createError(
+        error.message ||
+        "The purchase could not be completed."
+      )
+    );
+  }
 
   const updatedUser =
     await db.getUser(
@@ -1140,26 +1144,12 @@ async function handleBuy(
     createBox(
       "🛍️ PURCHASE COMPLETE",
       [
-        "🎁 Item: " +
-          item.name,
-
-        "💰 Price: " +
-          formatCoins(
-            item.price
-          ) +
-          " coins",
-
+        `🎁 Item: ${item.name}`,
+        `💰 Price: ${formatCoins(item.price)} coins`,
         "",
-
-        "💵 Balance: " +
-          formatCoins(
-            updatedUser.balance
-          ) +
-          " coins",
-
+        `💵 Balance: ${formatCoins(updatedUser.balance)} coins`,
         "",
-
-        "✨ Added to your inventory!",
+        "✨ Added to your inventory!"
       ]
     )
   );
@@ -1200,38 +1190,30 @@ async function handleInventory(
     !economyItems.length &&
     !rpgItems.length
   ) {
-    await reply(
+    return reply(
       api,
       event.threadID,
       createBox(
         "🎒 INVENTORY",
         [
-          "👤 " +
-            getDisplayName(
-              user
-            ),
-
+          `👤 ${getDisplayName(user)}`,
           "",
-
           "Your inventory is empty.",
-
           "",
-
-          "Visit !shop to buy items.",
+          "Visit !shop to buy items."
         ]
       )
     );
-
-    return;
   }
 
   const lines = [
-    "👤 " +
-      getDisplayName(user),
-    "",
+    `👤 ${getDisplayName(user)}`,
+    ""
   ];
 
-  if (rpgItems.length) {
+  if (
+    rpgItems.length
+  ) {
     lines.push(
       "🛡️ RPG ITEMS",
       ""
@@ -1241,22 +1223,16 @@ async function handleInventory(
       const entry of rpgItems
     ) {
       lines.push(
-        (entry.item.emoji ||
-          "🎁") +
-          " " +
-          entry.item.name +
-          " ×" +
-          entry.quantity,
-
-        "   " +
-          entry.item.description,
-
+        `${entry.item.emoji || "🎁"} ${entry.item.name} ×${entry.quantity}`,
+        `   ${entry.item.description}`,
         ""
       );
     }
   }
 
-  if (economyItems.length) {
+  if (
+    economyItems.length
+  ) {
     lines.push(
       "🎁 COLLECTIBLES",
       ""
@@ -1267,9 +1243,7 @@ async function handleInventory(
       of economyItems
     ) {
       lines.push(
-        SHOP_ITEMS[id].name +
-          " ×" +
-          amount,
+        `${SHOP_ITEMS[id].name} ×${amount}`,
         ""
       );
     }
@@ -1286,65 +1260,7 @@ async function handleInventory(
 }
 
 // ============================================================================
-// ADMIN — ECONOMY COMMANDS
-// ============================================================================
-
-function parseAdminAmount(
-  input,
-  allowZero = false
-) {
-  const raw =
-    String(
-      input ?? ""
-    ).trim();
-
-  if (
-    allowZero &&
-    raw === "0"
-  ) {
-    return 0;
-  }
-
-  if (!raw) {
-    return null;
-  }
-
-  const cleaned =
-    raw.replace(
-      /,/g,
-      ""
-    );
-
-  if (
-    !/^\d+$/.test(cleaned)
-  ) {
-    return null;
-  }
-
-  const amount =
-    Number(cleaned);
-
-  if (
-    !Number.isSafeInteger(
-      amount
-    )
-  ) {
-    return null;
-  }
-
-  if (
-    allowZero
-      ? amount < 0
-      : amount <= 0
-  ) {
-    return null;
-  }
-
-  return amount;
-}
-
-// ============================================================================
-// !resetmoney
+// RESET MONEY
 // ============================================================================
 
 async function handleResetMoney(
@@ -1354,43 +1270,37 @@ async function handleResetMoney(
 ) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
-  // --------------------------------------------------------------------------
-  // ADMIN CHECK
-  // --------------------------------------------------------------------------
-
-  if (!isAdmin(senderID)) {
-    await reply(
+  if (
+    !isAdmin(senderID)
+  ) {
+    return reply(
       api,
       threadID,
       createError(
         "Only the bot admin can use this command."
       )
     );
-
-    return;
   }
 
   const action =
-    String(args[0] || "")
+    String(
+      args[0] || ""
+    )
       .trim()
       .toLowerCase();
 
   const secondAction =
-    String(args[1] || "")
+    String(
+      args[1] || ""
+    )
       .trim()
       .toLowerCase();
 
-  // --------------------------------------------------------------------------
-  // !resetmoney
-  // --------------------------------------------------------------------------
-
-  if (
-    action === ""
-  ) {
-    await reply(
+  if (!action) {
+    return reply(
       api,
       threadID,
       createBox(
@@ -1406,17 +1316,11 @@ async function handleResetMoney(
           "!resetmoney confirm",
           "",
           "For wallet + bank:",
-          "!resetmoney bank confirm",
+          "!resetmoney bank confirm"
         ]
       )
     );
-
-    return;
   }
-
-  // --------------------------------------------------------------------------
-  // !resetmoney bank confirm
-  // --------------------------------------------------------------------------
 
   if (
     action === "bank" &&
@@ -1434,7 +1338,7 @@ async function handleResetMoney(
           [threadID]
         );
 
-      await reply(
+      return reply(
         api,
         threadID,
         createBox(
@@ -1446,7 +1350,7 @@ async function handleResetMoney(
             "💵 Wallet: 0 coins",
             "🏦 Bank: 0 coins",
             "",
-            "⚠️ This action cannot be undone unless you restore a database backup.",
+            "⚠️ This action cannot be undone unless you restore a database backup."
           ]
         )
       );
@@ -1456,22 +1360,16 @@ async function handleResetMoney(
         error
       );
 
-      await reply(
+      return reply(
         api,
         threadID,
         createError(
           error.message ||
-            "Failed to reset the economy."
+          "Failed to reset the economy."
         )
       );
     }
-
-    return;
   }
-
-  // --------------------------------------------------------------------------
-  // !resetmoney confirm
-  // --------------------------------------------------------------------------
 
   if (
     action === "confirm"
@@ -1487,7 +1385,7 @@ async function handleResetMoney(
           [threadID]
         );
 
-      await reply(
+      return reply(
         api,
         threadID,
         createBox(
@@ -1499,7 +1397,7 @@ async function handleResetMoney(
             "💵 Wallet: 0 coins",
             "🏦 Bank balances were left unchanged.",
             "",
-            "⚠️ This action cannot be undone unless you restore a database backup.",
+            "⚠️ This action cannot be undone unless you restore a database backup."
           ]
         )
       );
@@ -1509,24 +1407,18 @@ async function handleResetMoney(
         error
       );
 
-      await reply(
+      return reply(
         api,
         threadID,
         createError(
           error.message ||
-            "Failed to reset the economy."
+          "Failed to reset the economy."
         )
       );
     }
-
-    return;
   }
 
-  // --------------------------------------------------------------------------
-  // INVALID COMMAND
-  // --------------------------------------------------------------------------
-
-  await reply(
+  return reply(
     api,
     threadID,
     createError(
@@ -1540,7 +1432,7 @@ async function handleResetMoney(
 }
 
 // ============================================================================
-// !addmoney
+// ADMIN MONEY
 // ============================================================================
 
 async function handleAddMoney(
@@ -1550,19 +1442,17 @@ async function handleAddMoney(
 ) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
   if (!isAdmin(senderID)) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         "Only the bot admin can use this command."
       )
     );
-
-    return;
   }
 
   const amount =
@@ -1573,15 +1463,13 @@ async function handleAddMoney(
   if (
     amount === null
   ) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         "Usage: !addmoney <amount>\n\nExample:\n!addmoney 1000000"
       )
     );
-
-    return;
   }
 
   try {
@@ -1607,7 +1495,7 @@ async function handleAddMoney(
           `👤 ${getDisplayName(user)}`,
           "",
           `💰 Added: +${formatCoins(amount)} coins`,
-          `💵 New Wallet: ${formatCoins(newBalance)} coins`,
+          `💵 New Wallet: ${formatCoins(newBalance)} coins`
         ]
       )
     );
@@ -1622,14 +1510,14 @@ async function handleAddMoney(
       threadID,
       createError(
         error.message ||
-          "Failed to add money."
+        "Failed to add money."
       )
     );
   }
 }
 
 // ============================================================================
-// !removemoney
+// ADMIN REMOVE MONEY
 // ============================================================================
 
 async function handleRemoveMoney(
@@ -1639,19 +1527,17 @@ async function handleRemoveMoney(
 ) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
   if (!isAdmin(senderID)) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         "Only the bot admin can use this command."
       )
     );
-
-    return;
   }
 
   const amount =
@@ -1662,43 +1548,20 @@ async function handleRemoveMoney(
   if (
     amount === null
   ) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         "Usage: !removemoney <amount>\n\nExample:\n!removemoney 5000"
       )
     );
-
-    return;
   }
 
   try {
-    const user =
-      await db.getUser(
-        threadID,
-        senderID
-      );
-
-    const balance =
-      Number(
-        user.balance
-      ) || 0;
-
-    if (
-      amount > balance
-    ) {
-      await reply(
-        api,
-        threadID,
-        createError(
-          `You only have ${formatCoins(balance)} coins in your wallet.`
-        )
-      );
-
-      return;
-    }
-
+    /*
+     * Do not perform a stale balance pre-check here.
+     * db.addBalance(-amount) is responsible for the atomic DB update.
+     */
     const newBalance =
       await db.addBalance(
         threadID,
@@ -1713,7 +1576,7 @@ async function handleRemoveMoney(
         "👑 ADMIN — REMOVE MONEY",
         [
           `💸 Removed: -${formatCoins(amount)} coins`,
-          `💵 New Wallet: ${formatCoins(newBalance)} coins`,
+          `💵 New Wallet: ${formatCoins(newBalance)} coins`
         ]
       )
     );
@@ -1728,14 +1591,14 @@ async function handleRemoveMoney(
       threadID,
       createError(
         error.message ||
-          "Failed to remove money."
+        "Failed to remove money. Make sure your wallet has enough coins."
       )
     );
   }
 }
 
 // ============================================================================
-// !setmoney
+// ADMIN SET MONEY
 // ============================================================================
 
 async function handleSetMoney(
@@ -1745,19 +1608,17 @@ async function handleSetMoney(
 ) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
   if (!isAdmin(senderID)) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         "Only the bot admin can use this command."
       )
     );
-
-    return;
   }
 
   const amount =
@@ -1769,15 +1630,13 @@ async function handleSetMoney(
   if (
     amount === null
   ) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         "Usage: !setmoney <amount>\n\nExample:\n!setmoney 999999999"
       )
     );
-
-    return;
   }
 
   try {
@@ -1785,7 +1644,7 @@ async function handleSetMoney(
       threadID,
       senderID,
       {
-        balance: amount,
+        balance: amount
       }
     );
 
@@ -1795,7 +1654,7 @@ async function handleSetMoney(
       createBox(
         "👑 ADMIN — SET MONEY",
         [
-          `💵 Wallet set to: ${formatCoins(amount)} coins`,
+          `💵 Wallet set to: ${formatCoins(amount)} coins`
         ]
       )
     );
@@ -1810,14 +1669,14 @@ async function handleSetMoney(
       threadID,
       createError(
         error.message ||
-          "Failed to set money."
+        "Failed to set money."
       )
     );
   }
 }
 
 // ============================================================================
-// BANK ADMIN
+// ADMIN BANK
 // ============================================================================
 
 async function handleAdminBank(
@@ -1828,19 +1687,17 @@ async function handleAdminBank(
 ) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
   if (!isAdmin(senderID)) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         "Only the bot admin can use this command."
       )
     );
-
-    return;
   }
 
   const amount =
@@ -1852,15 +1709,13 @@ async function handleAdminBank(
   if (
     amount === null
   ) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         `Usage: !${mode} <amount>\n\nExample:\n!${mode} 100000`
       )
     );
-
-    return;
   }
 
   try {
@@ -1881,52 +1736,32 @@ async function handleAdminBank(
       mode === "addbank"
     ) {
       newBank =
-        currentBank +
-        amount;
-    }
-
-    else if (
+        safeAdd(
+          currentBank,
+          amount
+        );
+    } else if (
       mode === "removebank"
     ) {
       if (
         amount >
         currentBank
       ) {
-        await reply(
+        return reply(
           api,
           threadID,
           createError(
             `You only have ${formatCoins(currentBank)} coins in your bank.`
           )
         );
-
-        return;
       }
 
       newBank =
         currentBank -
         amount;
-    }
-
-    else {
+    } else {
       newBank =
         amount;
-    }
-
-    if (
-      !Number.isSafeInteger(
-        newBank
-      )
-    ) {
-      await reply(
-        api,
-        threadID,
-        createError(
-          "The resulting bank balance is too large."
-        )
-      );
-
-      return;
     }
 
     await db.updateUser(
@@ -1934,7 +1769,7 @@ async function handleAdminBank(
       senderID,
       {
         bank_balance:
-          newBank,
+          newBank
       }
     );
 
@@ -1944,13 +1779,11 @@ async function handleAdminBank(
       createBox(
         `👑 ADMIN — ${mode.toUpperCase()}`,
         [
-          `🏦 Bank: ${formatCoins(newBank)} coins`,
+          `🏦 Bank: ${formatCoins(newBank)} coins`
         ]
       )
     );
-  }
-
-  catch (error) {
+  } catch (error) {
     console.error(
       `[admin ${mode}]`,
       error
@@ -1961,14 +1794,14 @@ async function handleAdminBank(
       threadID,
       createError(
         error.message ||
-          `Failed to execute !${mode}.`
+        `Failed to execute !${mode}.`
       )
     );
   }
 }
 
 // ============================================================================
-// XP ADMIN
+// ADMIN XP
 // ============================================================================
 
 async function handleAdminXp(
@@ -1979,19 +1812,17 @@ async function handleAdminXp(
 ) {
   const {
     threadID,
-    senderID,
+    senderID
   } = event;
 
   if (!isAdmin(senderID)) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         "Only the bot admin can use this command."
       )
     );
-
-    return;
   }
 
   const amount =
@@ -2003,15 +1834,13 @@ async function handleAdminXp(
   if (
     amount === null
   ) {
-    await reply(
+    return reply(
       api,
       threadID,
       createError(
         `Usage: !${mode} <amount>\n\nExample:\n!${mode} 50000`
       )
     );
-
-    return;
   }
 
   try {
@@ -2032,47 +1861,29 @@ async function handleAdminXp(
       mode === "addxp"
     ) {
       newXp =
-        currentXp +
-        amount;
-    }
-
-    else if (
+        safeAdd(
+          currentXp,
+          amount
+        );
+    } else if (
       mode === "removexp"
     ) {
       newXp =
         Math.max(
           0,
           currentXp -
-            amount
+          amount
         );
-    }
-
-    else {
+    } else {
       newXp =
         amount;
-    }
-
-    if (
-      !Number.isSafeInteger(
-        newXp
-      )
-    ) {
-      await reply(
-        api,
-        threadID,
-        createError(
-          "The resulting XP value is too large."
-        )
-      );
-
-      return;
     }
 
     await db.updateUser(
       threadID,
       senderID,
       {
-        xp: newXp,
+        xp: newXp
       }
     );
 
@@ -2082,13 +1893,11 @@ async function handleAdminXp(
       createBox(
         `👑 ADMIN — ${mode.toUpperCase()}`,
         [
-          `✨ XP: ${formatCoins(newXp)}`,
+          `✨ XP: ${formatCoins(newXp)}`
         ]
       )
     );
-  }
-
-  catch (error) {
+  } catch (error) {
     console.error(
       `[admin ${mode}]`,
       error
@@ -2099,7 +1908,7 @@ async function handleAdminXp(
       threadID,
       createError(
         error.message ||
-          `Failed to execute !${mode}.`
+        `Failed to execute !${mode}.`
       )
     );
   }
@@ -2125,10 +1934,6 @@ async function handleEconomyCommand(
       originalText || text
     ).trim();
 
-  // ==========================================================================
-  // ADMIN ECONOMY COMMAND ROUTER
-  // ==========================================================================
-
   const economyParts =
     originalText
       .split(/\s+/)
@@ -2141,6 +1946,10 @@ async function handleEconomyCommand(
 
   const economyArgs =
     economyParts.slice(1);
+
+  // --------------------------------------------------------------------------
+  // ADMIN
+  // --------------------------------------------------------------------------
 
   if (
     economyCommand ===
@@ -2180,10 +1989,6 @@ async function handleEconomyCommand(
 
     return true;
   }
-
-  // ==========================================================================
-  // !resetmoney
-  // ==========================================================================
 
   if (
     economyCommand ===
@@ -2282,9 +2087,9 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
+  // --------------------------------------------------------------------------
   // BALANCE / BANK
-  // ==========================================================================
+  // --------------------------------------------------------------------------
 
   if (
     text === "!balance" ||
@@ -2299,32 +2104,24 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
+  // --------------------------------------------------------------------------
   // DEPOSIT
-  // ==========================================================================
+  // --------------------------------------------------------------------------
 
   if (
     text === "!deposit" ||
-    text.startsWith(
-      "!deposit "
-    ) ||
+    text.startsWith("!deposit ") ||
     text === "!dep" ||
-    text.startsWith(
-      "!dep "
-    )
+    text.startsWith("!dep ")
   ) {
     const cmdName =
-      text.startsWith(
-        "!deposit"
-      )
+      text.startsWith("!deposit")
         ? "!deposit"
         : "!dep";
 
     const args =
       originalText
-        .slice(
-          cmdName.length
-        )
+        .slice(cmdName.length)
         .trim()
         .split(/\s+/)
         .filter(Boolean);
@@ -2338,32 +2135,24 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
+  // --------------------------------------------------------------------------
   // WITHDRAW
-  // ==========================================================================
+  // --------------------------------------------------------------------------
 
   if (
     text === "!withdraw" ||
-    text.startsWith(
-      "!withdraw "
-    ) ||
+    text.startsWith("!withdraw ") ||
     text === "!wd" ||
-    text.startsWith(
-      "!wd "
-    )
+    text.startsWith("!wd ")
   ) {
     const cmdName =
-      text.startsWith(
-        "!withdraw"
-      )
+      text.startsWith("!withdraw")
         ? "!withdraw"
         : "!wd";
 
     const args =
       originalText
-        .slice(
-          cmdName.length
-        )
+        .slice(cmdName.length)
         .trim()
         .split(/\s+/)
         .filter(Boolean);
@@ -2377,9 +2166,9 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
+  // --------------------------------------------------------------------------
   // DAILY
-  // ==========================================================================
+  // --------------------------------------------------------------------------
 
   if (
     text === "!daily"
@@ -2392,9 +2181,9 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
+  // --------------------------------------------------------------------------
   // WORK
-  // ==========================================================================
+  // --------------------------------------------------------------------------
 
   if (
     text === "!work"
@@ -2407,21 +2196,17 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
+  // --------------------------------------------------------------------------
   // PAY
-  // ==========================================================================
+  // --------------------------------------------------------------------------
 
   if (
     text === "!pay" ||
-    text.startsWith(
-      "!pay "
-    )
+    text.startsWith("!pay ")
   ) {
     const args =
       originalText
-        .slice(
-          "!pay".length
-        )
+        .slice("!pay".length)
         .trim()
         .split(/\s+/)
         .filter(Boolean);
@@ -2435,9 +2220,9 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
+  // --------------------------------------------------------------------------
   // LEADERBOARD
-  // ==========================================================================
+  // --------------------------------------------------------------------------
 
   if (
     text === "!leaderboard" ||
@@ -2451,9 +2236,9 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
+  // --------------------------------------------------------------------------
   // SHOP
-  // ==========================================================================
+  // --------------------------------------------------------------------------
 
   if (
     text === "!shop"
@@ -2466,21 +2251,17 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
+  // --------------------------------------------------------------------------
   // BUY
-  // ==========================================================================
+  // --------------------------------------------------------------------------
 
   if (
     text === "!buy" ||
-    text.startsWith(
-      "!buy "
-    )
+    text.startsWith("!buy ")
   ) {
     const args =
       originalText
-        .slice(
-          "!buy".length
-        )
+        .slice("!buy".length)
         .trim()
         .split(/\s+/)
         .filter(Boolean);
@@ -2494,9 +2275,9 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
+  // --------------------------------------------------------------------------
   // INVENTORY
-  // ==========================================================================
+  // --------------------------------------------------------------------------
 
   if (
     text === "!inventory" ||
@@ -2510,21 +2291,17 @@ async function handleEconomyCommand(
     return true;
   }
 
-  // ==========================================================================
-  // STANDALONE RPG CONSUMABLES
-  // ==========================================================================
+  // --------------------------------------------------------------------------
+  // USE RPG ITEM
+  // --------------------------------------------------------------------------
 
   if (
     text === "!use" ||
-    text.startsWith(
-      "!use "
-    )
+    text.startsWith("!use ")
   ) {
     const args =
       originalText
-        .slice(
-          "!use".length
-        )
+        .slice("!use".length)
         .trim()
         .split(/\s+/)
         .filter(Boolean);
@@ -2543,8 +2320,7 @@ async function handleEconomyCommand(
         result.hpRestored
       ) {
         effects.push(
-          "❤️ HP +" +
-            result.hpRestored
+          `❤️ HP +${result.hpRestored}`
         );
       }
 
@@ -2552,8 +2328,7 @@ async function handleEconomyCommand(
         result.mpRestored
       ) {
         effects.push(
-          "🔷 MP +" +
-            result.mpRestored
+          `🔷 MP +${result.mpRestored}`
         );
       }
 
@@ -2563,19 +2338,11 @@ async function handleEconomyCommand(
         createBox(
           "🧪 ITEM USED",
           [
-            result.item.emoji +
-              " " +
-              result.item.name,
-
+            `${result.item.emoji} ${result.item.name}`,
             "",
-
-            effects.join(
-              " · "
-            ) ||
+            effects.join(" · ") ||
               "No effect.",
-
-            "Remaining: " +
-              result.remaining,
+            `Remaining: ${result.remaining}`
           ]
         )
       );
@@ -2585,17 +2352,13 @@ async function handleEconomyCommand(
         event.threadID,
         createError(
           error.message ||
-            "That item could not be used."
+          "That item could not be used."
         )
       );
     }
 
     return true;
   }
-
-  // ==========================================================================
-  // NOT AN ECONOMY COMMAND
-  // ==========================================================================
 
   return false;
 }
@@ -2605,5 +2368,5 @@ async function handleEconomyCommand(
 // ============================================================================
 
 module.exports = {
-  handleEconomyCommand,
+  handleEconomyCommand
 };
