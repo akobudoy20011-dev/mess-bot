@@ -83,13 +83,6 @@ async function safeUnlink(filePath) {
    PROCESS CLEANUP
 ========================================================= */
 
-/*
- * Attempt to terminate yt-dlp when a download fails
- * or reaches the timeout.
- *
- * youtube-dl-exec returns a child-process-like promise
- * that exposes kill() on the spawned process.
- */
 async function killDownloadProcess(child) {
   if (!child) {
     return;
@@ -111,10 +104,10 @@ async function killDownloadProcess(child) {
       }
 
       /*
-       * Give yt-dlp a few seconds to exit normally.
+       * Give yt-dlp a short amount of time to exit.
        */
       await new Promise((resolve) =>
-        setTimeout(resolve, 3000)
+        setTimeout(resolve, 1500)
       );
 
       /*
@@ -224,7 +217,7 @@ async function searchYouTube(query) {
  *
  * The file MUST be a valid Netscape-format cookies.txt file.
  *
- * Do NOT put the cookie contents directly into an
+ * Do NOT put cookie contents directly into an
  * environment variable.
  */
 
@@ -284,9 +277,24 @@ async function getCookiePath() {
    DOWNLOAD YOUTUBE AUDIO
 ========================================================= */
 
+/*
+ * downloadYouTubeAudio(
+ *   videoUrl,
+ *   destinationPath,
+ *   options
+ * )
+ *
+ * options.signal:
+ *   Optional AbortSignal.
+ *
+ * The queue system uses this so !skip and !stop
+ * can immediately cancel an active yt-dlp download.
+ */
+
 async function downloadYouTubeAudio(
   videoUrl,
-  destinationPath
+  destinationPath,
+  options = {}
 ) {
   if (!videoUrl) {
     throw new Error(
@@ -297,6 +305,19 @@ async function downloadYouTubeAudio(
   if (!destinationPath) {
     throw new Error(
       "Missing destination path."
+    );
+  }
+
+  const signal =
+    options?.signal || null;
+
+  /*
+   * If the caller already cancelled the job,
+   * don't start yt-dlp at all.
+   */
+  if (signal?.aborted) {
+    throw new Error(
+      "YouTube download cancelled."
     );
   }
 
@@ -341,10 +362,6 @@ async function downloadYouTubeAudio(
 
   /*
    * Unique temporary output.
-   *
-   * yt-dlp will eventually create something like:
-   *
-   * yt-audio-UUID.mp3
    */
   const temporaryTemplate =
     path.join(
@@ -354,6 +371,8 @@ async function downloadYouTubeAudio(
 
   let child = null;
   let timeoutTimer = null;
+  let abortHandler = null;
+  let cancelled = false;
 
   try {
     console.log(
@@ -371,24 +390,15 @@ async function downloadYouTubeAudio(
       await getCookiePath();
 
     /*
-     * Keep yt-dlp options intentionally small.
+     * yt-dlp options.
      */
-    const options = {
-      /*
-       * Output.
-       */
+    const ytOptions = {
       output:
         temporaryTemplate,
 
-      /*
-       * Best available audio.
-       */
       format:
         "bestaudio/best",
 
-      /*
-       * Convert to MP3 using FFmpeg.
-       */
       extractAudio:
         true,
 
@@ -459,15 +469,12 @@ async function downloadYouTubeAudio(
     );
 
     /*
-     * IMPORTANT:
-     *
-     * Keep the actual child process so that
-     * we can kill it if the timeout is reached.
+     * Spawn yt-dlp.
      */
     child =
       youtubedl(
         videoUrl,
-        options,
+        ytOptions,
         {
           stdio: [
             "ignore",
@@ -479,9 +486,6 @@ async function downloadYouTubeAudio(
 
     /*
      * Capture only a limited amount of output.
-     *
-     * This prevents a noisy yt-dlp process from
-     * creating a huge in-memory stdout/stderr buffer.
      */
     let stdout = "";
     let stderr = "";
@@ -526,16 +530,72 @@ async function downloadYouTubeAudio(
       );
     }
 
-    /*
-     * Kill yt-dlp if it exceeds the
-     * three-minute download limit.
-     */
+    /* =====================================================
+       ABORT / SKIP / STOP SUPPORT
+    ===================================================== */
+
+    let abortPromise = null;
+
+    if (signal) {
+      abortPromise =
+        new Promise(
+          (_, reject) => {
+            abortHandler =
+              async () => {
+                if (cancelled) {
+                  return;
+                }
+
+                cancelled = true;
+
+                console.log(
+                  "[YouTube] Download cancellation requested."
+                );
+
+                await killDownloadProcess(
+                  child
+                );
+
+                reject(
+                  new Error(
+                    "YouTube download cancelled."
+                  )
+                );
+              };
+
+            signal.addEventListener(
+              "abort",
+              abortHandler,
+              {
+                once: true,
+              }
+            );
+
+            /*
+             * Handle a signal that became aborted
+             * between the initial check and listener setup.
+             */
+            if (signal.aborted) {
+              void abortHandler();
+            }
+          }
+        );
+    }
+
+    /* =====================================================
+       TIMEOUT
+    ===================================================== */
+
     const timeoutPromise =
       new Promise(
         (_, reject) => {
           timeoutTimer =
             setTimeout(
               async () => {
+                if (cancelled) {
+                  return;
+                }
+
                 console.error(
                   "[YouTube] Download timeout reached."
                 );
@@ -555,10 +615,10 @@ async function downloadYouTubeAudio(
         }
       );
 
-    /*
-     * Convert the child-process promise into
-     * a normal promise that also exposes stdout.
-     */
+    /* =====================================================
+       DOWNLOAD PROMISE
+    ===================================================== */
+
     const downloadPromise =
       Promise.resolve(child)
         .then(() => ({
@@ -566,11 +626,21 @@ async function downloadYouTubeAudio(
           stderr,
         }));
 
+    const racePromises = [
+      downloadPromise,
+      timeoutPromise,
+    ];
+
+    if (abortPromise) {
+      racePromises.push(
+        abortPromise
+      );
+    }
+
     const result =
-      await Promise.race([
-        downloadPromise,
-        timeoutPromise,
-      ]);
+      await Promise.race(
+        racePromises
+      );
 
     if (timeoutTimer) {
       clearTimeout(
@@ -579,6 +649,22 @@ async function downloadYouTubeAudio(
 
       timeoutTimer = null;
     }
+
+    if (
+      signal &&
+      abortHandler
+    ) {
+      try {
+        signal.removeEventListener(
+          "abort",
+          abortHandler
+        );
+      } catch {
+        // Ignore listener cleanup errors.
+      }
+    }
+
+    abortHandler = null;
 
     console.log(
       "[YouTube] yt-dlp finished."
@@ -590,9 +676,10 @@ async function downloadYouTubeAudio(
       );
     }
 
-    /*
-     * Find all temporary files produced by yt-dlp.
-     */
+    /* =====================================================
+       FIND TEMPORARY FILES
+    ===================================================== */
+
     const directoryFiles =
       await fsp.readdir(
         outputDirectory
@@ -697,18 +784,12 @@ async function downloadYouTubeAudio(
         let candidate =
           line;
 
-        /*
-         * Strip surrounding quotes.
-         */
         candidate =
           candidate.replace(
             /^["']|["']$/g,
             ""
           );
 
-        /*
-         * Ignore ordinary informational lines.
-         */
         if (
           !candidate.includes("/") &&
           !candidate.includes("\\")
@@ -851,15 +932,28 @@ async function downloadYouTubeAudio(
 
     return finalPath;
   } catch (error) {
-    console.error(
-      "[YouTube] Download failed:",
-      error
-    );
-
     /*
-     * Always attempt to terminate yt-dlp
-     * if something went wrong.
+     * Don't turn an intentional queue cancellation
+     * into a scary download failure in the logs.
      */
+    if (
+      error?.message ===
+      "YouTube download cancelled."
+    ) {
+      console.log(
+        "[YouTube] Download cancelled by music queue."
+      );
+    } else {
+      console.error(
+        "[YouTube] Download failed:",
+        error
+      );
+    }
+
+    /* =====================================================
+       TIMER CLEANUP
+    ===================================================== */
+
     if (timeoutTimer) {
       clearTimeout(
         timeoutTimer
@@ -868,13 +962,38 @@ async function downloadYouTubeAudio(
       timeoutTimer = null;
     }
 
+    /* =====================================================
+       ABORT LISTENER CLEANUP
+    ===================================================== */
+
+    if (
+      signal &&
+      abortHandler
+    ) {
+      try {
+        signal.removeEventListener(
+          "abort",
+          abortHandler
+        );
+      } catch {
+        // Ignore listener cleanup errors.
+      }
+
+      abortHandler = null;
+    }
+
+    /* =====================================================
+       PROCESS CLEANUP
+    ===================================================== */
+
     await killDownloadProcess(
       child
     );
 
-    /*
-     * Cleanup temporary files.
-     */
+    /* =====================================================
+       TEMPORARY FILE CLEANUP
+    ===================================================== */
+
     try {
       const files =
         await fsp.readdir(
@@ -902,6 +1021,16 @@ async function downloadYouTubeAudio(
       }
     } catch {
       // Ignore cleanup errors.
+    }
+
+    /*
+     * Preserve the cancellation error exactly.
+     */
+    if (
+      error?.message ===
+      "YouTube download cancelled."
+    ) {
+      throw error;
     }
 
     let message =
