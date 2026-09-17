@@ -976,6 +976,40 @@ async function handleMessage(
     return;
   }
 
+if (originalText.toLowerCase() === "!gcstatus") {
+  if (!ADMIN_IDS.includes(String(senderId))) {
+    return reply(
+      api,
+      threadID,
+      "❌ Admin only."
+    );
+  }
+
+  const status = await getGCStatus();
+
+  return reply(
+    api,
+    threadID,
+    [
+      "╭━━━━━━━━━━━━━━━━━━━━━━╮",
+      "       🌑 ECLIPSE",
+      "      GC MONITOR",
+      "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `👥 TOTAL TRACKED   ${status.total}`,
+      `🟢 ACTIVE          ${status.active}`,
+      `🟡 INACTIVE        ${status.inactive}`,
+      `⚙️ FEATURES OFF    ${status.featuresDisabled}`,
+      `📦 ARCHIVED        ${status.archived}`,
+      "",
+      "━━━━━━━━━━━━━━━━━━━━━━",
+      "📡 Activity tracker: ONLINE",
+      "🗄️ Source: bot_gc_activity",
+      "━━━━━━━━━━━━━━━━━━━━━━",
+    ].join("\n")
+  );
+}
+  
   // ============================================================
   // GLOBAL BOT CONTROL
   // ============================================================
