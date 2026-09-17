@@ -468,7 +468,16 @@ async function sendAudioTrack(
       ].join("\n"),
       threadID
     );
-  } finally {
+    } finally {
+    await fsp
+      .unlink(temporaryFile)
+      .catch(() => {});
+  }
+}
+
+// ============================================================
+// RENDER HEALTH-CHECK WEB SERVER
+// ============================================================
   
 // ============================================================
 // RENDER HEALTH-CHECK WEB SERVER
