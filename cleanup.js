@@ -66,6 +66,322 @@ const runtimeState = {
 };
 
 // ============================================================
+// COQUETTE ADMIN DISPLAY HELPERS
+// ============================================================
+//
+// These functions ONLY format output.
+// They do not perform maintenance themselves.
+//
+// ============================================================
+
+function createCoquettePanel(
+  title,
+  lines = []
+) {
+  return [
+    `╭────── 🎀  ${title}  🎀 ──────╮`,
+    ...lines,
+    "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+  ].join("\n");
+}
+
+function createCleanupMenu() {
+  return createCoquettePanel(
+    "CLEANUP",
+    [
+      "୨୧ status",
+      "    ♡ !cleanup status",
+      "୨୧ maintenance",
+      "    ♡ !cleanup run",
+      "    ♡ !cleanup repair",
+      "    ♡ !cleanup optimize",
+      "    ♡ !cleanup full",
+    ]
+  );
+}
+
+function formatDuration(
+  seconds
+) {
+  const value =
+    Math.max(
+      0,
+      Number(seconds) || 0
+    );
+
+  if (value < 60) {
+    return `${value}s`;
+  }
+
+  const minutes =
+    Math.floor(
+      value / 60
+    );
+
+  const remainingSeconds =
+    value % 60;
+
+  if (minutes < 60) {
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+
+  const hours =
+    Math.floor(
+      minutes / 60
+    );
+
+  const remainingMinutes =
+    minutes % 60;
+
+  return `${hours}h ${remainingMinutes}m`;
+}
+
+function formatCleanupStatus(
+  status
+) {
+  if (!status) {
+    return createCoquettePanel(
+      "CLEANUP STATUS",
+      [
+        "♡ status unavailable",
+      ]
+    );
+  }
+
+  const running =
+    Boolean(
+      status.running
+    );
+
+  const scheduler =
+    Boolean(
+      status.schedulerActive
+    );
+
+  const lastRun =
+    status.lastCleanupAt
+      ? status.lastCleanupAt
+      : "Never";
+
+  const runtime =
+    status.runtime || {};
+
+  const memory =
+    runtime.memory || {};
+
+  const heapUsedMB =
+    Math.round(
+      Number(
+        memory.heapUsed || 0
+      ) /
+        1024 /
+        1024
+    );
+
+  const heapTotalMB =
+    Math.round(
+      Number(
+        memory.heapTotal || 0
+      ) /
+        1024 /
+        1024
+    );
+
+  return createCoquettePanel(
+    "CLEANUP STATUS",
+    [
+      `୨୧ engine`,
+      `    ♡ ECLIPSE Maintenance ${status.version || VERSION}`,
+
+      `୨୧ maintenance`,
+      `    ♡ ${running ? "🟡 RUNNING" : "🟢 READY"}`,
+
+      `୨୧ scheduler`,
+      `    ♡ ${scheduler ? "🟢 ACTIVE" : "⚪ INACTIVE"}`,
+
+      `୨୧ uptime`,
+      `    ♡ ${formatDuration(
+        status.uptimeSeconds
+      )}`,
+
+      `୨୧ maintenance runs`,
+      `    ♡ ${Number(
+        runtime.maintenanceRuns || 0
+      )}`,
+
+      `୨୧ last run`,
+      `    ♡ ${lastRun}`,
+
+      `୨୧ memory`,
+      `    ♡ ${heapUsedMB}MB / ${heapTotalMB}MB`,
+
+      `୨୧ safety`,
+      "    ♡ permanent progression protected",
+      "    ♡ expired sessions only",
+      "    ♡ source code never auto-rewritten",
+    ]
+  );
+}
+
+function formatCleanupReport(
+  report
+) {
+  if (!report) {
+    return createCoquettePanel(
+      "CLEANUP",
+      [
+        "♡ no maintenance report available.",
+      ]
+    );
+  }
+
+  if (report.skipped) {
+    return createCoquettePanel(
+      "CLEANUP",
+      [
+        "୨୧ status",
+        "    ♡ 🟡 maintenance already running",
+      ]
+    );
+  }
+
+  const cleaned =
+    report.cleaned || {};
+
+  const repaired =
+    report.repaired || {};
+
+  const integrity =
+    report.integrity || {};
+
+  const optimizer =
+    report.optimizer || {};
+
+  const gc =
+    report.gc || {};
+
+  const health =
+    report.health || {};
+
+  const database =
+    health.database
+      ? "🟢 ONLINE"
+      : "🔴 OFFLINE";
+
+  const errors =
+    Array.isArray(
+      report.errors
+    )
+      ? report.errors.length
+      : 0;
+
+  const stateRepairs =
+    Array.isArray(
+      repaired.stateFiles
+    )
+      ? repaired.stateFiles.length
+      : 0;
+
+  const optimizerFindings =
+    Array.isArray(
+      optimizer.findings
+    )
+      ? optimizer.findings.length
+      : 0;
+
+  const economyFindings =
+    Array.isArray(
+      integrity.economy
+    )
+      ? integrity.economy.length
+      : 0;
+
+  const rpgFindings =
+    Array.isArray(
+      integrity.rpg
+    )
+      ? integrity.rpg.length
+      : 0;
+
+  const gameFindings =
+    Array.isArray(
+      integrity.games
+    )
+      ? integrity.games.length
+      : 0;
+
+  const aiFindings =
+    Array.isArray(
+      integrity.ai
+    )
+      ? integrity.ai.length
+      : 0;
+
+  const stateFindings =
+    Array.isArray(
+      integrity.stateFiles
+    )
+      ? integrity.stateFiles.length
+      : 0;
+
+  const mode =
+    String(
+      report.mode || "clean"
+    ).toUpperCase();
+
+  return createCoquettePanel(
+    `CLEANUP ${mode}`,
+    [
+      `୨୧ database`,
+      `    ♡ ${database}`,
+
+      `୨୧ cleanup`,
+      `    ♡ temporary files: ${Number(
+        cleaned.temporaryFiles || 0
+      )}`,
+      `    ♡ expired sessions: ${Number(
+        cleaned.expiredSessions || 0
+      )}`,
+
+      `୨୧ repairs`,
+      `    ♡ state files repaired: ${stateRepairs}`,
+
+      `୨୧ integrity`,
+      `    ♡ economy findings: ${economyFindings}`,
+      `    ♡ RPG findings: ${rpgFindings}`,
+      `    ♡ game findings: ${gameFindings}`,
+      `    ♡ AI findings: ${aiFindings}`,
+      `    ♡ state findings: ${stateFindings}`,
+
+      `୨୧ GC`,
+      `    ♡ inactive: ${Number(
+        gc.markedInactive || 0
+      )}`,
+      `    ♡ expensive features disabled: ${Number(
+        gc.expensiveFeaturesDisabled || 0
+      )}`,
+      `    ♡ archived: ${Number(
+        gc.archived || 0
+      )}`,
+
+      `୨୧ optimizer`,
+      `    ♡ findings: ${optimizerFindings}`,
+
+      `୨୧ database maintenance`,
+      `    ♡ ${report.databaseMaintenance ? "🟢 COMPLETE" : "⚪ NOT RUN"}`,
+
+      `୨୧ duration`,
+      `    ♡ ${Number(
+        report.durationMs || 0
+      )}ms`,
+
+      `୨୧ errors`,
+      `    ♡ ${errors}`,
+    ]
+  );
+}
+
+// ============================================================
 // PERMANENT DATA PROTECTION
 // ============================================================
 
@@ -704,26 +1020,6 @@ async function checkAIIntegrity() {
 // ============================================================
 // SESSION CLEANUP
 // ============================================================
-//
-// IMPORTANT:
-//
-// Session deletion is intentionally STRICT.
-//
-// A session table is cleaned ONLY when:
-//
-//   1. The table exists.
-//   2. It has an expires_at column.
-//   3. expires_at is explicitly populated.
-//   4. The expiration time has passed.
-//   5. If status exists, status must be active/running.
-//
-// We DO NOT fall back to updated_at.
-//
-// This prevents permanent or long-lived records from being
-// accidentally deleted simply because they have not been
-// modified recently.
-//
-// ============================================================
 
 const SESSION_TABLES = [
   {
@@ -822,12 +1118,6 @@ async function cleanupSessionTable(
       table
     );
 
-  // ----------------------------------------------------------
-  // CRITICAL SAFETY CHECK
-  // ----------------------------------------------------------
-  //
-  // NO expires_at = NO DELETE.
-  //
   if (
     !columns.includes(
       "expires_at"
@@ -980,13 +1270,6 @@ function validateStateJSON(
 
 // ============================================================
 // STATE BACKUP
-// ============================================================
-//
-// Before repairing corrupt state, preserve the original file.
-//
-// This matters because riddle/trivia state may contain
-// anti-repeat usage history.
-//
 // ============================================================
 
 function backupCorruptState(
@@ -1150,19 +1433,6 @@ function repairGameStateFiles() {
 
 // ============================================================
 // SOURCE CODE OPTIMIZER
-// ============================================================
-//
-// IMPORTANT:
-// This does NOT automatically delete source code.
-//
-// Static analysis can be wrong when functions are:
-// - dynamically required
-// - called by command routers
-// - exported for another module
-// - accessed through object properties
-//
-// Therefore this generates candidates only.
-//
 // ============================================================
 
 const SOURCE_EXTENSIONS =
@@ -2355,7 +2625,9 @@ async function getGCStatus() {
         ),
 
       archived:
-        Number(row.archived || 0),
+        Number(
+          row.archived || 0
+        ),
     };
   } catch (error) {
     console.error(
@@ -2434,6 +2706,7 @@ function getCleanupStatus() {
 module.exports = {
   VERSION,
 
+  // Maintenance engine
   runCleanup,
 
   previewCleanup,
@@ -2444,15 +2717,25 @@ module.exports = {
 
   fullMaintenance,
 
+  // Scheduler
   startCleanupScheduler,
 
   stopCleanupScheduler,
 
+  // Status
   getCleanupStatus,
 
+  healthCheck,
+
+  // GC
   registerGCActivity,
 
   getGCStatus,
 
-  healthCheck,
+  // Admin display helpers
+  createCleanupMenu,
+
+  formatCleanupStatus,
+
+  formatCleanupReport,
 };
