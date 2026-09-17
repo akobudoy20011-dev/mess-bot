@@ -117,18 +117,12 @@ const RANDOM_ROAST_COOLDOWN_MS =
 /*
  * Maximum number of thread IDs retained in memory
  * for broadcasting.
- *
- * This prevents the in-memory Set from growing
- * forever on long-running Render instances.
  */
 const MAX_ACTIVE_THREADS = 1000;
 
 /*
  * Threads older than this are removed from the
  * in-memory broadcast tracker.
- *
- * GC activity itself is persisted separately in
- * the database through registerGCActivity().
  */
 const ACTIVE_THREAD_EXPIRY_MS =
   30 * 24 * 60 * 60 * 1000;
@@ -277,18 +271,7 @@ async function sendAudioTrack(
     `audio-${crypto.randomUUID()}.mp3`
   );
 
-  /*
-   * Messenger status messages.
-   *
-   * We keep these as separate messages for now.
-   * This avoids depending on editMessage support.
-   */
-
   try {
-    // ==========================================================
-    // SEARCHING
-    // ==========================================================
-
     await sendMessengerMessage(
       api,
       [
@@ -308,14 +291,6 @@ async function sendAudioTrack(
       threadID
     );
 
-    // ==========================================================
-    // SEARCH YOUTUBE
-    // ==========================================================
-
-    /*
-     * youtube.js already owns the YouTube search timeout.
-     * Do not wrap it in another timeout here.
-     */
     const video =
       await searchYouTube(
         cleanSong
@@ -339,10 +314,6 @@ async function sendAudioTrack(
       String(
         video.author || ""
       ).trim();
-
-    // ==========================================================
-    // PROCESSING
-    // ==========================================================
 
     await sendMessengerMessage(
       api,
@@ -368,29 +339,10 @@ async function sendAudioTrack(
       threadID
     );
 
-    // ==========================================================
-    // DOWNLOAD
-    // ==========================================================
-
-    /*
-     * youtube.js now has:
-     *
-     * - download timeout
-     * - yt-dlp process termination
-     * - forced process cleanup
-     * - concurrency protection
-     *
-     * Therefore index.js should not add another
-     * timeout layer around the same operation.
-     */
     await downloadYouTubeAudio(
       video.url,
       temporaryFile
     );
-
-    // ==========================================================
-    // VERIFY AUDIO
-    // ==========================================================
 
     const fileInfo =
       await fsp.stat(
@@ -406,10 +358,6 @@ async function sendAudioTrack(
       );
     }
 
-    // ==========================================================
-    // FORMAT DURATION
-    // ==========================================================
-
     let duration =
       String(
         video.duration || ""
@@ -418,10 +366,6 @@ async function sendAudioTrack(
     if (!duration) {
       duration = "--:--";
     }
-
-    // ==========================================================
-    // FINAL MUSIC PLAYER
-    // ==========================================================
 
     const playerMessage = [
       "╭━━━━━━━━━━━━━━━━━━━━━━╮",
@@ -445,10 +389,6 @@ async function sendAudioTrack(
     ]
       .filter(Boolean)
       .join("\n");
-
-    // ==========================================================
-    // SEND AUDIO
-    // ==========================================================
 
     await sendMessengerMessage(
       api,
@@ -782,16 +722,10 @@ login(
           const threadID =
             String(event.threadID);
 
-          /*
-           * Track the thread for broadcasting,
-           * but keep the tracker bounded.
-           */
           registerActiveThread(
             threadID
           );
 
-          // Register activity with the
-          // ECLIPSE maintenance engine.
           void registerGCActivity(
             threadID
           ).catch((error) => {
@@ -829,17 +763,11 @@ function registerActiveThread(
   const now =
     Date.now();
 
-  /*
-   * Refresh the thread timestamp.
-   */
   activeThreads.set(
     String(threadID),
     now
   );
 
-  /*
-   * Remove stale threads.
-   */
   for (
     const [
       knownThreadID,
@@ -856,11 +784,6 @@ function registerActiveThread(
     }
   }
 
-  /*
-   * Hard safety cap.
-   *
-   * Remove the oldest entries first.
-   */
   if (
     activeThreads.size >
     MAX_ACTIVE_THREADS
@@ -940,10 +863,6 @@ async function handleMessage(
       return;
     }
 
-    /*
-     * Do not feed ordinary bot commands into
-     * personality/adaptation observations.
-     */
     if (
       !originalText.startsWith("!")
     ) {
@@ -986,27 +905,48 @@ async function handleMessage(
   // ECLIPSE CLEANUP COMMANDS
   // ============================================================
 
-  if (
-    /^!cleanup(?:\s+(status|run|repair|optimize|full))?$/i.test(
-      originalText
-    )
-  ) {
+  const cleanupMatch =
+    originalText.match(
+      /^!cleanup(?:\s+(status|run|repair|optimize|full))?$/i
+    );
+
+  if (cleanupMatch) {
     if (
       !ADMIN_IDS.includes(senderId)
     ) {
       return;
     }
 
-    const cleanupMatch =
-      originalText.match(
-        /^!cleanup(?:\s+(status|run|repair|optimize|full))?$/i
-      );
-
     const cleanupCommand =
       (
-        cleanupMatch?.[1] ||
-        "status"
+        cleanupMatch[1] ||
+        ""
       ).toLowerCase();
+
+    // ----------------------------------------------------------
+    // CLEANUP MENU
+    // ----------------------------------------------------------
+
+    if (!cleanupCommand) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  CLEANUP  🎀 ──────╮",
+          "୨୧ status",
+          "    ♡ !cleanup status",
+          "",
+          "୨୧ maintenance",
+          "    ♡ !cleanup run",
+          "    ♡ !cleanup repair",
+          "    ♡ !cleanup optimize",
+          "    ♡ !cleanup full",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
 
     // ----------------------------------------------------------
     // STATUS
@@ -1021,30 +961,33 @@ async function handleMessage(
       sendReplyWithTyping(
         api,
         [
-          "🌑 ECLIPSE CLEANUP",
+          "╭────── 🎀  CLEANUP  🎀 ──────╮",
+          "୨୧ status",
+          `    ♡ scheduler: ${
+              status.schedulerActive
+                ? "🟢 ACTIVE"
+                : "🔴 OFF"
+            }`,
+          `    ♡ running: ${
+              status.running
+                ? "🟡 YES"
+                : "🟢 NO"
+            }`,
+          `    ♡ last run: ${
+              status.lastCleanupAt ||
+              "Never"
+            }`,
           "",
-          `AUTO CLEANUP: ${
-            status.schedulerActive
-              ? "🟢 ACTIVE"
-              : "🔴 OFF"
-          }`,
-          "INTERVAL: 24 HOURS",
-          "TEMP FILE AGE: 3 DAYS",
-          `RUNNING: ${
-            status.running
-              ? "🟡 YES"
-              : "🟢 NO"
-          }`,
-          `LAST RUN: ${
-            status.lastCleanupAt ||
-            "Never"
-          }`,
+          "୨୧ maintenance",
+          "    ♡ !cleanup run",
+          "    ♡ !cleanup repair",
+          "    ♡ !cleanup optimize",
+          "    ♡ !cleanup full",
           "",
-          "Commands:",
-          "• !cleanup run",
-          "• !cleanup repair",
-          "• !cleanup optimize",
-          "• !cleanup full",
+          "୨୧ schedule",
+          "    ♡ every 24 hours",
+          "    ♡ temporary files: 3 days",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
         ].join("\n"),
         threadID
       );
@@ -1079,7 +1022,16 @@ async function handleMessage(
       if (result?.skipped) {
         sendReplyWithTyping(
           api,
-          "🟡 Cleanup is already running.",
+          [
+            "╭────── 🎀  CLEANUP  🎀 ──────╮",
+            "",
+            "🟡 CLEANUP ALREADY RUNNING",
+            "",
+            "Please wait for the current",
+            "maintenance operation to finish.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
           threadID
         );
 
@@ -1122,13 +1074,13 @@ async function handleMessage(
         optimizerCount > 0
           ? [
               "",
-              "🔍 OPTIMIZER DETAILS",
+              "୨୧ optimizer findings",
               ...optimizerFindings.map(
                 (finding, index) => {
                   if (
                     typeof finding === "string"
                   ) {
-                    return `${index + 1}. ${finding}`;
+                    return `    ♡ ${index + 1}. ${finding}`;
                   }
 
                   if (
@@ -1153,10 +1105,10 @@ async function handleMessage(
                       finding.description ||
                       JSON.stringify(finding);
 
-                    return `${index + 1}. ${file}${line} — ${message}`;
+                    return `    ♡ ${index + 1}. ${file}${line} — ${message}`;
                   }
 
-                  return `${index + 1}. ${String(finding)}`;
+                  return `    ♡ ${index + 1}. ${String(finding)}`;
                 }
               ),
             ]
@@ -1168,42 +1120,42 @@ async function handleMessage(
       sendReplyWithTyping(
         api,
         [
-          "🌑 ECLIPSE MAINTENANCE COMPLETE",
+          "╭────── 🎀  CLEANUP  🎀 ──────╮",
+          "          ♡ COMPLETE ♡",
+          "╰─────────────────────────────╯",
           "",
-          `MODE: ${mode.toUpperCase()}`,
+          `୨୧ mode`,
+          `    ♡ ${mode.toUpperCase()}`,
           "",
-          `📁 TEMP FILES: ${temporaryFiles}`,
-          `⏳ EXPIRED SESSIONS: ${expiredSessions}`,
-          `🔧 REPAIRS: ${repairs}`,
-          `🔍 OPTIMIZER FINDINGS: ${optimizerCount}`,
+          "୨୧ cleaned",
+          `    ♡ temporary files: ${temporaryFiles}`,
+          `    ♡ expired sessions: ${expiredSessions}`,
+          `    ♡ repairs: ${repairs}`,
+          `    ♡ optimizer findings: ${optimizerCount}`,
           ...optimizerDetails,
           "",
-          `👥 GC INACTIVE: ${
-            Number(
-              gc.markedInactive || 0
-            )
-          }`,
-          `⚙️ GC FEATURES DISABLED: ${
-            Number(
-              gc.expensiveFeaturesDisabled || 0
-            )
-          }`,
-          `📦 GC ARCHIVED: ${
-            Number(
-              gc.archived || 0
-            )
-          }`,
+          "୨୧ gc maintenance",
+          `    ♡ inactive: ${Number(
+            gc.markedInactive || 0
+          )}`,
+          `    ♡ features disabled: ${Number(
+            gc.expensiveFeaturesDisabled || 0
+          )}`,
+          `    ♡ archived: ${Number(
+            gc.archived || 0
+          )}`,
           "",
-          `🗄️ DATABASE: ${
+          "୨୧ database",
+          `    ♡ ${
             result?.databaseMaintenance
               ? "🟢 OK"
               : "🔴 FAILED"
           }`,
-          `⏱️ ${
-            Number(
-              result?.durationMs || 0
-            )
-          }ms`,
+          `    ♡ duration: ${Number(
+            result?.durationMs || 0
+          )}ms`,
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
         ].join("\n"),
         threadID
       );
@@ -1215,7 +1167,15 @@ async function handleMessage(
 
       sendReplyWithTyping(
         api,
-        "❌ Cleanup failed. Check Render logs.",
+        [
+          "╭────── 🎀  CLEANUP  🎀 ──────╮",
+          "",
+          "🔴 CLEANUP FAILED",
+          "",
+          "Check Render logs for details.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
         threadID
       );
     }
@@ -1251,28 +1211,21 @@ async function handleMessage(
       sendReplyWithTyping(
         api,
         [
-          "╭━━━━━━━━━━━━━━━━━━━━━━╮",
-          "       🌑 ECLIPSE",
-          "       GC MONITOR",
-          "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+          "╭────── 🎀  GC MONITOR  🎀 ──────╮",
+          "୨୧ activity",
+          `    ♡ tracked GCs: ${status.total}`,
+          `    ♡ active: ${status.active}`,
+          `    ♡ inactive: ${status.inactive}`,
           "",
-          "📡 ACTIVITY OVERVIEW",
+          "୨୧ maintenance",
+          `    ♡ features off: ${status.featuresDisabled}`,
+          `    ♡ archived: ${status.archived}`,
           "",
-          `👥 TRACKED GCs       ${status.total}`,
-          `🟢 ACTIVE             ${status.active}`,
-          `🟡 INACTIVE           ${status.inactive}`,
+          "୨୧ database",
+          "    ♡ bot_gc_activity",
+          "    ♡ tracker: 🟢 ONLINE",
           "",
-          "⚙️ MAINTENANCE",
-          "",
-          `🔧 FEATURES OFF       ${status.featuresDisabled}`,
-          `📦 ARCHIVED           ${status.archived}`,
-          "",
-          "━━━━━━━━━━━━━━━━━━━━━━",
-          "🗄️ DATABASE",
-          "   bot_gc_activity",
-          "",
-          "📡 TRACKER STATUS: ONLINE",
-          "━━━━━━━━━━━━━━━━━━━━━━",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
         ].join("\n"),
         threadID
       );
@@ -1285,17 +1238,14 @@ async function handleMessage(
       sendReplyWithTyping(
         api,
         [
-          "╭━━━━━━━━━━━━━━━━━━━━━━╮",
-          "       🌑 ECLIPSE",
-          "       GC MONITOR",
-          "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+          "╭────── 🎀  GC MONITOR  🎀 ──────╮",
           "",
           "🔴 STATUS CHECK FAILED",
           "",
           "Unable to read GC activity data.",
           "",
           "Check the Render logs.",
-          "━━━━━━━━━━━━━━━━━━━━━━",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
         ].join("\n"),
         threadID
       );
@@ -1310,7 +1260,7 @@ async function handleMessage(
 
   const botControlMatch =
     originalText.match(
-      /^!(bot\s+(off|on|status)|shutdown|startup)$/i
+      /^!(bot(?:\s+(off|on|status))?|shutdown|startup)$/i
     );
 
   if (botControlMatch) {
@@ -1319,7 +1269,16 @@ async function handleMessage(
     ) {
       sendReplyWithTyping(
         api,
-        "❌ Only the bot admin can use this command.",
+        [
+          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+          "",
+          "🔒 ADMIN ONLY",
+          "",
+          "Only the bot admin can use",
+          "global bot controls.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
         threadID
       );
 
@@ -1327,7 +1286,39 @@ async function handleMessage(
     }
 
     const rawControl =
-      botControlMatch[1].toLowerCase();
+      (
+        botControlMatch[1] || "bot"
+      ).toLowerCase();
+
+    // ----------------------------------------------------------
+    // BOT MENU
+    // ----------------------------------------------------------
+
+    if (
+      rawControl === "bot"
+    ) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+          "୨୧ status",
+          "    ♡ !bot status",
+          "",
+          "୨୧ controls",
+          "    ♡ !bot on",
+          "    ♡ !bot off",
+          "    ♡ !shutdown",
+          "    ♡ !startup",
+          "",
+          "୨୧ communication",
+          "    ♡ !broadcast <message>",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
 
     // ----------------------------------------------------------
     // STATUS
@@ -1338,9 +1329,31 @@ async function handleMessage(
     ) {
       sendReplyWithTyping(
         api,
-        global.botDisabled
-          ? "🔴 BOT STATUS: OFF\nThe bot is disabled globally."
-          : "🟢 BOT STATUS: ON\nThe bot is active globally.",
+        [
+          "╭────── 🎀  BOT STATUS  🎀 ──────╮",
+          "",
+          `୨୧ global status`,
+          `    ♡ ${
+            global.botDisabled
+              ? "🔴 OFF"
+              : "🟢 ON"
+          }`,
+          "",
+          `୨୧ normal commands`,
+          `    ♡ ${
+            global.botDisabled
+              ? "🔴 DISABLED"
+              : "🟢 ACTIVE"
+          }`,
+          "",
+          "୨୧ controls",
+          "    ♡ !bot on",
+          "    ♡ !bot off",
+          "    ♡ !shutdown",
+          "    ♡ !startup",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
         threadID
       );
 
@@ -1359,7 +1372,24 @@ async function handleMessage(
 
       sendReplyWithTyping(
         api,
-        "🛑 Bot is now OFF globally.\nThe bot will ignore normal commands in all groups.",
+        [
+          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+          "",
+          "🔴 BOT IS NOW OFF",
+          "",
+          "୨୧ global state",
+          "    ♡ OFF",
+          "",
+          "Normal commands will now be",
+          "ignored across all groups.",
+          "",
+          "୨୧ admin controls remain available",
+          "    ♡ !bot status",
+          "    ♡ !bot on",
+          "    ♡ !startup",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
         threadID
       );
 
@@ -1378,7 +1408,19 @@ async function handleMessage(
 
       sendReplyWithTyping(
         api,
-        "🟢 Bot is now ON globally.\nNormal commands are active again.",
+        [
+          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+          "",
+          "🟢 BOT IS NOW ON",
+          "",
+          "୨୧ global state",
+          "    ♡ ON",
+          "",
+          "Normal commands are active",
+          "again across all groups.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
         threadID
       );
 
@@ -1398,6 +1440,11 @@ async function handleMessage(
 
     const isAdmin =
       ADMIN_IDS.includes(senderId);
+
+    const isBotMenu =
+      /^!bot$/i.test(
+        trimmedText
+      );
 
     const isBotStatus =
       /^!bot\s+status$/i.test(
@@ -1432,6 +1479,7 @@ async function handleMessage(
     if (
       isAdmin &&
       (
+        isBotMenu ||
         isBotStatus ||
         isBotOn ||
         isBotOff ||
@@ -1690,7 +1738,15 @@ async function handleMessage(
     ) {
       sendReplyWithTyping(
         api,
-        "❌ Admin only.",
+        [
+          "╭────── 🎀  BROADCAST  🎀 ──────╮",
+          "",
+          "🔒 ADMIN ONLY",
+          "",
+          "Only the bot admin can broadcast.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
         threadID
       );
 
@@ -1705,12 +1761,25 @@ async function handleMessage(
     if (!message) {
       sendReplyWithTyping(
         api,
-        "📢 Usage: !broadcast <message>",
+        [
+          "╭────── 🎀  BROADCAST  🎀 ──────╮",
+          "",
+          "୨୧ usage",
+          "    ♡ !broadcast <message>",
+          "",
+          "Example:",
+          "    ♡ !broadcast Server maintenance tonight.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
         threadID
       );
 
       return;
     }
+
+    const targetCount =
+      activeThreads.size;
 
     broadcastToAllThreads(
       api,
@@ -1719,7 +1788,22 @@ async function handleMessage(
 
     sendReplyWithTyping(
       api,
-      `📢 Broadcast queued for ${activeThreads.size} active thread(s).`,
+      [
+        "╭────── 🎀  BROADCAST  🎀 ──────╮",
+        "",
+        "📢 BROADCAST QUEUED",
+        "",
+        `୨୧ active threads`,
+        `    ♡ ${targetCount}`,
+        "",
+        "୨୧ status",
+        "    ♡ 🟢 queued",
+        "",
+        "The announcement has been",
+        "queued for active threads.",
+        "",
+        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+      ].join("\n"),
       threadID
     );
 
@@ -1893,10 +1977,6 @@ async function handleMessage(
       if (
         rpgHandled
       ) {
-        // ======================================================
-        // LOVE QUEST DISCOVERY AFTER RPG EXPLORE
-        // ======================================================
-
         if (
           isRpgExplore &&
           isSpecialPlayer(senderId)
@@ -1920,30 +2000,158 @@ async function handleMessage(
     }
 
     // ==========================================================
-    // GAME TOGGLE
+    // GAME CONTROL
     // ==========================================================
 
-    const gameToggleMatch =
+    const gameControlMatch =
       text.match(
-        /^!game\s+(on|off)$/i
+        /^!game(?:\s+(on|off|status))?$/i
       );
 
-    if (gameToggleMatch) {
+    if (gameControlMatch) {
       if (
         !ADMIN_IDS.includes(senderId)
       ) {
         sendReplyWithTyping(
           api,
-          "❌ Only the bot admin can turn games on or off.",
+          [
+            "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
+            "",
+            "🔒 ADMIN ONLY",
+            "",
+            "Only the bot admin can configure",
+            "games.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
           threadID
         );
 
         return;
       }
 
+      const gameSubcommand =
+        (
+          gameControlMatch[1] ||
+          ""
+        ).toLowerCase();
+
+      // --------------------------------------------------------
+      // GAME MENU
+      // --------------------------------------------------------
+
+      if (!gameSubcommand) {
+        let currentStatus =
+          false;
+
+        try {
+          currentStatus =
+            await db.isGameEnabled(
+              threadID
+            );
+        } catch (error) {
+          console.error(
+            "[GAME] Failed to check game status:",
+            error
+          );
+        }
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
+            "୨୧ status",
+            `    ♡ ${
+              currentStatus
+                ? "🟢 ON"
+                : "🔴 OFF"
+            }`,
+            "    ♡ !game status",
+            "",
+            "୨୧ controls",
+            "    ♡ !game on",
+            "    ♡ !game off",
+            "",
+            "୨୧ game center",
+            "    ♡ !games",
+            "    ♡ !games rules",
+            "    ♡ !games status",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // GAME STATUS
+      // --------------------------------------------------------
+
+      if (
+        gameSubcommand === "status"
+      ) {
+        try {
+          const enabled =
+            await db.isGameEnabled(
+              threadID
+            );
+
+          sendReplyWithTyping(
+            api,
+            [
+              "╭────── 🎀  GAME STATUS  🎀 ──────╮",
+              "",
+              "୨୧ current group status",
+              `    ♡ ${
+                enabled
+                  ? "🟢 ON"
+                  : "🔴 OFF"
+              }`,
+              "",
+              "୨୧ controls",
+              "    ♡ !game on",
+              "    ♡ !game off",
+              "",
+              "୨୧ game center",
+              "    ♡ !games",
+              "    ♡ !games rules",
+              "    ♡ !games status",
+              "",
+              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+            ].join("\n"),
+            threadID
+          );
+        } catch (error) {
+          console.error(
+            "[game status] Error:",
+            error
+          );
+
+          sendReplyWithTyping(
+            api,
+            [
+              "╭────── 🎀  GAME STATUS  🎀 ──────╮",
+              "",
+              "🔴 STATUS CHECK FAILED",
+              "",
+              "Unable to read the game setting.",
+              "",
+              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+            ].join("\n"),
+            threadID
+          );
+        }
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // GAME ON/OFF
+      // --------------------------------------------------------
+
       const enabled =
-        gameToggleMatch[1]
-          .toLowerCase() === "on";
+        gameSubcommand === "on";
 
       try {
         await db.setGameEnabled(
@@ -1953,9 +2161,26 @@ async function handleMessage(
 
         sendReplyWithTyping(
           api,
-          enabled
-            ? "🎮 Games are now ON in this group."
-            : "🎮 Games are now OFF in this group.",
+          [
+            "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
+            "",
+            enabled
+              ? "🟢 GAMES ARE NOW ON"
+              : "🔴 GAMES ARE NOW OFF",
+            "",
+            "୨୧ group status",
+            `    ♡ ${
+              enabled
+                ? "ON"
+                : "OFF"
+            }`,
+            "",
+            enabled
+              ? "Players can now use the game system."
+              : "Players can no longer start normal games.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
           threadID
         );
       } catch (error) {
@@ -1966,7 +2191,15 @@ async function handleMessage(
 
         sendReplyWithTyping(
           api,
-          "❌ Failed to change the game setting.",
+          [
+            "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
+            "",
+            "🔴 UPDATE FAILED",
+            "",
+            "Failed to change the game setting.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
           threadID
         );
       }
@@ -1993,10 +2226,6 @@ async function handleMessage(
               .trim()
               .split(/\s+/)
           : [];
-
-      // ========================================================
-      // GAME CENTER
-      // ========================================================
 
       if (
         gameCommand === "games"
@@ -2033,10 +2262,6 @@ async function handleMessage(
         return;
       }
 
-      // ========================================================
-      // CHECK GAME STATE
-      // ========================================================
-
       const gamesEnabled =
         await db.isGameEnabled(
           threadID
@@ -2046,19 +2271,20 @@ async function handleMessage(
         sendReplyWithTyping(
           api,
           [
-            "🎮 Games are currently OFF in this group.",
+            "╭────── 🎀  GAME CENTER  🎀 ──────╮",
             "",
-            "An admin can enable them with !game on.",
+            "🔴 GAMES ARE OFF",
+            "",
+            "An admin can enable them with:",
+            "    ♡ !game on",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
           ].join("\n"),
           threadID
         );
 
         return;
       }
-
-      // ========================================================
-      // HANDLE GAME
-      // ========================================================
 
       if (
         await handleGamesCommand(
@@ -2094,27 +2320,148 @@ async function handleMessage(
   }
 
   // ============================================================
-  // BANAT TOGGLE
+  // BANAT CONTROL
   // ============================================================
 
-  if (
-    text === "!banat on" ||
-    text === "!banat off"
-  ) {
+  const banatControlMatch =
+    text.match(
+      /^!banat(?:\s+(on|off|status))?$/i
+    );
+
+  if (banatControlMatch) {
     if (
       !ADMIN_IDS.includes(senderId)
     ) {
       sendReplyWithTyping(
         api,
-        "❌ Only the bot admin can turn banat on or off.",
+        [
+          "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
+          "",
+          "🔒 ADMIN ONLY",
+          "",
+          "Only the bot admin can configure",
+          "banat.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
         threadID
       );
 
       return;
     }
 
+    const banatSubcommand =
+      (
+        banatControlMatch[1] ||
+        ""
+      ).toLowerCase();
+
+    // ----------------------------------------------------------
+    // BANAT MENU
+    // ----------------------------------------------------------
+
+    if (!banatSubcommand) {
+      let enabled =
+        false;
+
+      try {
+        enabled =
+          await db.isRoastEnabled(
+            threadId
+          );
+      } catch (error) {
+        console.error(
+          "[BANAT] Failed to check roast status:",
+          error
+        );
+      }
+
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
+          "୨୧ status",
+          `    ♡ ${
+              enabled
+                ? "🟢 ON"
+                : "🔴 OFF"
+            }`,
+          "    ♡ !banat status",
+          "",
+          "୨୧ controls",
+          "    ♡ !banat on",
+          "    ♡ !banat off",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // BANAT STATUS
+    // ----------------------------------------------------------
+
+    if (
+      banatSubcommand === "status"
+    ) {
+      try {
+        const enabled =
+          await db.isRoastEnabled(
+            threadId
+          );
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  BANAT STATUS  🎀 ──────╮",
+            "",
+            "୨୧ automatic banat",
+            `    ♡ ${
+              enabled
+                ? "🟢 ON"
+                : "🔴 OFF"
+            }`,
+            "",
+            "୨୧ controls",
+            "    ♡ !banat on",
+            "    ♡ !banat off",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+      } catch (error) {
+        console.error(
+          "[BANAT] Status check failed:",
+          error
+        );
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  BANAT STATUS  🎀 ──────╮",
+            "",
+            "🔴 STATUS CHECK FAILED",
+            "",
+            "Unable to read the banat setting.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+      }
+
+      return;
+    }
+
+    // ----------------------------------------------------------
+    // BANAT ON/OFF
+    // ----------------------------------------------------------
+
     const enabled =
-      text === "!banat on";
+      banatSubcommand === "on";
 
     try {
       await db.setRoastEnabled(
@@ -2131,17 +2478,24 @@ async function handleMessage(
       sendReplyWithTyping(
         api,
         [
-          "╭━━━━━━━━━━━━━━╮",
-          "      🔥 BANAT",
-          "╰━━━━━━━━━━━━━━╯",
+          "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
           "",
           enabled
-            ? "🟢 Status: ON"
-            : "🔴 Status: OFF",
+            ? "🟢 BANAT IS NOW ON"
+            : "🔴 BANAT IS NOW OFF",
+          "",
+          "୨୧ group status",
+          `    ♡ ${
+              enabled
+                ? "ON"
+                : "OFF"
+            }`,
           "",
           enabled
-            ? "Automatic banat has been enabled for this group."
-            : "Automatic banat has been disabled for this group.",
+            ? "Automatic banat has been enabled."
+            : "Automatic banat has been disabled.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
         ].join("\n"),
         threadID
       );
@@ -2155,7 +2509,15 @@ async function handleMessage(
 
       sendReplyWithTyping(
         api,
-        "❌ Failed to update banat setting.",
+        [
+          "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
+          "",
+          "🔴 UPDATE FAILED",
+          "",
+          "Failed to update the banat setting.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
         threadID
       );
     }
@@ -2380,10 +2742,6 @@ function broadcastToAllThreads(
     return;
   }
 
-  /*
-   * Refresh/remove stale threads before
-   * creating the broadcast snapshot.
-   */
   registerActiveThreadCleanup();
 
   const threads =
