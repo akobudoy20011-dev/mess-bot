@@ -976,40 +976,86 @@ async function handleMessage(
     return;
   }
 
-if (originalText.toLowerCase() === "!gcstatus") {
-  if (!ADMIN_IDS.includes(String(senderId))) {
-    return reply(
-      api,
-      threadID,
-      "❌ Admin only."
-    );
+  // ============================================================
+  // ECLIPSE GC MONITOR
+  // ============================================================
+
+  if (
+    /^!gcstatus$/i.test(
+      originalText
+    )
+  ) {
+    // ADMIN ONLY
+    if (!ADMIN_IDS.includes(senderId)) {
+      sendReplyWithTyping(
+        api,
+        "❌ Admin only.",
+        threadID
+      );
+
+      return;
+    }
+
+    try {
+      const status =
+        await getGCStatus();
+
+      sendReplyWithTyping(
+        api,
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━━━╮",
+          "       🌑 ECLIPSE",
+          "       GC MONITOR",
+          "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "📡 ACTIVITY OVERVIEW",
+          "",
+          `👥 TRACKED GCs       ${status.total}`,
+          `🟢 ACTIVE             ${status.active}`,
+          `🟡 INACTIVE           ${status.inactive}`,
+          "",
+          "⚙️ MAINTENANCE",
+          "",
+          `🔧 FEATURES OFF       ${status.featuresDisabled}`,
+          `📦 ARCHIVED           ${status.archived}`,
+          "",
+          "━━━━━━━━━━━━━━━━━━━━━━",
+          "🗄️ DATABASE",
+          "   bot_gc_activity",
+          "",
+          "📡 TRACKER STATUS: ONLINE",
+          "━━━━━━━━━━━━━━━━━━━━━━",
+        ].join("\n"),
+        threadID
+      );
+    } catch (error) {
+      console.error(
+        "[GC STATUS] Failed:",
+        error
+      );
+
+      sendReplyWithTyping(
+        api,
+        [
+          "╭━━━━━━━━━━━━━━━━━━━━━━╮",
+          "       🌑 ECLIPSE",
+          "       GC MONITOR",
+          "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+          "",
+          "🔴 STATUS CHECK FAILED",
+          "",
+          "Unable to read GC activity data.",
+          "",
+          "Check the Render logs.",
+          "━━━━━━━━━━━━━━━━━━━━━━",
+        ].join("\n"),
+        threadID
+      );
+    }
+
+    return;
   }
 
-  const status = await getGCStatus();
-
-  return reply(
-    api,
-    threadID,
-    [
-      "╭━━━━━━━━━━━━━━━━━━━━━━╮",
-      "       🌑 ECLIPSE",
-      "      GC MONITOR",
-      "╰━━━━━━━━━━━━━━━━━━━━━━╯",
-      "",
-      `👥 TOTAL TRACKED   ${status.total}`,
-      `🟢 ACTIVE          ${status.active}`,
-      `🟡 INACTIVE        ${status.inactive}`,
-      `⚙️ FEATURES OFF    ${status.featuresDisabled}`,
-      `📦 ARCHIVED        ${status.archived}`,
-      "",
-      "━━━━━━━━━━━━━━━━━━━━━━",
-      "📡 Activity tracker: ONLINE",
-      "🗄️ Source: bot_gc_activity",
-      "━━━━━━━━━━━━━━━━━━━━━━",
-    ].join("\n")
-  );
-}
-  
   // ============================================================
   // GLOBAL BOT CONTROL
   // ============================================================
