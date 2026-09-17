@@ -223,7 +223,7 @@ function sendMessengerMessage(
 }
 
 // ============================================================
-// YOUTUBE AUDIO
+// YOUTUBE AUDIO — ECLIPSE MUSIC PLAYER
 // ============================================================
 
 async function sendAudioTrack(
@@ -235,52 +235,111 @@ async function sendAudioTrack(
     typeof requestedSong !== "string" ||
     !requestedSong.trim()
   ) {
-    api.sendMessage(
+    sendReplyWithTyping(
+      api,
       "🎵 Usage: !play <song>",
-      threadID,
-      (error) => {
-        if (error) {
-          console.error(
-            "Usage message failed:",
-            error
-          );
-        }
-      }
+      threadID
     );
 
     return;
   }
+
+  const cleanSong =
+    requestedSong.trim();
 
   const temporaryFile = path.join(
     os.tmpdir(),
     `audio-${crypto.randomUUID()}.mp3`
   );
 
+  /*
+   * Messenger status messages.
+   *
+   * We keep these as separate messages for now.
+   * This avoids depending on editMessage support.
+   */
+
   try {
-    api.sendMessage(
-      "🔎 Searching for the song...",
-      threadID,
-      (error) => {
-        if (error) {
-          console.error(
-            "Search status message failed:",
-            error
-          );
-        }
-      }
+    // ==========================================================
+    // SEARCHING
+    // ==========================================================
+
+    await sendMessengerMessage(
+      api,
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━━━╮",
+        "        🌑 ECLIPSE",
+        "       MUSIC PLAYER",
+        "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "     🔎 SEARCHING...",
+        `        ${cleanSong}`,
+        "",
+        "──────────────────────",
+        "       ECLIPSE AUDIO",
+        "          ENGINE",
+        "──────────────────────",
+      ].join("\n"),
+      threadID
     );
 
+    // ==========================================================
+    // SEARCH YOUTUBE
+    // ==========================================================
+
     const video = await withTimeout(
-      () => searchYouTube(requestedSong),
+      () => searchYouTube(cleanSong),
       YOUTUBE_SEARCH_TIMEOUT_MS,
       "YouTube search timed out. Please try again."
     );
 
     if (!video || !video.url) {
       throw new Error(
-        `No YouTube result found for "${requestedSong}".`
+        `No YouTube result found for "${cleanSong}".`
       );
     }
+
+    const title =
+      String(
+        video.title || cleanSong
+      ).trim();
+
+    const author =
+      String(
+        video.author || ""
+      ).trim();
+
+    // ==========================================================
+    // PROCESSING
+    // ==========================================================
+
+    await sendMessengerMessage(
+      api,
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━━━╮",
+        "        🌑 ECLIPSE",
+        "       MUSIC PLAYER",
+        "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "     ⚙️ PROCESSING AUDIO",
+        `        ${title}`,
+        author
+          ? `        ${author}`
+          : "",
+        "",
+        "──────────────────────",
+        "▶  PREPARING STREAM",
+        "📡  YouTube",
+        "──────────────────────",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      threadID
+    );
+
+    // ==========================================================
+    // DOWNLOAD
+    // ==========================================================
 
     await withTimeout(
       () =>
@@ -292,25 +351,72 @@ async function sendAudioTrack(
       "YouTube download timed out. Please try again."
     );
 
-    const fileInfo = await fsp.stat(
-      temporaryFile
-    );
+    // ==========================================================
+    // VERIFY AUDIO
+    // ==========================================================
+
+    const fileInfo =
+      await fsp.stat(
+        temporaryFile
+      );
 
     if (
       !fileInfo.isFile() ||
-      fileInfo.size === 0
+      fileInfo.size <= 0
     ) {
       throw new Error(
         "The downloaded audio file is empty."
       );
     }
 
+    // ==========================================================
+    // FORMAT DURATION
+    // ==========================================================
+
+    let duration =
+      String(
+        video.duration || ""
+      ).trim();
+
+    if (!duration) {
+      duration = "--:--";
+    }
+
+    // ==========================================================
+    // FINAL MUSIC PLAYER
+    // ==========================================================
+
+    const playerMessage = [
+      "╭━━━━━━━━━━━━━━━━━━━━━━╮",
+      "        🌑 ECLIPSE",
+      "       MUSIC PLAYER",
+      "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+      "",
+      `     🎵 ${title}`,
+      author
+        ? `        ${author}`
+        : "",
+      "",
+      "──────────────────────",
+      "▶  STREAMING",
+      `⏱  ${duration}     •     YouTube`,
+      "",
+      "──────────────────────",
+      "       ECLIPSE AUDIO",
+      "          ENGINE",
+      "──────────────────────",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    // ==========================================================
+    // SEND AUDIO
+    // ==========================================================
+
     await sendMessengerMessage(
       api,
       {
-        body: `🎵 ${
-          video.title || requestedSong
-        }`,
+        body: playerMessage,
         attachment:
           fs.createReadStream(
             temporaryFile
@@ -318,34 +424,52 @@ async function sendAudioTrack(
       },
       threadID
     );
+
+    console.log(
+      `[Music] Sent "${title}" to ${threadID}`
+    );
   } catch (error) {
     console.error(
-      "Audio command failed:",
+      "[Music] Audio command failed:",
       error
     );
 
-    api.sendMessage(
+    let errorMessage =
+      error?.message ||
+      String(error);
+
+    if (
+      errorMessage.length > 1000
+    ) {
+      errorMessage =
+        errorMessage.slice(
+          0,
+          1000
+        );
+    }
+
+    sendReplyWithTyping(
+      api,
       [
-        "❌ Unable to download that song.",
-        error.message,
+        "╭━━━━━━━━━━━━━━━━━━━━━━╮",
+        "        🌑 ECLIPSE",
+        "       MUSIC PLAYER",
+        "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+        "",
+        "🔴 PLAYBACK FAILED",
+        "",
+        errorMessage,
+        "",
+        "Try another song or search again.",
+        "──────────────────────",
+        "       ECLIPSE AUDIO",
+        "          ENGINE",
+        "──────────────────────",
       ].join("\n"),
-      threadID,
-      (sendError) => {
-        if (sendError) {
-          console.error(
-            "Audio error message failed:",
-            sendError
-          );
-        }
-      }
+      threadID
     );
   } finally {
-    await fsp
-      .unlink(temporaryFile)
-      .catch(() => {});
-  }
-}
-
+  
 // ============================================================
 // RENDER HEALTH-CHECK WEB SERVER
 // ============================================================
