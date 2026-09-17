@@ -1,3 +1,5 @@
+"use strict";
+
 const db = require("./db");
 
 const {
@@ -57,6 +59,57 @@ const AUTOMOD_MUTE_DURATIONS = {
 
 /*
 |--------------------------------------------------------------------------
+| PER-GROUP MODERATION SETTINGS
+|--------------------------------------------------------------------------
+|
+| These settings are stored per Messenger group/thread.
+|
+| NOTE:
+| links_enabled / spam_enabled / mentions_enabled / raid_enabled
+| are configuration switches for the corresponding protection systems.
+| The actual detectors can be added/expanded independently without
+| changing this settings system.
+|--------------------------------------------------------------------------
+*/
+
+const MOD_DEFAULT_SETTINGS = {
+  links_enabled: false,
+  spam_enabled: true,
+  mentions_enabled: true,
+  raid_enabled: true,
+  warnings_enabled: true,
+
+  warn_limit: WARN_LIMIT,
+
+  automod_mute_level: AUTOMOD_MUTE_LEVEL,
+  automod_ban_level: AUTOMOD_BAN_LEVEL,
+  automod_min_confidence: AUTOMOD_MIN_CONFIDENCE,
+
+  spam_window_ms: 10 * 1000,
+  spam_max_messages: 6,
+
+  mention_window_ms: 10 * 1000,
+  mention_max: 5,
+};
+
+const MOD_SETTING_COLUMNS = new Set([
+  "links_enabled",
+  "spam_enabled",
+  "mentions_enabled",
+  "raid_enabled",
+  "warnings_enabled",
+  "warn_limit",
+  "automod_mute_level",
+  "automod_ban_level",
+  "automod_min_confidence",
+  "spam_window_ms",
+  "spam_max_messages",
+  "mention_window_ms",
+  "mention_max",
+]);
+
+/*
+|--------------------------------------------------------------------------
 | MEMORY CACHE
 |--------------------------------------------------------------------------
 */
@@ -66,10 +119,15 @@ const economyRate = new Map();
 
 const automodOwnerLastSeen = new Map();
 
+const moderationSettingsCache = new Map();
+
 let autoModAnalyzer = null;
 
 let automodTablesReady = false;
 let automodTablesPromise = null;
+
+let moderationSettingsTablesReady = false;
+let moderationSettingsTablesPromise = null;
 
 const automodSeenMessageIds = new Map();
 
@@ -149,11 +207,342 @@ async function ensureAutoModTables() {
 
 /*
 |--------------------------------------------------------------------------
+| MODERATION SETTINGS DATABASE
+|--------------------------------------------------------------------------
+*/
+
+async function ensureModerationSettingsTable() {
+  if (moderationSettingsTablesReady) {
+    return;
+  }
+
+  if (moderationSettingsTablesPromise) {
+    return moderationSettingsTablesPromise;
+  }
+
+  moderationSettingsTablesPromise = (async () => {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS moderation_settings (
+        thread_id TEXT PRIMARY KEY,
+
+        links_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        spam_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        mentions_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        raid_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        warnings_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+
+        warn_limit INTEGER NOT NULL DEFAULT 3,
+
+        automod_mute_level INTEGER NOT NULL DEFAULT 3,
+        automod_ban_level INTEGER NOT NULL DEFAULT 6,
+        automod_min_confidence REAL NOT NULL DEFAULT 0.88,
+
+        spam_window_ms BIGINT NOT NULL DEFAULT 10000,
+        spam_max_messages INTEGER NOT NULL DEFAULT 6,
+
+        mention_window_ms BIGINT NOT NULL DEFAULT 10000,
+        mention_max INTEGER NOT NULL DEFAULT 5,
+
+        updated_at BIGINT NOT NULL
+      );
+    `);
+  })();
+
+  try {
+    await moderationSettingsTablesPromise;
+    moderationSettingsTablesReady = true;
+  } finally {
+    moderationSettingsTablesPromise = null;
+  }
+}
+
+function normalizeModerationSettings(row = {}) {
+  const confidence =
+    Number(row.automod_min_confidence);
+
+  return {
+    thread_id:
+      String(row.thread_id || ""),
+
+    links_enabled:
+      row.links_enabled === true,
+
+    spam_enabled:
+      row.spam_enabled !== false,
+
+    mentions_enabled:
+      row.mentions_enabled !== false,
+
+    raid_enabled:
+      row.raid_enabled !== false,
+
+    warnings_enabled:
+      row.warnings_enabled !== false,
+
+    warn_limit:
+      Number.isSafeInteger(
+        Number(row.warn_limit)
+      )
+        ? Math.max(
+            1,
+            Math.min(
+              20,
+              Number(row.warn_limit)
+            )
+          )
+        : MOD_DEFAULT_SETTINGS.warn_limit,
+
+    automod_mute_level:
+      Number.isSafeInteger(
+        Number(row.automod_mute_level)
+      )
+        ? Math.max(
+            1,
+            Math.min(
+              10,
+              Number(row.automod_mute_level)
+            )
+          )
+        : MOD_DEFAULT_SETTINGS.automod_mute_level,
+
+    automod_ban_level:
+      Number.isSafeInteger(
+        Number(row.automod_ban_level)
+      )
+        ? Math.max(
+            1,
+            Math.min(
+              10,
+              Number(row.automod_ban_level)
+            )
+          )
+        : MOD_DEFAULT_SETTINGS.automod_ban_level,
+
+    automod_min_confidence:
+      Number.isFinite(confidence)
+        ? Math.max(
+            0.5,
+            Math.min(
+              1,
+              confidence
+            )
+          )
+        : MOD_DEFAULT_SETTINGS.automod_min_confidence,
+
+    spam_window_ms:
+      Number.isSafeInteger(
+        Number(row.spam_window_ms)
+      )
+        ? Math.max(
+            1000,
+            Math.min(
+              5 * 60 * 1000,
+              Number(row.spam_window_ms)
+            )
+          )
+        : MOD_DEFAULT_SETTINGS.spam_window_ms,
+
+    spam_max_messages:
+      Number.isSafeInteger(
+        Number(row.spam_max_messages)
+      )
+        ? Math.max(
+            2,
+            Math.min(
+              100,
+              Number(row.spam_max_messages)
+            )
+          )
+        : MOD_DEFAULT_SETTINGS.spam_max_messages,
+
+    mention_window_ms:
+      Number.isSafeInteger(
+        Number(row.mention_window_ms)
+      )
+        ? Math.max(
+            1000,
+            Math.min(
+              5 * 60 * 1000,
+              Number(row.mention_window_ms)
+            )
+          )
+        : MOD_DEFAULT_SETTINGS.mention_window_ms,
+
+    mention_max:
+      Number.isSafeInteger(
+        Number(row.mention_max)
+      )
+        ? Math.max(
+            1,
+            Math.min(
+              100,
+              Number(row.mention_max)
+            )
+          )
+        : MOD_DEFAULT_SETTINGS.mention_max,
+
+    updated_at:
+      Number(row.updated_at || 0),
+  };
+}
+
+async function getModerationSettings(threadID) {
+  const threadKey = String(threadID);
+
+  if (
+    moderationSettingsCache.has(
+      threadKey
+    )
+  ) {
+    return moderationSettingsCache.get(
+      threadKey
+    );
+  }
+
+  await ensureModerationSettingsTable();
+
+  const result = await db.query(
+    `
+    SELECT *
+    FROM moderation_settings
+    WHERE thread_id = $1
+    LIMIT 1
+    `,
+    [threadKey]
+  );
+
+  if (result.rows[0]) {
+    const settings =
+      normalizeModerationSettings(
+        result.rows[0]
+      );
+
+    moderationSettingsCache.set(
+      threadKey,
+      settings
+    );
+
+    return settings;
+  }
+
+  const timestamp = now();
+
+  await db.query(
+    `
+    INSERT INTO moderation_settings
+    (
+      thread_id,
+      links_enabled,
+      spam_enabled,
+      mentions_enabled,
+      raid_enabled,
+      warnings_enabled,
+      warn_limit,
+      automod_mute_level,
+      automod_ban_level,
+      automod_min_confidence,
+      spam_window_ms,
+      spam_max_messages,
+      mention_window_ms,
+      mention_max,
+      updated_at
+    )
+    VALUES
+    (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+      $11,$12,$13,$14,$15
+    )
+    ON CONFLICT (thread_id)
+    DO NOTHING
+    `,
+    [
+      threadKey,
+      MOD_DEFAULT_SETTINGS.links_enabled,
+      MOD_DEFAULT_SETTINGS.spam_enabled,
+      MOD_DEFAULT_SETTINGS.mentions_enabled,
+      MOD_DEFAULT_SETTINGS.raid_enabled,
+      MOD_DEFAULT_SETTINGS.warnings_enabled,
+      MOD_DEFAULT_SETTINGS.warn_limit,
+      MOD_DEFAULT_SETTINGS.automod_mute_level,
+      MOD_DEFAULT_SETTINGS.automod_ban_level,
+      MOD_DEFAULT_SETTINGS.automod_min_confidence,
+      MOD_DEFAULT_SETTINGS.spam_window_ms,
+      MOD_DEFAULT_SETTINGS.spam_max_messages,
+      MOD_DEFAULT_SETTINGS.mention_window_ms,
+      MOD_DEFAULT_SETTINGS.mention_max,
+      timestamp,
+    ]
+  );
+
+  const settings = {
+    thread_id: threadKey,
+    ...MOD_DEFAULT_SETTINGS,
+    updated_at: timestamp,
+  };
+
+  moderationSettingsCache.set(
+    threadKey,
+    settings
+  );
+
+  return settings;
+}
+
+async function updateModerationSetting(
+  threadID,
+  column,
+  value
+) {
+  if (
+    !MOD_SETTING_COLUMNS.has(
+      column
+    )
+  ) {
+    throw new Error(
+      "Invalid moderation setting."
+    );
+  }
+
+  await ensureModerationSettingsTable();
+
+  await getModerationSettings(
+    threadID
+  );
+
+  await db.query(
+    `
+    UPDATE moderation_settings
+    SET
+      ${column} = $1,
+      updated_at = $2
+    WHERE thread_id = $3
+    `,
+    [
+      value,
+      now(),
+      String(threadID),
+    ]
+  );
+
+  moderationSettingsCache.delete(
+    String(threadID)
+  );
+
+  return getModerationSettings(
+    threadID
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
 | AUTMOD OWNER ACTIVITY
 |--------------------------------------------------------------------------
 */
 
-function noteOwnerActivity(threadID, userId) {
+function noteOwnerActivity(
+  threadID,
+  userId
+) {
   if (
     !threadID ||
     !userId ||
@@ -162,8 +551,11 @@ function noteOwnerActivity(threadID, userId) {
     return;
   }
 
-  const threadKey = String(threadID);
-  const timestamp = now();
+  const threadKey =
+    String(threadID);
+
+  const timestamp =
+    now();
 
   automodOwnerLastSeen.set(
     threadKey,
@@ -217,22 +609,26 @@ function noteOwnerActivity(threadID, userId) {
 |--------------------------------------------------------------------------
 */
 
-async function isOwnerAway(threadID) {
+async function isOwnerAway(
+  threadID
+) {
   await ensureAutoModTables();
 
-  const result = await db.query(
-    `
-    SELECT
-      owner_away_timeout,
-      owner_last_seen
-    FROM automod_settings
-    WHERE thread_id = $1
-    LIMIT 1
-    `,
-    [threadID]
-  );
+  const result =
+    await db.query(
+      `
+      SELECT
+        owner_away_timeout,
+        owner_last_seen
+      FROM automod_settings
+      WHERE thread_id = $1
+      LIMIT 1
+      `,
+      [threadID]
+    );
 
-  const row = result.rows[0];
+  const row =
+    result.rows[0];
 
   const timeout =
     Number(
@@ -252,26 +648,19 @@ async function isOwnerAway(threadID) {
       row?.owner_last_seen || 0
     );
 
-  /*
-   * Use whichever timestamp is newer.
-   */
   const lastSeen =
     Math.max(
       memoryLastSeen,
       databaseLastSeen
     );
 
-  /*
-   * If the owner has never been observed,
-   * AutoMod stays dormant.
-   *
-   * This is an important safety rule.
-   */
   if (!lastSeen) {
     return false;
   }
 
-  return now() - lastSeen >= timeout;
+  return (
+    now() - lastSeen >= timeout
+  );
 }
 
 /*
@@ -280,24 +669,28 @@ async function isOwnerAway(threadID) {
 |--------------------------------------------------------------------------
 */
 
-async function getAutoModSettings(threadID) {
+async function getAutoModSettings(
+  threadID
+) {
   await ensureAutoModTables();
 
-  const result = await db.query(
-    `
-    SELECT *
-    FROM automod_settings
-    WHERE thread_id = $1
-    LIMIT 1
-    `,
-    [threadID]
-  );
+  const result =
+    await db.query(
+      `
+      SELECT *
+      FROM automod_settings
+      WHERE thread_id = $1
+      LIMIT 1
+      `,
+      [threadID]
+    );
 
   if (result.rows[0]) {
     return result.rows[0];
   }
 
-  const timestamp = now();
+  const timestamp =
+    now();
 
   await db.query(
     `
@@ -377,7 +770,9 @@ async function setAutoModEnabled(
     ]
   );
 
-  return getAutoModSettings(threadID);
+  return getAutoModSettings(
+    threadID
+  );
 }
 
 /*
@@ -386,7 +781,9 @@ async function setAutoModEnabled(
 |--------------------------------------------------------------------------
 */
 
-function setAutoModAnalyzer(analyzer) {
+function setAutoModAnalyzer(
+  analyzer
+) {
   if (
     analyzer !== null &&
     typeof analyzer !== "function"
@@ -396,7 +793,8 @@ function setAutoModAnalyzer(analyzer) {
     );
   }
 
-  autoModAnalyzer = analyzer;
+  autoModAnalyzer =
+    analyzer;
 }
 
 async function analyzeForAutoMod({
@@ -415,7 +813,8 @@ async function analyzeForAutoMod({
 
   if (
     !message ||
-    typeof autoModAnalyzer !== "function"
+    typeof autoModAnalyzer !==
+      "function"
   ) {
     return null;
   }
@@ -436,7 +835,9 @@ async function analyzeForAutoMod({
       return null;
     }
 
-    return normalizeAutoModResult(result);
+    return normalizeAutoModResult(
+      result
+    );
   } catch (error) {
     console.error(
       "[AutoMod] Analyzer error:",
@@ -447,7 +848,9 @@ async function analyzeForAutoMod({
   }
 }
 
-function normalizeAutoModResult(result) {
+function normalizeAutoModResult(
+  result
+) {
   const allowedActions =
     new Set([
       "none",
@@ -487,13 +890,19 @@ function normalizeAutoModResult(result) {
   confidence =
     Math.max(
       0,
-      Math.min(1, confidence)
+      Math.min(
+        1,
+        confidence
+      )
     );
 
   severity =
     Math.max(
       0,
-      Math.min(10, severity)
+      Math.min(
+        10,
+        severity
+      )
     );
 
   const reason =
@@ -503,7 +912,9 @@ function normalizeAutoModResult(result) {
     );
 
   if (
-    !allowedActions.has(action)
+    !allowedActions.has(
+      action
+    )
   ) {
     return null;
   }
@@ -529,23 +940,24 @@ async function getRecentAutoModIncidents(
 ) {
   await ensureAutoModTables();
 
-  const result = await db.query(
-    `
-    SELECT *
-    FROM automod_incidents
-    WHERE thread_id = $1
-      AND user_id = $2
-      AND created_at >= $3
-    ORDER BY created_at DESC
-    LIMIT 20
-    `,
-    [
-      threadID,
-      userId,
-      now() -
-        AUTOMOD_INCIDENT_WINDOW_MS,
-    ]
-  );
+  const result =
+    await db.query(
+      `
+      SELECT *
+      FROM automod_incidents
+      WHERE thread_id = $1
+        AND user_id = $2
+        AND created_at >= $3
+      ORDER BY created_at DESC
+      LIMIT 20
+      `,
+      [
+        threadID,
+        userId,
+        now() -
+          AUTOMOD_INCIDENT_WINDOW_MS,
+      ]
+    );
 
   return result.rows;
 }
@@ -668,7 +1080,8 @@ async function isMuted(
 ) {
   await ensureAutoModTables();
 
-  const timestamp = now();
+  const timestamp =
+    now();
 
   const result =
     await db.query(
@@ -693,9 +1106,6 @@ async function isMuted(
     return result.rows[0];
   }
 
-  /*
-   * Deactivate expired mutes.
-   */
   await db.query(
     `
     UPDATE moderation_mutes
@@ -735,7 +1145,9 @@ if (
 |--------------------------------------------------------------------------
 */
 
-function isDuplicateAutoModMessage(event) {
+function isDuplicateAutoModMessage(
+  event
+) {
   const messageId =
     String(
       event?.messageID ||
@@ -747,7 +1159,8 @@ function isDuplicateAutoModMessage(event) {
     return false;
   }
 
-  const timestamp = now();
+  const timestamp =
+    now();
 
   for (
     const [
@@ -787,12 +1200,9 @@ function isDuplicateAutoModMessage(event) {
 |--------------------------------------------------------------------------
 */
 
-function canAutoModTarget(userId) {
-  /*
-   * AutoMod can only act on normal users.
-   *
-   * Owner and trusted administrators are protected.
-   */
+function canAutoModTarget(
+  userId
+) {
   return (
     !isBotOwner(userId) &&
     !isTrustedAdmin(userId)
@@ -828,17 +1238,18 @@ async function evaluateAutoMod({
     return false;
   }
 
-  /*
-   * Never autonomously punish administrators.
-   */
   if (
-    !canAutoModTarget(senderId)
+    !canAutoModTarget(
+      senderId
+    )
   ) {
     return false;
   }
 
   if (
-    isDuplicateAutoModMessage(event)
+    isDuplicateAutoModMessage(
+      event
+    )
   ) {
     return false;
   }
@@ -854,18 +1265,14 @@ async function evaluateAutoMod({
     return false;
   }
 
-  /*
-   * AutoMod only operates while the owner is away.
-   */
   if (
-    !(await isOwnerAway(threadID))
+    !(await isOwnerAway(
+      threadID
+    ))
   ) {
     return false;
   }
 
-  /*
-   * Existing mute immediately blocks the message.
-   */
   if (
     await isMuted(
       threadID,
@@ -883,19 +1290,27 @@ async function evaluateAutoMod({
       text,
     });
 
-  /*
-   * No analyzer = no autonomous punishment.
-   */
   if (!analysis) {
     return false;
   }
 
-  /*
-   * Confidence threshold.
-   */
+  const modSettings =
+    await getModerationSettings(
+      threadID
+    );
+
+  const minConfidence =
+    modSettings.automod_min_confidence;
+
+  const muteLevel =
+    modSettings.automod_mute_level;
+
+  const banLevel =
+    modSettings.automod_ban_level;
+
   if (
     analysis.confidence <
-    AUTOMOD_MIN_CONFIDENCE
+    minConfidence
   ) {
     await logAutoModIncident({
       threadID,
@@ -920,16 +1335,12 @@ async function evaluateAutoMod({
       senderId
     );
 
-  /*
-   * Only count incidents that were sufficiently
-   * confident enough to become real AutoMod incidents.
-   */
   const validPrevious =
     previous.filter(
       (incident) =>
         Number(
           incident.confidence || 0
-        ) >= AUTOMOD_MIN_CONFIDENCE
+        ) >= minConfidence
     );
 
   const previousSeverity =
@@ -949,31 +1360,22 @@ async function evaluateAutoMod({
   let action =
     analysis.action;
 
-  /*
-   * Never allow a ban from a single low-severity event.
-   */
   if (
     action === "ban" &&
     totalSeverity <
-      AUTOMOD_BAN_LEVEL
+      banLevel
   ) {
     action = "mute";
   }
 
-  /*
-   * Require accumulated behavior before muting.
-   */
   if (
     action === "mute" &&
     totalSeverity <
-      AUTOMOD_MUTE_LEVEL
+      muteLevel
   ) {
     action = "warn";
   }
 
-  /*
-   * Ignore extremely weak warnings.
-   */
   if (
     action === "warn" &&
     analysis.severity < 2
@@ -1005,6 +1407,12 @@ async function evaluateAutoMod({
   if (
     action === "warn"
   ) {
+    if (
+      !modSettings.warnings_enabled
+    ) {
+      return false;
+    }
+
     const warnings =
       await addWarning(
         threadID,
@@ -1022,13 +1430,9 @@ async function evaluateAutoMod({
       success: true,
     });
 
-    /*
-     * Warning threshold is logged but does not
-     * independently trigger a ban.
-     */
     if (
       warnings.length >=
-      WARN_LIMIT
+      modSettings.warn_limit
     ) {
       await logModeration({
         threadID,
@@ -1037,7 +1441,7 @@ async function evaluateAutoMod({
         action:
           "automod_warning_threshold_reached",
         reason:
-          `${WARN_LIMIT} active warnings reached`,
+          `${modSettings.warn_limit} active warnings reached`,
         success: true,
       });
     }
@@ -1101,11 +1505,10 @@ async function evaluateAutoMod({
   if (
     action === "ban"
   ) {
-    /*
-     * Final safety check immediately before punishment.
-     */
     if (
-      !canAutoModTarget(senderId)
+      !canAutoModTarget(
+        senderId
+      )
     ) {
       return false;
     }
@@ -1117,7 +1520,7 @@ async function evaluateAutoMod({
       analysis.reason
     );
 
-    const removed =
+    const removal =
       await removeFromGroup(
         api,
         threadID,
@@ -1130,7 +1533,7 @@ async function evaluateAutoMod({
       targetId: senderId,
       action: "automod_ban",
       reason: analysis.reason,
-      success: removed,
+      success: removal.ok,
     });
 
     await send(
@@ -1142,10 +1545,12 @@ async function evaluateAutoMod({
         `👤 User: ${senderId}`,
         `📌 Reason: ${analysis.reason}`,
         `👢 Removed from group: ${
-          removed ? "Yes" : "No"
+          removal.ok
+            ? "Yes"
+            : "No"
         }`,
         "",
-        removed
+        removal.ok
           ? "The user was removed and locally banned."
           : "The Facebook removal failed, but the local ban remains active.",
       ].join("\n")
@@ -1181,9 +1586,6 @@ async function handleAutoModCommand(
     return true;
   }
 
-  /*
-   * Owner activity is refreshed immediately.
-   */
   noteOwnerActivity(
     threadID,
     moderatorId
@@ -1321,6 +1723,798 @@ async function handleAutoModCommand(
 
 /*
 |--------------------------------------------------------------------------
+| MOD CONTROL PANEL
+|--------------------------------------------------------------------------
+*/
+
+function formatMinutes(
+  milliseconds
+) {
+  return Math.round(
+    Number(milliseconds) / 60000
+  );
+}
+
+function settingOnOff(
+  value
+) {
+  return value
+    ? "ON"
+    : "OFF";
+}
+
+async function handleModCommand(
+  api,
+  threadID,
+  moderatorId,
+  args
+) {
+  if (
+    !isAdmin(moderatorId)
+  ) {
+    await send(
+      api,
+      threadID,
+      "❌ You do not have permission to view moderation settings."
+    );
+
+    return true;
+  }
+
+  const subcommand =
+    String(
+      args[0] || "status"
+    ).toLowerCase();
+
+  const settings =
+    await getModerationSettings(
+      threadID
+    );
+
+  /*
+   * ================================================================
+   * STATUS
+   * ================================================================
+   */
+
+  if (
+    subcommand === "status"
+  ) {
+    await send(
+      api,
+      threadID,
+      [
+        "🛡️ MODERATION STATUS",
+        "",
+        `🔗 Links: ${settingOnOff(
+          settings.links_enabled
+        )}`,
+        `💬 Spam protection: ${settingOnOff(
+          settings.spam_enabled
+        )}`,
+        `🏷️ Mention protection: ${settingOnOff(
+          settings.mentions_enabled
+        )}`,
+        `🚨 Raid protection: ${settingOnOff(
+          settings.raid_enabled
+        )}`,
+        `⚠️ Warnings: ${settingOnOff(
+          settings.warnings_enabled
+        )}`,
+        "",
+        `⚠️ Warning limit: ${settings.warn_limit}`,
+        `🔇 AutoMod mute threshold: ${settings.automod_mute_level}`,
+        `🔨 AutoMod ban threshold: ${settings.automod_ban_level}`,
+        `🎯 AutoMod confidence: ${settings.automod_min_confidence}`,
+        "",
+        `👤 Your authority: ${
+          isBotOwner(moderatorId)
+            ? "Bot Owner"
+            : "Trusted Admin"
+        }`,
+        "",
+        "Use !mod settings for the complete configuration.",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  /*
+   * ================================================================
+   * SETTINGS
+   * ================================================================
+   */
+
+  if (
+    subcommand === "settings"
+  ) {
+    await send(
+      api,
+      threadID,
+      [
+        "⚙️ MODERATION SETTINGS",
+        "",
+        `🔗 Links: ${settingOnOff(
+          settings.links_enabled
+        )}`,
+        `💬 Spam: ${settingOnOff(
+          settings.spam_enabled
+        )}`,
+        `🏷️ Mentions: ${settingOnOff(
+          settings.mentions_enabled
+        )}`,
+        `🚨 Raid: ${settingOnOff(
+          settings.raid_enabled
+        )}`,
+        `⚠️ Warnings: ${settingOnOff(
+          settings.warnings_enabled
+        )}`,
+        "",
+        `⚠️ Warning limit: ${settings.warn_limit}`,
+        `🔇 Mute threshold: ${settings.automod_mute_level}`,
+        `🔨 Ban threshold: ${settings.automod_ban_level}`,
+        `🎯 Confidence: ${settings.automod_min_confidence}`,
+        "",
+        `💬 Spam threshold: ${settings.spam_max_messages} messages / ${formatMinutes(
+          settings.spam_window_ms
+        )} min`,
+        `🏷️ Mention threshold: ${settings.mention_max} mentions / ${formatMinutes(
+          settings.mention_window_ms
+        )} min`,
+        "",
+        "Only the Bot Owner can change these settings.",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  /*
+   * ================================================================
+   * FILTERS
+   * ================================================================
+   */
+
+  if (
+    subcommand === "filters"
+  ) {
+    await send(
+      api,
+      threadID,
+      [
+        "🧰 MODERATION FILTERS",
+        "",
+        `🔗 Link filtering: ${settingOnOff(
+          settings.links_enabled
+        )}`,
+        `💬 Spam/flood protection: ${settingOnOff(
+          settings.spam_enabled
+        )}`,
+        `🏷️ Mention protection: ${settingOnOff(
+          settings.mentions_enabled
+        )}`,
+        `🚨 Raid protection: ${settingOnOff(
+          settings.raid_enabled
+        )}`,
+        `⚠️ Warning system: ${settingOnOff(
+          settings.warnings_enabled
+        )}`,
+        "",
+        "These switches control whether each protection system is enabled for this group.",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  /*
+   * ================================================================
+   * THRESHOLDS
+   * ================================================================
+   */
+
+  if (
+    subcommand === "thresholds"
+  ) {
+    await send(
+      api,
+      threadID,
+      [
+        "📊 MODERATION THRESHOLDS",
+        "",
+        `⚠️ Warning limit: ${settings.warn_limit}`,
+        `🔇 AutoMod mute level: ${settings.automod_mute_level}`,
+        `🔨 AutoMod ban level: ${settings.automod_ban_level}`,
+        `🎯 AutoMod confidence: ${settings.automod_min_confidence}`,
+        "",
+        `💬 Spam: ${settings.spam_max_messages} messages / ${formatMinutes(
+          settings.spam_window_ms
+        )} min`,
+        `🏷️ Mentions: ${settings.mention_max} / ${formatMinutes(
+          settings.mention_window_ms
+        )} min`,
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  /*
+   * ================================================================
+   * OWNER-ONLY SETTINGS CHANGES
+   * ================================================================
+   */
+
+  if (
+    !isBotOwner(moderatorId)
+  ) {
+    await send(
+      api,
+      threadID,
+      "❌ Only the Bot Owner can change moderation settings."
+    );
+
+    return true;
+  }
+
+  noteOwnerActivity(
+    threadID,
+    moderatorId
+  );
+
+  /*
+   * !mod links on/off
+   */
+
+  if (
+    subcommand === "links"
+  ) {
+    const value =
+      parseOnOff(
+        args[1]
+      );
+
+    if (
+      value === null
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod links on/off"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "links_enabled",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `🔗 Link filtering is now ${settingOnOff(
+        updated.links_enabled
+      )} for this group.`
+    );
+
+    return true;
+  }
+
+  /*
+   * !mod spam on/off
+   */
+
+  if (
+    subcommand === "spam"
+  ) {
+    const value =
+      parseOnOff(
+        args[1]
+      );
+
+    if (
+      value === null
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod spam on/off"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "spam_enabled",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `💬 Spam protection is now ${settingOnOff(
+        updated.spam_enabled
+      )} for this group.`
+    );
+
+    return true;
+  }
+
+  /*
+   * !mod mentions on/off
+   */
+
+  if (
+    subcommand === "mentions"
+  ) {
+    const value =
+      parseOnOff(
+        args[1]
+      );
+
+    if (
+      value === null
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod mentions on/off"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "mentions_enabled",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `🏷️ Mention protection is now ${settingOnOff(
+        updated.mentions_enabled
+      )} for this group.`
+    );
+
+    return true;
+  }
+
+  /*
+   * !mod raid on/off
+   */
+
+  if (
+    subcommand === "raid"
+  ) {
+    const value =
+      parseOnOff(
+        args[1]
+      );
+
+    if (
+      value === null
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod raid on/off"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "raid_enabled",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `🚨 Raid protection is now ${settingOnOff(
+        updated.raid_enabled
+      )} for this group.`
+    );
+
+    return true;
+  }
+
+  /*
+   * !mod warnings on/off
+   */
+
+  if (
+    subcommand === "warnings"
+  ) {
+    const value =
+      parseOnOff(
+        args[1]
+      );
+
+    if (
+      value === null
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod warnings on/off"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "warnings_enabled",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `⚠️ Warning system is now ${settingOnOff(
+        updated.warnings_enabled
+      )} for this group.`
+    );
+
+    return true;
+  }
+
+  /*
+   * !mod warnlimit <number>
+   */
+
+  if (
+    subcommand === "warnlimit"
+  ) {
+    const value =
+      parseIntegerSetting(
+        args[1],
+        1,
+        20
+      );
+
+    if (
+      value === null
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod warnlimit <1-20>"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "warn_limit",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `⚠️ Warning limit set to ${updated.warn_limit}.`
+    );
+
+    return true;
+  }
+
+  /*
+   * !mod mutethreshold <number>
+   */
+
+  if (
+    subcommand === "mutethreshold"
+  ) {
+    const value =
+      parseIntegerSetting(
+        args[1],
+        1,
+        10
+      );
+
+    if (
+      value === null
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod mutethreshold <1-10>"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "automod_mute_level",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `🔇 AutoMod mute threshold set to ${updated.automod_mute_level}.`
+    );
+
+    return true;
+  }
+
+  /*
+   * !mod banthreshold <number>
+   */
+
+  if (
+    subcommand === "banthreshold"
+  ) {
+    const value =
+      parseIntegerSetting(
+        args[1],
+        1,
+        10
+      );
+
+    if (
+      value === null
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod banthreshold <1-10>"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "automod_ban_level",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `🔨 AutoMod ban threshold set to ${updated.automod_ban_level}.`
+    );
+
+    return true;
+  }
+
+  /*
+   * !mod confidence <0-1>
+   */
+
+  if (
+    subcommand === "confidence"
+  ) {
+    const value =
+      Number(
+        args[1]
+      );
+
+    if (
+      !Number.isFinite(value) ||
+      value < 0.5 ||
+      value > 1
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod confidence <0.5-1>"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "automod_min_confidence",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `🎯 AutoMod confidence threshold set to ${updated.automod_min_confidence}.`
+    );
+
+    return true;
+  }
+
+  /*
+   * !mod spamthreshold <count>
+   */
+
+  if (
+    subcommand === "spamthreshold"
+  ) {
+    const value =
+      parseIntegerSetting(
+        args[1],
+        2,
+        100
+      );
+
+    if (
+      value === null
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod spamthreshold <2-100>"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "spam_max_messages",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `💬 Spam threshold set to ${updated.spam_max_messages} messages.`
+    );
+
+    return true;
+  }
+
+  /*
+   * !mod mentionthreshold <count>
+   */
+
+  if (
+    subcommand === "mentionthreshold"
+  ) {
+    const value =
+      parseIntegerSetting(
+        args[1],
+        1,
+        100
+      );
+
+    if (
+      value === null
+    ) {
+      await send(
+        api,
+        threadID,
+        "Usage: !mod mentionthreshold <1-100>"
+      );
+
+      return true;
+    }
+
+    const updated =
+      await updateModerationSetting(
+        threadID,
+        "mention_max",
+        value
+      );
+
+    await send(
+      api,
+      threadID,
+      `🏷️ Mention threshold set to ${updated.mention_max}.`
+    );
+
+    return true;
+  }
+
+  /*
+   * HELP
+   */
+
+  await send(
+    api,
+    threadID,
+    [
+      "🛡️ MODERATION CONTROL",
+      "",
+      "!mod status",
+      "!mod settings",
+      "!mod filters",
+      "!mod thresholds",
+      "",
+      "!mod links on/off",
+      "!mod spam on/off",
+      "!mod mentions on/off",
+      "!mod raid on/off",
+      "!mod warnings on/off",
+      "",
+      "!mod warnlimit <1-20>",
+      "!mod mutethreshold <1-10>",
+      "!mod banthreshold <1-10>",
+      "!mod confidence <0.5-1>",
+      "!mod spamthreshold <2-100>",
+      "!mod mentionthreshold <1-100>",
+      "",
+      "👑 Only the Bot Owner can change settings.",
+    ].join("\n")
+  );
+
+  return true;
+}
+
+function parseOnOff(
+  value
+) {
+  const normalized =
+    String(
+      value || ""
+    ).toLowerCase();
+
+  if (
+    normalized === "on" ||
+    normalized === "true" ||
+    normalized === "1"
+  ) {
+    return true;
+  }
+
+  if (
+    normalized === "off" ||
+    normalized === "false" ||
+    normalized === "0"
+  ) {
+    return false;
+  }
+
+  return null;
+}
+
+function parseIntegerSetting(
+  value,
+  minimum,
+  maximum
+) {
+  const number =
+    Number(value);
+
+  if (
+    !Number.isSafeInteger(
+      number
+    )
+  ) {
+    return null;
+  }
+
+  if (
+    number < minimum ||
+    number > maximum
+  ) {
+    return null;
+  }
+
+  return number;
+}
+
+/*
+|--------------------------------------------------------------------------
 | HELPERS
 |--------------------------------------------------------------------------
 */
@@ -1329,26 +2523,34 @@ function now() {
   return Date.now();
 }
 
-function isBotOwner(userId) {
+function isBotOwner(
+  userId
+) {
   return ADMIN_IDS.includes(
     String(userId)
   );
 }
 
-function isTrustedAdmin(userId) {
+function isTrustedAdmin(
+  userId
+) {
   return TRUSTED_ADMIN_IDS.includes(
     String(userId)
   );
 }
 
-function isAdmin(userId) {
+function isAdmin(
+  userId
+) {
   return (
     isBotOwner(userId) ||
     isTrustedAdmin(userId)
   );
 }
 
-function getAdminLevel(userId) {
+function getAdminLevel(
+  userId
+) {
   if (
     isBotOwner(userId)
   ) {
@@ -1364,10 +2566,13 @@ function getAdminLevel(userId) {
   return 1;
 }
 
-function cleanReason(reason) {
+function cleanReason(
+  reason
+) {
   const value =
-    String(reason || "")
-      .trim();
+    String(
+      reason || ""
+    ).trim();
 
   if (!value) {
     return "No reason provided";
@@ -1465,9 +2670,6 @@ function rateLimit(
   const timestamp =
     now();
 
-  /*
-   * Occasionally remove stale keys.
-   */
   if (
     map.size > 1000
   ) {
@@ -1689,7 +2891,9 @@ async function notifyOwner(
       "",
       `👮 Admin: ${adminId}`,
       `⚠️ Strikes: ${strikes}`,
-      `📌 Reason: ${cleanReason(reason)}`,
+      `📌 Reason: ${cleanReason(
+        reason
+      )}`,
       "",
       "The moderation system has detected repeated suspicious administrator activity.",
     ].join("\n");
@@ -2102,7 +3306,60 @@ async function removeBan(
 |--------------------------------------------------------------------------
 | FACEBOOK GROUP ACTIONS
 |--------------------------------------------------------------------------
+|
+| Returns a structured result instead of only true/false.
+| This makes !kick and !ban able to show useful diagnostics.
+|--------------------------------------------------------------------------
 */
+
+function serializeFacebookError(
+  error
+) {
+  if (!error) {
+    return null;
+  }
+
+  const details = {};
+
+  const possibleFields = [
+    "code",
+    "message",
+    "error",
+    "errorCode",
+    "errorSummary",
+    "errorDescription",
+    "statusCode",
+    "status",
+  ];
+
+  for (
+    const field of possibleFields
+  ) {
+    if (
+      error[field] !== undefined &&
+      error[field] !== null
+    ) {
+      details[field] =
+        String(error[field]);
+    }
+  }
+
+  if (
+    !Object.keys(details).length
+  ) {
+    try {
+      return JSON.stringify(
+        error
+      );
+    } catch {
+      return String(error);
+    }
+  }
+
+  return JSON.stringify(
+    details
+  );
+}
 
 async function removeFromGroup(
   api,
@@ -2113,11 +3370,30 @@ async function removeFromGroup(
     typeof api.removeUserFromGroup !==
     "function"
   ) {
-    return false;
+    return {
+      ok: false,
+      errorCode:
+        "METHOD_UNAVAILABLE",
+      errorMessage:
+        "removeUserFromGroup is not available in the Facebook API client.",
+      rawError: null,
+    };
   }
 
   return new Promise(
     (resolve) => {
+      let settled = false;
+
+      const finish =
+        (result) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          resolve(result);
+        };
+
       try {
         api.removeUserFromGroup(
           targetId,
@@ -2129,11 +3405,32 @@ async function removeFromGroup(
                 error
               );
 
-              resolve(false);
+              finish({
+                ok: false,
+                errorCode:
+                  error?.code ||
+                  error?.errorCode ||
+                  "FACEBOOK_ERROR",
+                errorMessage:
+                  error?.message ||
+                  error?.errorDescription ||
+                  error?.errorSummary ||
+                  "Facebook rejected the group-removal request.",
+                rawError:
+                  serializeFacebookError(
+                    error
+                  ),
+              });
+
               return;
             }
 
-            resolve(true);
+            finish({
+              ok: true,
+              errorCode: null,
+              errorMessage: null,
+              rawError: null,
+            });
           }
         );
       } catch (error) {
@@ -2142,10 +3439,50 @@ async function removeFromGroup(
           error
         );
 
-        resolve(false);
+        finish({
+          ok: false,
+          errorCode:
+            error?.code ||
+            error?.errorCode ||
+            "EXCEPTION",
+          errorMessage:
+            error?.message ||
+            "An exception occurred while attempting to remove the user.",
+          rawError:
+            serializeFacebookError(
+              error
+            ),
+        });
       }
     }
   );
+}
+
+function formatRemovalFailure(
+  removal
+) {
+  if (!removal) {
+    return "Unknown Facebook removal error.";
+  }
+
+  const code =
+    removal.errorCode
+      ? String(
+          removal.errorCode
+        )
+      : "UNKNOWN";
+
+  const message =
+    removal.errorMessage
+      ? String(
+          removal.errorMessage
+        )
+      : "Facebook rejected the request.";
+
+  return [
+    `Code: ${code}`,
+    `Reason: ${message}`,
+  ].join("\n");
 }
 
 /*
@@ -2260,6 +3597,23 @@ async function handleWarn(
     return true;
   }
 
+  const modSettings =
+    await getModerationSettings(
+      threadID
+    );
+
+  if (
+    !modSettings.warnings_enabled
+  ) {
+    await send(
+      api,
+      threadID,
+      "⚠️ The warning system is disabled for this group."
+    );
+
+    return true;
+  }
+
   if (
     !rateLimit(
       moderationRate,
@@ -2368,7 +3722,7 @@ async function handleWarn(
 
   if (
     warnings.length >=
-    WARN_LIMIT
+    modSettings.warn_limit
   ) {
     await logModeration({
       threadID,
@@ -2377,7 +3731,7 @@ async function handleWarn(
       action:
         "warning_threshold_reached",
       reason:
-        `${WARN_LIMIT} active warnings reached`,
+        `${modSettings.warn_limit} active warnings reached`,
     });
   }
 
@@ -2389,7 +3743,7 @@ async function handleWarn(
       "",
       `👤 User: ${targetId}`,
       `📌 Reason: ${reason}`,
-      `⚠️ Active warnings: ${warnings.length}/${WARN_LIMIT}`,
+      `⚠️ Active warnings: ${warnings.length}/${modSettings.warn_limit}`,
     ].join("\n")
   );
 
@@ -2509,7 +3863,7 @@ async function handleKick(
       targetId
     );
 
-  const removed =
+  const removal =
     await removeFromGroup(
       api,
       threadID,
@@ -2522,14 +3876,32 @@ async function handleKick(
     targetId,
     action: "kick",
     reason,
-    success: removed,
+    success: removal.ok,
   });
 
-  if (!removed) {
+  if (
+    !removal.ok
+  ) {
     await send(
       api,
       threadID,
-      "❌ I could not remove that user. The bot may not have permission to remove members from this group."
+      [
+        "❌ I could not remove that user.",
+        "",
+        `👤 Target: ${targetId}`,
+        `📌 Reason: ${reason}`,
+        "",
+        "🔎 Facebook response:",
+        formatRemovalFailure(
+          removal
+        ),
+        "",
+        "Possible causes:",
+        "• The target has equal/higher Facebook group authority.",
+        "• The bot account lacks Facebook-level removal authority.",
+        "• Facebook rejected the request.",
+        "• The Messenger/FCA session does not expose the required permission.",
+      ].join("\n")
     );
 
     return true;
@@ -2669,7 +4041,7 @@ async function handleBan(
     reason
   );
 
-  const removed =
+  const removal =
     await removeFromGroup(
       api,
       threadID,
@@ -2682,7 +4054,7 @@ async function handleBan(
     targetId,
     action: "ban",
     reason,
-    success: removed,
+    success: removal.ok,
   });
 
   await send(
@@ -2694,13 +4066,23 @@ async function handleBan(
       `👤 User: ${targetId}`,
       `📌 Reason: ${reason}`,
       `👢 Removed from group: ${
-        removed ? "Yes" : "No"
+        removal.ok
+          ? "Yes"
+          : "No"
       }`,
       "",
-      removed
+      removal.ok
         ? "The user was removed and locally banned."
         : "The Facebook group removal failed, but the local ban remains active.",
-    ].join("\n")
+      "",
+      removal.ok
+        ? ""
+        : `🔎 Facebook: ${formatRemovalFailure(
+            removal
+          )}`,
+    ]
+      .filter(Boolean)
+      .join("\n")
   );
 
   return true;
@@ -2718,10 +4100,6 @@ async function handleUnban(
   moderatorId,
   args
 ) {
-  /*
-   * FIX:
-   * Unban now respects moderation restrictions.
-   */
   if (
     !(await validateModerator(
       api,
@@ -3016,9 +4394,13 @@ async function handleAdminLog(
 |--------------------------------------------------------------------------
 */
 
-function parseAmount(value) {
+function parseAmount(
+  value
+) {
   const clean =
-    String(value || "")
+    String(
+      value || ""
+    )
       .replace(/,/g, "")
       .trim();
 
@@ -3264,9 +4646,6 @@ async function enforceLocalBan(
     return false;
   }
 
-  /*
-   * Mute takes priority.
-   */
   const mute =
     await isMuted(
       threadID,
@@ -3355,9 +4734,6 @@ async function handleModerationMessage(
 
   /*
    * Owner activity is recorded before anything else.
-   *
-   * This means sending any message to the group resets
-   * the 15-minute owner-away timer.
    */
   noteOwnerActivity(
     threadID,
@@ -3394,6 +4770,23 @@ async function handleModerationMessage(
 
   /*
    * ================================================================
+   * MOD CONTROL PANEL
+   * ================================================================
+   */
+
+  if (
+    command === "!mod"
+  ) {
+    return handleModCommand(
+      api,
+      threadID,
+      senderId,
+      args
+    );
+  }
+
+  /*
+   * ================================================================
    * AUTOMOD COMMAND
    * ================================================================
    */
@@ -3415,8 +4808,6 @@ async function handleModerationMessage(
    * ================================================================
    *
    * Only normal messages are analyzed.
-   *
-   * Commands are left to the normal bot routing system.
    */
 
   if (
@@ -3553,4 +4944,7 @@ module.exports = {
   getAutoModSettings,
   setAutoModEnabled,
   isMuted,
+
+  getModerationSettings,
+  updateModerationSetting,
 };
