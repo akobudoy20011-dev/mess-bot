@@ -80,6 +80,7 @@ const automodOwnerLastSeen = new Map();
 let autoModAnalyzer = null;
 let automodTablesReady = false;
 let automodTablesPromise = null;
+const automodSeenMessageIds = new Map();
 
 async function ensureAutoModTables() {
   if (automodTablesReady) return;
@@ -225,13 +226,14 @@ async function getRecentAutoModIncidents(threadID, userId) {
   return result.rows;
 }
 
-async function logAutoModIncident({ threadID, userId, category, severity, confidence, suggestedAction = action, action, reason }) {
+async function logAutoModIncident({ threadID, userId, category, severity, confidence, suggestedAction, action, reason }) {
   await ensureAutoModTables();
+  const finalSuggestedAction = suggestedAction || action;
   await db.query(`
     INSERT INTO automod_incidents
       (thread_id, user_id, category, severity, confidence, suggested_action, action, reason, created_at)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-  `, [threadID, userId, category, severity, confidence, suggestedAction, action, reason, now()]);
+  `, [threadID, userId, category, severity, confidence, finalSuggestedAction, action, reason, now()]);
 }
 
 async function createMute(threadID, userId, moderatorId, durationMs, reason) {
@@ -269,9 +271,23 @@ if (isAutoModClassifierConfigured()) {
   setAutoModAnalyzer(classifyForAutoMod);
 }
 
+function isDuplicateAutoModMessage(event) {
+  const messageId = String(event?.messageID || event?.messageId || "").trim();
+  if (!messageId) return false;
+  const timestamp = now();
+  for (const [key, seenAt] of automodSeenMessageIds.entries()) {
+    if (timestamp - seenAt > 60 * 1000) automodSeenMessageIds.delete(key);
+  }
+  if (automodSeenMessageIds.has(messageId)) return true;
+  automodSeenMessageIds.set(messageId, timestamp);
+  return false;
+}
+
 async function evaluateAutoMod({ api, event, threadID, senderId, text }) {
   if (!threadID || !senderId || !text) return false;
+  if (event?.isBot || event?.isEcho || event?.isSelf) return false;
   if (isBotOwner(senderId) || isAdmin(senderId)) return false;
+  if (isDuplicateAutoModMessage(event)) return false;
   const settings = await getAutoModSettings(threadID);
   if (!settings.enabled || !(await isOwnerAway(threadID))) return false;
   if (await isMuted(threadID, senderId)) return true;
