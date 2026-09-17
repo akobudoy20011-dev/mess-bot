@@ -8,6 +8,8 @@
  * - atomic deposit/withdraw via db.js
  * - safer admin arithmetic
  * - safer payment parsing
+ * - admin !economy menu
+ * - admin !xp menu
  * - preserves RPG shop/inventory integration
  *
  * NOTE:
@@ -229,6 +231,14 @@ function createBox(title, lines = []) {
   ].join("\n");
 }
 
+function createCoquetteBox(title, lines = []) {
+  return [
+    `╭────── 🎀  ${title}  🎀 ──────╮`,
+    ...lines,
+    "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯"
+  ].join("\n");
+}
+
 function createError(message) {
   return [
     "╭━━━━━━━━━━━━━━━━━━━━╮",
@@ -247,6 +257,58 @@ function randInt(min, max) {
       Math.random() *
       (max - min + 1)
     ) + min
+  );
+}
+
+// ============================================================================
+// ADMIN MENUS
+// ============================================================================
+
+function createEconomyAdminMenu() {
+  return createCoquetteBox(
+    "ECONOMY ADMIN",
+    [
+      "୨୧ money",
+      "    ♡ !addmoney <amount>",
+      "    ♡ !removemoney <amount>",
+      "    ♡ !setmoney <amount>",
+      "",
+      "୨୧ bank",
+      "    ♡ !addbank <amount>",
+      "    ♡ !removebank <amount>",
+      "    ♡ !setbank <amount>",
+      "",
+      "୨୧ maintenance",
+      "    ♡ !resetmoney",
+      "    ♡ !resetmoney confirm",
+      "    ♡ !resetmoney bank confirm",
+      "",
+      "୨୧ player economy",
+      "    ♡ !balance",
+      "    ♡ !bank",
+      "    ♡ !leaderboard"
+    ]
+  );
+}
+
+function createXpAdminMenu() {
+  return createCoquetteBox(
+    "XP ADMIN",
+    [
+      "୨୧ controls",
+      "    ♡ !addxp <amount>",
+      "    ♡ !removexp <amount>",
+      "    ♡ !setxp <amount>",
+      "",
+      "୨୧ player",
+      "    ♡ !profile",
+      "    ♡ !rpg profile",
+      "",
+      "୨୧ information",
+      "    ♡ add XP directly",
+      "    ♡ remove XP directly",
+      "    ♡ set XP directly"
+    ]
   );
 }
 
@@ -347,7 +409,6 @@ async function handleDeposit(
   }
 
   try {
-    // db.deposit() already uses a transaction + row lock.
     const result =
       await db.deposit(
         threadID,
@@ -441,7 +502,6 @@ async function handleWithdraw(
   }
 
   try {
-    // db.withdraw() already uses a transaction + row lock.
     const result =
       await db.withdraw(
         threadID,
@@ -565,12 +625,6 @@ async function handleDaily(
     DAILY_AMOUNT +
     bonus;
 
-  /*
-   * NOTE:
-   * Daily's final concurrency protection belongs in db.js.
-   * This file keeps the existing command behavior and does not invent
-   * a db function that is not currently present.
-   */
   const newBalance =
     await db.addBalance(
       threadID,
@@ -790,10 +844,6 @@ async function handlePay(
   }
 
   try {
-    /*
-     * db.transfer() performs the real balance check while holding
-     * row locks, so a stale balance read cannot authorize an overspend.
-     */
     await db.transfer(
       threadID,
       senderIDString,
@@ -1099,10 +1149,6 @@ async function handleBuy(
   }
 
   try {
-    /*
-     * Current db.js exposes spendBalance() and addItem() separately.
-     * The deeper atomic purchase fix belongs in db.js.
-     */
     await db.spendBalance(
       event.threadID,
       event.senderID,
@@ -1558,10 +1604,6 @@ async function handleRemoveMoney(
   }
 
   try {
-    /*
-     * Do not perform a stale balance pre-check here.
-     * db.addBalance(-amount) is responsible for the atomic DB update.
-     */
     const newBalance =
       await db.addBalance(
         threadID,
@@ -1946,6 +1988,68 @@ async function handleEconomyCommand(
 
   const economyArgs =
     economyParts.slice(1);
+
+  // --------------------------------------------------------------------------
+  // ADMIN MENUS
+  // --------------------------------------------------------------------------
+
+  if (
+    economyCommand ===
+    "!economy"
+  ) {
+    if (
+      !isAdmin(
+        event.senderID
+      )
+    ) {
+      await reply(
+        api,
+        event.threadID,
+        createError(
+          "Only the bot admin can use this command."
+        )
+      );
+
+      return true;
+    }
+
+    await reply(
+      api,
+      event.threadID,
+      createEconomyAdminMenu()
+    );
+
+    return true;
+  }
+
+  if (
+    economyCommand ===
+    "!xp"
+  ) {
+    if (
+      !isAdmin(
+        event.senderID
+      )
+    ) {
+      await reply(
+        api,
+        event.threadID,
+        createError(
+          "Only the bot admin can use this command."
+        )
+      );
+
+      return true;
+    }
+
+    await reply(
+      api,
+      event.threadID,
+      createXpAdminMenu()
+    );
+
+    return true;
+  }
 
   // --------------------------------------------------------------------------
   // ADMIN
