@@ -1,4 +1,5 @@
 const db = require("./db");
+
 const {
   classifyForAutoMod,
   isAutoModClassifierConfigured,
@@ -31,68 +32,75 @@ const MAX_SINGLE_XP_AMOUNT = 100000;
 
 const WARN_LIMIT = 3;
 
-/*
- * Repeated suspicious behavior.
- *
- * These are intentionally conservative.
- * A single large/legitimate action should not automatically
- * punish an administrator.
- */
-
 const ADMIN_STRIKE_LOCK_MS = 30 * 60 * 1000;
-
 const OWNER_NOTIFY_STRIKE_THRESHOLD = 4;
-
-/*
-|--------------------------------------------------------------------------
-| MEMORY CACHE
-|--------------------------------------------------------------------------
-|
-| Database remains the persistent source of truth.
-| These maps are only short-term rate-limit caches.
-|
-*/
-
-const moderationRate = new Map();
-const economyRate = new Map();
 
 /*
 |--------------------------------------------------------------------------
 | AUTONOMOUS MODERATION
 |--------------------------------------------------------------------------
-|
-| AutoMod is owner-controlled and persistent. It remains dormant until an
-| analyzer is explicitly connected through setAutoModAnalyzer().
-|
 */
+
 const AUTOMOD_DEFAULT_OWNER_AWAY_MS = 15 * 60 * 1000;
 const AUTOMOD_MAX_MESSAGE_LENGTH = 2000;
 const AUTOMOD_MIN_CONFIDENCE = 0.88;
 const AUTOMOD_INCIDENT_WINDOW_MS = 60 * 60 * 1000;
+
 const AUTOMOD_MUTE_LEVEL = 3;
 const AUTOMOD_BAN_LEVEL = 6;
+
 const AUTOMOD_MUTE_DURATIONS = {
   low: 5 * 60 * 1000,
   medium: 30 * 60 * 1000,
   high: 2 * 60 * 60 * 1000,
 };
+
+/*
+|--------------------------------------------------------------------------
+| MEMORY CACHE
+|--------------------------------------------------------------------------
+*/
+
+const moderationRate = new Map();
+const economyRate = new Map();
+
 const automodOwnerLastSeen = new Map();
+
 let autoModAnalyzer = null;
+
 let automodTablesReady = false;
 let automodTablesPromise = null;
+
 const automodSeenMessageIds = new Map();
 
+/*
+|--------------------------------------------------------------------------
+| AUTONOMOUS MODERATION DATABASE
+|--------------------------------------------------------------------------
+*/
+
 async function ensureAutoModTables() {
-  if (automodTablesReady) return;
-  if (automodTablesPromise) return automodTablesPromise;
+  if (automodTablesReady) {
+    return;
+  }
+
+  if (automodTablesPromise) {
+    return automodTablesPromise;
+  }
+
   automodTablesPromise = (async () => {
     await db.query(`
       CREATE TABLE IF NOT EXISTS automod_settings (
         thread_id TEXT PRIMARY KEY,
         enabled BOOLEAN NOT NULL DEFAULT FALSE,
         owner_away_timeout BIGINT NOT NULL DEFAULT 900000,
+        owner_last_seen BIGINT NOT NULL DEFAULT 0,
         updated_at BIGINT NOT NULL
       );
+
+      ALTER TABLE automod_settings
+        ADD COLUMN IF NOT EXISTS owner_last_seen BIGINT NOT NULL DEFAULT 0;
+
       CREATE TABLE IF NOT EXISTS automod_incidents (
         id BIGSERIAL PRIMARY KEY,
         thread_id TEXT NOT NULL,
@@ -105,11 +113,16 @@ async function ensureAutoModTables() {
         reason TEXT,
         created_at BIGINT NOT NULL
       );
+
       ALTER TABLE automod_incidents
         ADD COLUMN IF NOT EXISTS suggested_action TEXT NOT NULL DEFAULT 'none';
 
       CREATE INDEX IF NOT EXISTS idx_automod_incidents_user
         ON automod_incidents(thread_id, user_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_automod_incidents_thread
+        ON automod_incidents(thread_id, created_at);
+
       CREATE TABLE IF NOT EXISTS moderation_mutes (
         id BIGSERIAL PRIMARY KEY,
         thread_id TEXT NOT NULL,
@@ -120,10 +133,12 @@ async function ensureAutoModTables() {
         active BOOLEAN NOT NULL DEFAULT TRUE,
         created_at BIGINT NOT NULL
       );
+
       CREATE INDEX IF NOT EXISTS idx_moderation_mutes_active
         ON moderation_mutes(thread_id, user_id, active, expires_at);
     `);
   })();
+
   try {
     await automodTablesPromise;
     automodTablesReady = true;
@@ -132,188 +147,839 @@ async function ensureAutoModTables() {
   }
 }
 
+/*
+|--------------------------------------------------------------------------
+| AUTMOD OWNER ACTIVITY
+|--------------------------------------------------------------------------
+*/
+
 function noteOwnerActivity(threadID, userId) {
-  if (!threadID || !userId || !isBotOwner(userId)) return;
-  automodOwnerLastSeen.set(String(threadID), now());
+  if (
+    !threadID ||
+    !userId ||
+    !isBotOwner(userId)
+  ) {
+    return;
+  }
+
+  const threadKey = String(threadID);
+  const timestamp = now();
+
+  automodOwnerLastSeen.set(
+    threadKey,
+    timestamp
+  );
+
+  /*
+   * Persist the owner's latest activity.
+   *
+   * This is intentionally fire-and-forget because the message
+   * router should not be blocked by this bookkeeping query.
+   */
+  ensureAutoModTables()
+    .then(() => {
+      return db.query(
+        `
+        INSERT INTO automod_settings
+        (
+          thread_id,
+          enabled,
+          owner_away_timeout,
+          owner_last_seen,
+          updated_at
+        )
+        VALUES
+        ($1, FALSE, $2, $3, $3)
+
+        ON CONFLICT (thread_id)
+        DO UPDATE SET
+          owner_last_seen = EXCLUDED.owner_last_seen,
+          updated_at = EXCLUDED.updated_at
+        `,
+        [
+          threadKey,
+          AUTOMOD_DEFAULT_OWNER_AWAY_MS,
+          timestamp,
+        ]
+      );
+    })
+    .catch((error) => {
+      console.error(
+        "[AutoMod] Failed to persist owner activity:",
+        error
+      );
+    });
 }
+
+/*
+|--------------------------------------------------------------------------
+| OWNER AWAY CHECK
+|--------------------------------------------------------------------------
+*/
 
 async function isOwnerAway(threadID) {
   await ensureAutoModTables();
-  const result = await db.query(`
-    SELECT owner_away_timeout FROM automod_settings
-    WHERE thread_id = $1 LIMIT 1
-  `, [threadID]);
-  const timeout = Number(result.rows[0]?.owner_away_timeout || AUTOMOD_DEFAULT_OWNER_AWAY_MS);
-  const lastSeen = Number(automodOwnerLastSeen.get(String(threadID)) || 0);
-  if (!lastSeen) return true;
+
+  const result = await db.query(
+    `
+    SELECT
+      owner_away_timeout,
+      owner_last_seen
+    FROM automod_settings
+    WHERE thread_id = $1
+    LIMIT 1
+    `,
+    [threadID]
+  );
+
+  const row = result.rows[0];
+
+  const timeout =
+    Number(
+      row?.owner_away_timeout ||
+      AUTOMOD_DEFAULT_OWNER_AWAY_MS
+    );
+
+  const memoryLastSeen =
+    Number(
+      automodOwnerLastSeen.get(
+        String(threadID)
+      ) || 0
+    );
+
+  const databaseLastSeen =
+    Number(
+      row?.owner_last_seen || 0
+    );
+
+  /*
+   * Use whichever timestamp is newer.
+   */
+  const lastSeen =
+    Math.max(
+      memoryLastSeen,
+      databaseLastSeen
+    );
+
+  /*
+   * If the owner has never been observed,
+   * AutoMod stays dormant.
+   *
+   * This is an important safety rule.
+   */
+  if (!lastSeen) {
+    return false;
+  }
+
   return now() - lastSeen >= timeout;
 }
 
+/*
+|--------------------------------------------------------------------------
+| AUTOMOD SETTINGS
+|--------------------------------------------------------------------------
+*/
+
 async function getAutoModSettings(threadID) {
   await ensureAutoModTables();
-  const result = await db.query(`
-    SELECT * FROM automod_settings WHERE thread_id = $1 LIMIT 1
-  `, [threadID]);
-  if (result.rows[0]) return result.rows[0];
+
+  const result = await db.query(
+    `
+    SELECT *
+    FROM automod_settings
+    WHERE thread_id = $1
+    LIMIT 1
+    `,
+    [threadID]
+  );
+
+  if (result.rows[0]) {
+    return result.rows[0];
+  }
+
   const timestamp = now();
-  await db.query(`
-    INSERT INTO automod_settings (thread_id, enabled, owner_away_timeout, updated_at)
-    VALUES ($1, FALSE, $2, $3)
-    ON CONFLICT (thread_id) DO NOTHING
-  `, [threadID, AUTOMOD_DEFAULT_OWNER_AWAY_MS, timestamp]);
+
+  await db.query(
+    `
+    INSERT INTO automod_settings
+    (
+      thread_id,
+      enabled,
+      owner_away_timeout,
+      owner_last_seen,
+      updated_at
+    )
+    VALUES
+    ($1, FALSE, $2, 0, $3)
+
+    ON CONFLICT (thread_id)
+    DO NOTHING
+    `,
+    [
+      threadID,
+      AUTOMOD_DEFAULT_OWNER_AWAY_MS,
+      timestamp,
+    ]
+  );
+
   return {
     thread_id: threadID,
     enabled: false,
-    owner_away_timeout: AUTOMOD_DEFAULT_OWNER_AWAY_MS,
+    owner_away_timeout:
+      AUTOMOD_DEFAULT_OWNER_AWAY_MS,
+    owner_last_seen: 0,
     updated_at: timestamp,
   };
 }
 
-async function setAutoModEnabled(threadID, enabled, ownerAwayTimeout = null) {
+async function setAutoModEnabled(
+  threadID,
+  enabled,
+  ownerAwayTimeout = null
+) {
   await ensureAutoModTables();
-  const requestedTimeout = Number(ownerAwayTimeout);
-  const timeout = Number.isSafeInteger(requestedTimeout) && requestedTimeout >= 60000
-    ? requestedTimeout
-    : AUTOMOD_DEFAULT_OWNER_AWAY_MS;
-  await db.query(`
-    INSERT INTO automod_settings (thread_id, enabled, owner_away_timeout, updated_at)
-    VALUES ($1, $2, $3, $4)
-    ON CONFLICT (thread_id) DO UPDATE SET
+
+  const requestedTimeout =
+    Number(ownerAwayTimeout);
+
+  const timeout =
+    Number.isSafeInteger(
+      requestedTimeout
+    ) &&
+    requestedTimeout >= 60000
+      ? requestedTimeout
+      : AUTOMOD_DEFAULT_OWNER_AWAY_MS;
+
+  await db.query(
+    `
+    INSERT INTO automod_settings
+    (
+      thread_id,
+      enabled,
+      owner_away_timeout,
+      owner_last_seen,
+      updated_at
+    )
+    VALUES
+    ($1, $2, $3, 0, $4)
+
+    ON CONFLICT (thread_id)
+    DO UPDATE SET
       enabled = EXCLUDED.enabled,
       owner_away_timeout = EXCLUDED.owner_away_timeout,
       updated_at = EXCLUDED.updated_at
-  `, [threadID, Boolean(enabled), timeout, now()]);
+    `,
+    [
+      threadID,
+      Boolean(enabled),
+      timeout,
+      now(),
+    ]
+  );
+
   return getAutoModSettings(threadID);
 }
 
+/*
+|--------------------------------------------------------------------------
+| AUTOMOD ANALYZER
+|--------------------------------------------------------------------------
+*/
+
 function setAutoModAnalyzer(analyzer) {
-  if (analyzer !== null && typeof analyzer !== "function") {
-    throw new TypeError("AutoMod analyzer must be a function or null.");
+  if (
+    analyzer !== null &&
+    typeof analyzer !== "function"
+  ) {
+    throw new TypeError(
+      "AutoMod analyzer must be a function or null."
+    );
   }
+
   autoModAnalyzer = analyzer;
 }
 
-async function analyzeForAutoMod({ event, threadID, senderId, text }) {
-  const message = String(text || "").trim().slice(0, AUTOMOD_MAX_MESSAGE_LENGTH);
-  if (!message || typeof autoModAnalyzer !== "function") return null;
+async function analyzeForAutoMod({
+  event,
+  threadID,
+  senderId,
+  text,
+}) {
+  const message =
+    String(text || "")
+      .trim()
+      .slice(
+        0,
+        AUTOMOD_MAX_MESSAGE_LENGTH
+      );
+
+  if (
+    !message ||
+    typeof autoModAnalyzer !== "function"
+  ) {
+    return null;
+  }
+
   try {
-    const result = await autoModAnalyzer({ event, threadID, senderId, text: message });
-    return result && typeof result === "object" ? normalizeAutoModResult(result) : null;
+    const result =
+      await autoModAnalyzer({
+        event,
+        threadID,
+        senderId,
+        text: message,
+      });
+
+    if (
+      !result ||
+      typeof result !== "object"
+    ) {
+      return null;
+    }
+
+    return normalizeAutoModResult(result);
   } catch (error) {
-    console.error("[AutoMod] Analyzer error:", error);
+    console.error(
+      "[AutoMod] Analyzer error:",
+      error
+    );
+
     return null;
   }
 }
 
 function normalizeAutoModResult(result) {
-  const allowedActions = new Set(["none", "warn", "mute", "ban"]);
-  const action = String(result.action || "none").toLowerCase();
-  const category = String(result.category || "unknown").toLowerCase().slice(0, 100);
-  const confidence = Number(result.confidence);
-  const severity = Math.max(0, Math.min(10, Number(result.severity) || 0));
-  const reason = cleanReason(result.reason || "Automated moderation classification");
-  if (!allowedActions.has(action) || !Number.isFinite(confidence)) return null;
-  return { action, category, confidence, severity, reason };
+  const allowedActions =
+    new Set([
+      "none",
+      "warn",
+      "mute",
+      "ban",
+    ]);
+
+  const action =
+    String(
+      result.action || "none"
+    )
+      .toLowerCase()
+      .trim();
+
+  const category =
+    String(
+      result.category || "unknown"
+    )
+      .toLowerCase()
+      .slice(0, 100);
+
+  let confidence =
+    Number(result.confidence);
+
+  let severity =
+    Number(result.severity);
+
+  if (!Number.isFinite(confidence)) {
+    return null;
+  }
+
+  if (!Number.isFinite(severity)) {
+    severity = 0;
+  }
+
+  confidence =
+    Math.max(
+      0,
+      Math.min(1, confidence)
+    );
+
+  severity =
+    Math.max(
+      0,
+      Math.min(10, severity)
+    );
+
+  const reason =
+    cleanReason(
+      result.reason ||
+      "Automated moderation classification"
+    );
+
+  if (
+    !allowedActions.has(action)
+  ) {
+    return null;
+  }
+
+  return {
+    action,
+    category,
+    confidence,
+    severity,
+    reason,
+  };
 }
 
-async function getRecentAutoModIncidents(threadID, userId) {
+/*
+|--------------------------------------------------------------------------
+| AUTOMOD INCIDENTS
+|--------------------------------------------------------------------------
+*/
+
+async function getRecentAutoModIncidents(
+  threadID,
+  userId
+) {
   await ensureAutoModTables();
-  const result = await db.query(`
-    SELECT * FROM automod_incidents
-    WHERE thread_id = $1 AND user_id = $2 AND created_at >= $3
-    ORDER BY created_at DESC LIMIT 20
-  `, [threadID, userId, now() - AUTOMOD_INCIDENT_WINDOW_MS]);
+
+  const result = await db.query(
+    `
+    SELECT *
+    FROM automod_incidents
+    WHERE thread_id = $1
+      AND user_id = $2
+      AND created_at >= $3
+    ORDER BY created_at DESC
+    LIMIT 20
+    `,
+    [
+      threadID,
+      userId,
+      now() -
+        AUTOMOD_INCIDENT_WINDOW_MS,
+    ]
+  );
+
   return result.rows;
 }
 
-async function logAutoModIncident({ threadID, userId, category, severity, confidence, suggestedAction, action, reason }) {
+async function logAutoModIncident({
+  threadID,
+  userId,
+  category,
+  severity,
+  confidence,
+  suggestedAction,
+  action,
+  reason,
+}) {
   await ensureAutoModTables();
-  const finalSuggestedAction = suggestedAction || action;
-  await db.query(`
+
+  const finalSuggestedAction =
+    suggestedAction || action;
+
+  await db.query(
+    `
     INSERT INTO automod_incidents
-      (thread_id, user_id, category, severity, confidence, suggested_action, action, reason, created_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-  `, [threadID, userId, category, severity, confidence, finalSuggestedAction, action, reason, now()]);
+    (
+      thread_id,
+      user_id,
+      category,
+      severity,
+      confidence,
+      suggested_action,
+      action,
+      reason,
+      created_at
+    )
+    VALUES
+    ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    `,
+    [
+      threadID,
+      userId,
+      category,
+      severity,
+      confidence,
+      finalSuggestedAction,
+      action,
+      reason,
+      now(),
+    ]
+  );
 }
 
-async function createMute(threadID, userId, moderatorId, durationMs, reason) {
+/*
+|--------------------------------------------------------------------------
+| AUTOMOD MUTES
+|--------------------------------------------------------------------------
+*/
+
+async function createMute(
+  threadID,
+  userId,
+  moderatorId,
+  durationMs,
+  reason
+) {
   await ensureAutoModTables();
-  const expiresAt = now() + durationMs;
-  await db.query(`
-    UPDATE moderation_mutes SET active = FALSE
-    WHERE thread_id = $1 AND user_id = $2 AND active = TRUE
-  `, [threadID, userId]);
-  await db.query(`
+
+  const safeDuration =
+    Math.max(
+      60 * 1000,
+      Number(durationMs) || 0
+    );
+
+  const expiresAt =
+    now() + safeDuration;
+
+  await db.query(
+    `
+    UPDATE moderation_mutes
+    SET active = FALSE
+    WHERE thread_id = $1
+      AND user_id = $2
+      AND active = TRUE
+    `,
+    [
+      threadID,
+      userId,
+    ]
+  );
+
+  await db.query(
+    `
     INSERT INTO moderation_mutes
-      (thread_id, user_id, moderator_id, reason, expires_at, active, created_at)
-    VALUES ($1, $2, $3, $4, $5, TRUE, $6)
-  `, [threadID, userId, moderatorId, cleanReason(reason), expiresAt, now()]);
+    (
+      thread_id,
+      user_id,
+      moderator_id,
+      reason,
+      expires_at,
+      active,
+      created_at
+    )
+    VALUES
+    ($1,$2,$3,$4,$5,TRUE,$6)
+    `,
+    [
+      threadID,
+      userId,
+      moderatorId,
+      cleanReason(reason),
+      expiresAt,
+      now(),
+    ]
+  );
+
   return expiresAt;
 }
 
-async function isMuted(threadID, userId) {
+async function isMuted(
+  threadID,
+  userId
+) {
   await ensureAutoModTables();
+
   const timestamp = now();
-  const result = await db.query(`
-    SELECT * FROM moderation_mutes
-    WHERE thread_id = $1 AND user_id = $2 AND active = TRUE AND expires_at > $3
-    ORDER BY expires_at DESC LIMIT 1
-  `, [threadID, userId, timestamp]);
-  if (result.rows[0]) return result.rows[0];
-  await db.query(`
-    UPDATE moderation_mutes SET active = FALSE
-    WHERE thread_id = $1 AND user_id = $2 AND active = TRUE AND expires_at <= $3
-  `, [threadID, userId, timestamp]);
+
+  const result =
+    await db.query(
+      `
+      SELECT *
+      FROM moderation_mutes
+      WHERE thread_id = $1
+        AND user_id = $2
+        AND active = TRUE
+        AND expires_at > $3
+      ORDER BY expires_at DESC
+      LIMIT 1
+      `,
+      [
+        threadID,
+        userId,
+        timestamp,
+      ]
+    );
+
+  if (result.rows[0]) {
+    return result.rows[0];
+  }
+
+  /*
+   * Deactivate expired mutes.
+   */
+  await db.query(
+    `
+    UPDATE moderation_mutes
+    SET active = FALSE
+    WHERE thread_id = $1
+      AND user_id = $2
+      AND active = TRUE
+      AND expires_at <= $3
+    `,
+    [
+      threadID,
+      userId,
+      timestamp,
+    ]
+  );
+
   return null;
 }
 
-if (isAutoModClassifierConfigured()) {
-  setAutoModAnalyzer(classifyForAutoMod);
+/*
+|--------------------------------------------------------------------------
+| CLASSIFIER CONNECTION
+|--------------------------------------------------------------------------
+*/
+
+if (
+  isAutoModClassifierConfigured()
+) {
+  setAutoModAnalyzer(
+    classifyForAutoMod
+  );
 }
 
+/*
+|--------------------------------------------------------------------------
+| DUPLICATE MESSAGE PROTECTION
+|--------------------------------------------------------------------------
+*/
+
 function isDuplicateAutoModMessage(event) {
-  const messageId = String(event?.messageID || event?.messageId || "").trim();
-  if (!messageId) return false;
-  const timestamp = now();
-  for (const [key, seenAt] of automodSeenMessageIds.entries()) {
-    if (timestamp - seenAt > 60 * 1000) automodSeenMessageIds.delete(key);
+  const messageId =
+    String(
+      event?.messageID ||
+      event?.messageId ||
+      ""
+    ).trim();
+
+  if (!messageId) {
+    return false;
   }
-  if (automodSeenMessageIds.has(messageId)) return true;
-  automodSeenMessageIds.set(messageId, timestamp);
+
+  const timestamp = now();
+
+  for (
+    const [
+      key,
+      seenAt,
+    ] of automodSeenMessageIds.entries()
+  ) {
+    if (
+      timestamp - seenAt >
+      60 * 1000
+    ) {
+      automodSeenMessageIds.delete(
+        key
+      );
+    }
+  }
+
+  if (
+    automodSeenMessageIds.has(
+      messageId
+    )
+  ) {
+    return true;
+  }
+
+  automodSeenMessageIds.set(
+    messageId,
+    timestamp
+  );
+
   return false;
 }
 
-async function evaluateAutoMod({ api, event, threadID, senderId, text }) {
-  if (!threadID || !senderId || !text) return false;
-  if (event?.isBot || event?.isEcho || event?.isSelf) return false;
-  if (isBotOwner(senderId) || isAdmin(senderId)) return false;
-  if (isDuplicateAutoModMessage(event)) return false;
-  const settings = await getAutoModSettings(threadID);
-  if (!settings.enabled || !(await isOwnerAway(threadID))) return false;
-  if (await isMuted(threadID, senderId)) return true;
+/*
+|--------------------------------------------------------------------------
+| AUTOMOD TARGET SAFETY
+|--------------------------------------------------------------------------
+*/
 
-  const analysis = await analyzeForAutoMod({ event, threadID, senderId, text });
-  if (!analysis) return false;
-  if (analysis.confidence < AUTOMOD_MIN_CONFIDENCE) {
+function canAutoModTarget(userId) {
+  /*
+   * AutoMod can only act on normal users.
+   *
+   * Owner and trusted administrators are protected.
+   */
+  return (
+    !isBotOwner(userId) &&
+    !isTrustedAdmin(userId)
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| AUTOMOD DECISION ENGINE
+|--------------------------------------------------------------------------
+*/
+
+async function evaluateAutoMod({
+  api,
+  event,
+  threadID,
+  senderId,
+  text,
+}) {
+  if (
+    !threadID ||
+    !senderId ||
+    !text
+  ) {
+    return false;
+  }
+
+  if (
+    event?.isBot ||
+    event?.isEcho ||
+    event?.isSelf
+  ) {
+    return false;
+  }
+
+  /*
+   * Never autonomously punish administrators.
+   */
+  if (
+    !canAutoModTarget(senderId)
+  ) {
+    return false;
+  }
+
+  if (
+    isDuplicateAutoModMessage(event)
+  ) {
+    return false;
+  }
+
+  const settings =
+    await getAutoModSettings(
+      threadID
+    );
+
+  if (
+    !settings.enabled
+  ) {
+    return false;
+  }
+
+  /*
+   * AutoMod only operates while the owner is away.
+   */
+  if (
+    !(await isOwnerAway(threadID))
+  ) {
+    return false;
+  }
+
+  /*
+   * Existing mute immediately blocks the message.
+   */
+  if (
+    await isMuted(
+      threadID,
+      senderId
+    )
+  ) {
+    return true;
+  }
+
+  const analysis =
+    await analyzeForAutoMod({
+      event,
+      threadID,
+      senderId,
+      text,
+    });
+
+  /*
+   * No analyzer = no autonomous punishment.
+   */
+  if (!analysis) {
+    return false;
+  }
+
+  /*
+   * Confidence threshold.
+   */
+  if (
+    analysis.confidence <
+    AUTOMOD_MIN_CONFIDENCE
+  ) {
     await logAutoModIncident({
       threadID,
       userId: senderId,
       category: analysis.category,
       severity: analysis.severity,
       confidence: analysis.confidence,
-      suggestedAction: analysis.action,
+      suggestedAction:
+        analysis.action,
       action: "none",
-      reason: "Low-confidence classification: " + analysis.reason,
+      reason:
+        "Low-confidence classification: " +
+        analysis.reason,
     });
+
     return false;
   }
 
-  const previous = await getRecentAutoModIncidents(threadID, senderId);
-  const totalSeverity = previous.reduce((total, incident) => total + Number(incident.severity || 0), 0) + analysis.severity;
-  let action = analysis.action;
-  if (action === "ban" && totalSeverity < AUTOMOD_BAN_LEVEL) action = "mute";
-  if (action === "mute" && totalSeverity < AUTOMOD_MUTE_LEVEL) action = "warn";
-  if (action === "warn" && analysis.severity < 2) action = "none";
+  const previous =
+    await getRecentAutoModIncidents(
+      threadID,
+      senderId
+    );
+
+  /*
+   * Only count incidents that were sufficiently
+   * confident enough to become real AutoMod incidents.
+   */
+  const validPrevious =
+    previous.filter(
+      (incident) =>
+        Number(
+          incident.confidence || 0
+        ) >= AUTOMOD_MIN_CONFIDENCE
+    );
+
+  const previousSeverity =
+    validPrevious.reduce(
+      (total, incident) =>
+        total +
+        Number(
+          incident.severity || 0
+        ),
+      0
+    );
+
+  const totalSeverity =
+    previousSeverity +
+    analysis.severity;
+
+  let action =
+    analysis.action;
+
+  /*
+   * Never allow a ban from a single low-severity event.
+   */
+  if (
+    action === "ban" &&
+    totalSeverity <
+      AUTOMOD_BAN_LEVEL
+  ) {
+    action = "mute";
+  }
+
+  /*
+   * Require accumulated behavior before muting.
+   */
+  if (
+    action === "mute" &&
+    totalSeverity <
+      AUTOMOD_MUTE_LEVEL
+  ) {
+    action = "warn";
+  }
+
+  /*
+   * Ignore extremely weak warnings.
+   */
+  if (
+    action === "warn" &&
+    analysis.severity < 2
+  ) {
+    action = "none";
+  }
 
   await logAutoModIncident({
     threadID,
@@ -321,89 +987,337 @@ async function evaluateAutoMod({ api, event, threadID, senderId, text }) {
     category: analysis.category,
     severity: analysis.severity,
     confidence: analysis.confidence,
-    suggestedAction: analysis.action,
+    suggestedAction:
+      analysis.action,
     action,
     reason: analysis.reason,
   });
-  if (action === "none") return false;
 
-  if (action === "warn") {
-    await addWarning(threadID, senderId, "AUTOMOD", analysis.reason);
-    await logModeration({ threadID, moderatorId: "AUTOMOD", targetId: senderId, action: "automod_warn", reason: analysis.reason, success: true });
+  if (
+    action === "none"
+  ) {
+    return false;
+  }
+
+  /*
+   * WARN
+   */
+  if (
+    action === "warn"
+  ) {
+    const warnings =
+      await addWarning(
+        threadID,
+        senderId,
+        "AUTOMOD",
+        analysis.reason
+      );
+
+    await logModeration({
+      threadID,
+      moderatorId: "AUTOMOD",
+      targetId: senderId,
+      action: "automod_warn",
+      reason: analysis.reason,
+      success: true,
+    });
+
+    /*
+     * Warning threshold is logged but does not
+     * independently trigger a ban.
+     */
+    if (
+      warnings.length >=
+      WARN_LIMIT
+    ) {
+      await logModeration({
+        threadID,
+        moderatorId: "AUTOMOD",
+        targetId: senderId,
+        action:
+          "automod_warning_threshold_reached",
+        reason:
+          `${WARN_LIMIT} active warnings reached`,
+        success: true,
+      });
+    }
+
     return true;
   }
 
-  if (action === "mute") {
-    const severityName = analysis.severity >= 7 ? "high" : analysis.severity >= 4 ? "medium" : "low";
-    const expiresAt = await createMute(threadID, senderId, "AUTOMOD", AUTOMOD_MUTE_DURATIONS[severityName], analysis.reason);
-    await logModeration({ threadID, moderatorId: "AUTOMOD", targetId: senderId, action: "automod_mute", reason: analysis.reason, success: true });
-    await send(api, threadID, [
-      "🔇 AutoMod action",
-      "",
-      "👤 User: " + senderId,
-      "📌 Reason: " + analysis.reason,
-      "⏱️ Mute expires: " + new Date(expiresAt).toLocaleString(),
-    ].join("\n"));
+  /*
+   * MUTE
+   */
+  if (
+    action === "mute"
+  ) {
+    const severityName =
+      analysis.severity >= 7
+        ? "high"
+        : analysis.severity >= 4
+          ? "medium"
+          : "low";
+
+    const expiresAt =
+      await createMute(
+        threadID,
+        senderId,
+        "AUTOMOD",
+        AUTOMOD_MUTE_DURATIONS[
+          severityName
+        ],
+        analysis.reason
+      );
+
+    await logModeration({
+      threadID,
+      moderatorId: "AUTOMOD",
+      targetId: senderId,
+      action: "automod_mute",
+      reason: analysis.reason,
+      success: true,
+    });
+
+    await send(
+      api,
+      threadID,
+      [
+        "🔇 AutoMod action",
+        "",
+        `👤 User: ${senderId}`,
+        `📌 Reason: ${analysis.reason}`,
+        `⏱️ Mute expires: ${new Date(
+          expiresAt
+        ).toLocaleString()}`,
+      ].join("\n")
+    );
+
     return true;
   }
 
-  if (action === "ban") {
-    if (!canAutoModTarget(senderId)) return false;
-    await createBan(threadID, senderId, "AUTOMOD", analysis.reason);
-    const removed = await removeFromGroup(api, threadID, senderId);
-    await logModeration({ threadID, moderatorId: "AUTOMOD", targetId: senderId, action: "automod_ban", reason: analysis.reason, success: removed });
-    await send(api, threadID, [
-      "🔨 AutoMod action",
-      "",
-      "👤 User: " + senderId,
-      "📌 Reason: " + analysis.reason,
-      "👢 Removed from group: " + (removed ? "Yes" : "No"),
-    ].join("\n"));
+  /*
+   * BAN
+   */
+  if (
+    action === "ban"
+  ) {
+    /*
+     * Final safety check immediately before punishment.
+     */
+    if (
+      !canAutoModTarget(senderId)
+    ) {
+      return false;
+    }
+
+    await createBan(
+      threadID,
+      senderId,
+      "AUTOMOD",
+      analysis.reason
+    );
+
+    const removed =
+      await removeFromGroup(
+        api,
+        threadID,
+        senderId
+      );
+
+    await logModeration({
+      threadID,
+      moderatorId: "AUTOMOD",
+      targetId: senderId,
+      action: "automod_ban",
+      reason: analysis.reason,
+      success: removed,
+    });
+
+    await send(
+      api,
+      threadID,
+      [
+        "🔨 AutoMod action",
+        "",
+        `👤 User: ${senderId}`,
+        `📌 Reason: ${analysis.reason}`,
+        `👢 Removed from group: ${
+          removed ? "Yes" : "No"
+        }`,
+        "",
+        removed
+          ? "The user was removed and locally banned."
+          : "The Facebook removal failed, but the local ban remains active.",
+      ].join("\n")
+    );
+
     return true;
   }
+
   return false;
 }
 
-async function handleAutoModCommand(api, threadID, moderatorId, args) {
-  if (!isBotOwner(moderatorId)) {
-    await send(api, threadID, "❌ Only the Bot Owner can control AutoMod.");
+/*
+|--------------------------------------------------------------------------
+| AUTOMOD COMMAND
+|--------------------------------------------------------------------------
+*/
+
+async function handleAutoModCommand(
+  api,
+  threadID,
+  moderatorId,
+  args
+) {
+  if (
+    !isBotOwner(moderatorId)
+  ) {
+    await send(
+      api,
+      threadID,
+      "❌ Only the Bot Owner can control AutoMod."
+    );
+
     return true;
   }
-  const subcommand = String(args[0] || "status").toLowerCase();
-  if (subcommand === "on") {
-    const settings = await setAutoModEnabled(threadID, true);
-    await send(api, threadID, [
-      "🛡️ AUTONOMOUS MODERATION",
-      "",
-      "Status: ON",
-      "Mode: Owner-away",
-      "Owner-away timeout: " + Math.round(Number(settings.owner_away_timeout) / 60000) + " minutes",
-      "AI analyzer: Not connected; no automatic punishment will occur.",
-    ].join("\n"));
+
+  /*
+   * Owner activity is refreshed immediately.
+   */
+  noteOwnerActivity(
+    threadID,
+    moderatorId
+  );
+
+  const subcommand =
+    String(
+      args[0] || "status"
+    ).toLowerCase();
+
+  if (
+    subcommand === "on"
+  ) {
+    const settings =
+      await setAutoModEnabled(
+        threadID,
+        true
+      );
+
+    const analyzerConnected =
+      typeof autoModAnalyzer ===
+      "function";
+
+    await send(
+      api,
+      threadID,
+      [
+        "🛡️ AUTONOMOUS MODERATION",
+        "",
+        "Status: ON",
+        "Mode: Owner-away",
+        "Owner-away timeout: " +
+          Math.round(
+            Number(
+              settings.owner_away_timeout
+            ) / 60000
+          ) +
+          " minutes",
+        "AI analyzer: " +
+          (
+            analyzerConnected
+              ? "Connected"
+              : "Not connected; no automatic punishment will occur."
+          ),
+      ].join("\n")
+    );
+
     return true;
   }
-  if (subcommand === "off") {
-    await setAutoModEnabled(threadID, false);
-    await send(api, threadID, "🛡️ AutoMod is now OFF for this group.");
+
+  if (
+    subcommand === "off"
+  ) {
+    await setAutoModEnabled(
+      threadID,
+      false
+    );
+
+    await send(
+      api,
+      threadID,
+      "🛡️ AutoMod is now OFF for this group."
+    );
+
     return true;
   }
-  if (subcommand === "status") {
-    const settings = await getAutoModSettings(threadID);
-    const away = await isOwnerAway(threadID);
-    await send(api, threadID, [
-      "🛡️ AUTONOMOUS MODERATION",
-      "",
-      "Status: " + (settings.enabled ? "ON" : "OFF"),
-      "Owner-away mode: " + (away ? "ACTIVE" : "DORMANT"),
-      "Owner-away timeout: " + Math.round(Number(settings.owner_away_timeout) / 60000) + " minutes",
-      "AI analyzer: " + (typeof autoModAnalyzer === "function" ? "Connected" : "Not connected"),
-    ].join("\n"));
+
+  if (
+    subcommand === "status"
+  ) {
+    const settings =
+      await getAutoModSettings(
+        threadID
+      );
+
+    const away =
+      await isOwnerAway(
+        threadID
+      );
+
+    const analyzerConnected =
+      typeof autoModAnalyzer ===
+      "function";
+
+    await send(
+      api,
+      threadID,
+      [
+        "🛡️ AUTONOMOUS MODERATION",
+        "",
+        "Status: " +
+          (
+            settings.enabled
+              ? "ON"
+              : "OFF"
+          ),
+        "Owner-away mode: " +
+          (
+            away
+              ? "ACTIVE"
+              : "DORMANT"
+          ),
+        "Owner-away timeout: " +
+          Math.round(
+            Number(
+              settings.owner_away_timeout
+            ) / 60000
+          ) +
+          " minutes",
+        "AI analyzer: " +
+          (
+            analyzerConnected
+              ? "Connected"
+              : "Not connected"
+          ),
+      ].join("\n")
+    );
+
     return true;
   }
-  await send(api, threadID, ["Usage:", "!automod on", "!automod off", "!automod status"].join("\n"));
+
+  await send(
+    api,
+    threadID,
+    [
+      "Usage:",
+      "!automod on",
+      "!automod off",
+      "!automod status",
+    ].join("\n")
+  );
+
   return true;
 }
-
 
 /*
 |--------------------------------------------------------------------------
@@ -416,35 +1330,53 @@ function now() {
 }
 
 function isBotOwner(userId) {
-  return ADMIN_IDS.includes(String(userId));
+  return ADMIN_IDS.includes(
+    String(userId)
+  );
 }
 
 function isTrustedAdmin(userId) {
-  return TRUSTED_ADMIN_IDS.includes(String(userId));
+  return TRUSTED_ADMIN_IDS.includes(
+    String(userId)
+  );
 }
 
 function isAdmin(userId) {
-  return isBotOwner(userId) || isTrustedAdmin(userId);
-}
-
-function canAutoModTarget(userId) {
-  return !isBotOwner(userId) && !isTrustedAdmin(userId);
+  return (
+    isBotOwner(userId) ||
+    isTrustedAdmin(userId)
+  );
 }
 
 function getAdminLevel(userId) {
-  if (isBotOwner(userId)) return 3;
-  if (isTrustedAdmin(userId)) return 2;
+  if (
+    isBotOwner(userId)
+  ) {
+    return 3;
+  }
+
+  if (
+    isTrustedAdmin(userId)
+  ) {
+    return 2;
+  }
+
   return 1;
 }
 
 function cleanReason(reason) {
-  const value = String(reason || "").trim();
+  const value =
+    String(reason || "")
+      .trim();
 
   if (!value) {
     return "No reason provided";
   }
 
-  return value.slice(0, 500);
+  return value.slice(
+    0,
+    500
+  );
 }
 
 /*
@@ -453,35 +1385,36 @@ function cleanReason(reason) {
 |--------------------------------------------------------------------------
 */
 
-function parseTargetId(event, args) {
-  /*
-   * Try Messenger mentions first.
-   *
-   * Supports:
-   * !warn @user reason
-   * !kick @user reason
-   * !ban @user reason
-   *
-   * Also supports direct IDs:
-   * !warn 123456789 reason
-   */
-
-  const mentions = event?.mentions || {};
+function parseTargetId(
+  event,
+  args
+) {
+  const mentions =
+    event?.mentions || {};
 
   if (
     mentions &&
-    typeof mentions === "object"
+    typeof mentions ===
+      "object"
   ) {
     const mentionIds =
-      Object.keys(mentions);
+      Object.keys(
+        mentions
+      );
 
-    if (mentionIds.length > 0) {
-      return String(mentionIds[0]);
+    if (
+      mentionIds.length > 0
+    ) {
+      return String(
+        mentionIds[0]
+      );
     }
   }
 
   const first =
-    String(args[0] || "").trim();
+    String(
+      args[0] || ""
+    ).trim();
 
   if (!first) {
     return null;
@@ -493,27 +1426,21 @@ function parseTargetId(event, args) {
     .trim();
 }
 
-function getReason(args, targetId) {
-  if (!args.length) {
+function getReason(
+  args,
+  targetId
+) {
+  if (
+    !args.length
+  ) {
     return "No reason provided";
   }
 
-  /*
-   * The first argument is normally the target.
-   * Remove it before joining the reason.
-   */
-
-  let reasonArgs = args.slice(1);
-
-  /*
-   * If the target was obtained from event.mentions,
-   * args[0] may be "@username" instead of the actual ID.
-   * That still needs to be removed.
-   */
+  const reasonArgs =
+    args.slice(1);
 
   if (
-    reasonArgs.length === 0 &&
-    args.length > 0
+    reasonArgs.length === 0
   ) {
     return "No reason provided";
   }
@@ -535,24 +1462,73 @@ function rateLimit(
   maxActions,
   windowMs
 ) {
-  const timestamp = now();
+  const timestamp =
+    now();
+
+  /*
+   * Occasionally remove stale keys.
+   */
+  if (
+    map.size > 1000
+  ) {
+    for (
+      const [
+        existingKey,
+        entries,
+      ] of map.entries()
+    ) {
+      const valid =
+        entries.filter(
+          (time) =>
+            timestamp - time <
+            windowMs
+        );
+
+      if (
+        valid.length === 0
+      ) {
+        map.delete(
+          existingKey
+        );
+      } else {
+        map.set(
+          existingKey,
+          valid
+        );
+      }
+    }
+  }
 
   let entries =
     map.get(key) || [];
 
-  entries = entries.filter(
-    (time) =>
-      timestamp - time < windowMs
-  );
+  entries =
+    entries.filter(
+      (time) =>
+        timestamp - time <
+        windowMs
+    );
 
-  if (entries.length >= maxActions) {
-    map.set(key, entries);
+  if (
+    entries.length >=
+    maxActions
+  ) {
+    map.set(
+      key,
+      entries
+    );
+
     return false;
   }
 
-  entries.push(timestamp);
+  entries.push(
+    timestamp
+  );
 
-  map.set(key, entries);
+  map.set(
+    key,
+    entries
+  );
 
   return true;
 }
@@ -568,22 +1544,24 @@ async function send(
   threadID,
   message
 ) {
-  return new Promise((resolve) => {
-    try {
-      api.sendMessage(
-        message,
-        threadID,
-        () => resolve()
-      );
-    } catch (error) {
-      console.error(
-        "[moderation] send error:",
-        error
-      );
+  return new Promise(
+    (resolve) => {
+      try {
+        api.sendMessage(
+          message,
+          threadID,
+          () => resolve()
+        );
+      } catch (error) {
+        console.error(
+          "[moderation] send error:",
+          error
+        );
 
-      resolve();
+        resolve();
+      }
     }
-  });
+  );
 }
 
 /*
@@ -613,7 +1591,8 @@ async function logModeration({
         success,
         created_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      VALUES
+      ($1,$2,$3,$4,$5,$6,$7)
       `,
       [
         threadID,
@@ -660,7 +1639,8 @@ async function logAdminAbuse({
         blocked,
         created_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      VALUES
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       `,
       [
         threadID,
@@ -696,13 +1676,6 @@ async function notifyOwner(
   strikes,
   reason
 ) {
-  /*
-   * Only notify the configured Bot Owner(s).
-   *
-   * We send the alert to the current group thread so the
-   * owner can see the warning if they are present there.
-   */
-
   if (
     !ADMIN_IDS.length ||
     !api
@@ -720,11 +1693,6 @@ async function notifyOwner(
       "",
       "The moderation system has detected repeated suspicious administrator activity.",
     ].join("\n");
-
-  /*
-   * Avoid repeatedly spamming the owner every single action.
-   * Only call this when the threshold is reached.
-   */
 
   await send(
     api,
@@ -758,7 +1726,10 @@ async function getAdminRestriction(
       ]
     );
 
-  return result.rows[0] || null;
+  return (
+    result.rows[0] ||
+    null
+  );
 }
 
 async function addAdminStrike(
@@ -774,7 +1745,9 @@ async function addAdminStrike(
     );
 
   const strikes =
-    Number(current?.strikes || 0) + 1;
+    Number(
+      current?.strikes || 0
+    ) + 1;
 
   let moderationLocked =
     Boolean(
@@ -787,16 +1760,8 @@ async function addAdminStrike(
     );
 
   let lockedUntil =
-    current?.locked_until || null;
-
-  /*
-   * Strike escalation:
-   *
-   * 1 = logged warning
-   * 2 = economy restriction for economy abuse
-   * 3 = temporary moderation lock
-   * 4+ = owner alert
-   */
+    current?.locked_until ||
+    null;
 
   if (
     strikes >= 2 &&
@@ -805,8 +1770,11 @@ async function addAdminStrike(
     economyLocked = true;
   }
 
-  if (strikes >= 3) {
+  if (
+    strikes >= 3
+  ) {
     moderationLocked = true;
+
     lockedUntil =
       now() +
       ADMIN_STRIKE_LOCK_MS;
@@ -824,15 +1792,23 @@ async function addAdminStrike(
       locked_until,
       updated_at
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7)
+    VALUES
+    ($1,$2,$3,$4,$5,$6,$7)
 
-    ON CONFLICT (thread_id, admin_id)
+    ON CONFLICT
+      (thread_id, admin_id)
+
     DO UPDATE SET
-      moderation_locked = EXCLUDED.moderation_locked,
-      economy_locked = EXCLUDED.economy_locked,
-      strikes = EXCLUDED.strikes,
-      locked_until = EXCLUDED.locked_until,
-      updated_at = EXCLUDED.updated_at
+      moderation_locked =
+        EXCLUDED.moderation_locked,
+      economy_locked =
+        EXCLUDED.economy_locked,
+      strikes =
+        EXCLUDED.strikes,
+      locked_until =
+        EXCLUDED.locked_until,
+      updated_at =
+        EXCLUDED.updated_at
     `,
     [
       threadID,
@@ -844,10 +1820,6 @@ async function addAdminStrike(
       now(),
     ]
   );
-
-  /*
-   * Notify the owner only after repeated abuse.
-   */
 
   if (
     strikes >=
@@ -882,11 +1854,9 @@ async function checkAdminRestriction(
   adminId,
   type
 ) {
-  /*
-   * Bot owner is never restricted by this system.
-   */
-
-  if (isBotOwner(adminId)) {
+  if (
+    isBotOwner(adminId)
+  ) {
     return false;
   }
 
@@ -899,10 +1869,6 @@ async function checkAdminRestriction(
   if (!restriction) {
     return false;
   }
-
-  /*
-   * Temporary moderation lock expired.
-   */
 
   if (
     restriction.locked_until &&
@@ -926,11 +1892,6 @@ async function checkAdminRestriction(
         now(),
       ]
     );
-
-    /*
-     * Economy lock is intentionally preserved.
-     * A separate economy restriction may still apply.
-     */
 
     if (
       type === "moderation"
@@ -1002,7 +1963,8 @@ async function addWarning(
       active,
       created_at
     )
-    VALUES ($1,$2,$3,$4,TRUE,$5)
+    VALUES
+    ($1,$2,$3,$4,TRUE,$5)
     `,
     [
       threadID,
@@ -1070,7 +2032,10 @@ async function getLocalBan(
       ]
     );
 
-  return result.rows[0] || null;
+  return (
+    result.rows[0] ||
+    null
+  );
 }
 
 async function createBan(
@@ -1090,14 +2055,20 @@ async function createBan(
       active,
       created_at
     )
-    VALUES ($1,$2,$3,$4,TRUE,$5)
+    VALUES
+    ($1,$2,$3,$4,TRUE,$5)
 
-    ON CONFLICT (thread_id,user_id)
+    ON CONFLICT
+      (thread_id,user_id)
+
     DO UPDATE SET
-      moderator_id = EXCLUDED.moderator_id,
-      reason = EXCLUDED.reason,
+      moderator_id =
+        EXCLUDED.moderator_id,
+      reason =
+        EXCLUDED.reason,
       active = TRUE,
-      created_at = EXCLUDED.created_at
+      created_at =
+        EXCLUDED.created_at
     `,
     [
       threadID,
@@ -1187,11 +2158,9 @@ function canModerateTarget(
   moderatorId,
   targetId
 ) {
-  /*
-   * Bot Owner is untouchable.
-   */
-
-  if (isBotOwner(targetId)) {
+  if (
+    isBotOwner(targetId)
+  ) {
     return {
       allowed: false,
       reason:
@@ -1208,10 +2177,6 @@ function canModerateTarget(
     getAdminLevel(
       targetId
     );
-
-  /*
-   * Nobody can punish an equal/higher authority.
-   */
 
   if (
     targetLevel >=
@@ -1241,7 +2206,9 @@ async function validateModerator(
   threadID,
   moderatorId
 ) {
-  if (!isAdmin(moderatorId)) {
+  if (
+    !isAdmin(moderatorId)
+  ) {
     await send(
       api,
       threadID,
@@ -1398,13 +2365,6 @@ async function handleWarn(
     action: "warn",
     reason,
   });
-
-  /*
-   * Automatic escalation at WARN_LIMIT.
-   *
-   * Three warnings do not automatically ban the user.
-   * They are recorded as an escalation event instead.
-   */
 
   if (
     warnings.length >=
@@ -1702,12 +2662,6 @@ async function handleBan(
       targetId
     );
 
-  /*
-   * Persist local ban FIRST.
-   * This means even if Facebook removal fails,
-   * the bot still recognizes the local ban.
-   */
-
   await createBan(
     threadID,
     targetId,
@@ -1728,7 +2682,7 @@ async function handleBan(
     targetId,
     action: "ban",
     reason,
-    success: true,
+    success: removed,
   });
 
   await send(
@@ -1739,7 +2693,9 @@ async function handleBan(
       "",
       `👤 User: ${targetId}`,
       `📌 Reason: ${reason}`,
-      `👢 Removed from group: ${removed ? "Yes" : "No"}`,
+      `👢 Removed from group: ${
+        removed ? "Yes" : "No"
+      }`,
       "",
       removed
         ? "The user was removed and locally banned."
@@ -1762,25 +2718,24 @@ async function handleUnban(
   moderatorId,
   args
 ) {
+  /*
+   * FIX:
+   * Unban now respects moderation restrictions.
+   */
   if (
-    !isAdmin(moderatorId)
-  ) {
-    await send(
+    !(await validateModerator(
       api,
       threadID,
-      "❌ You do not have permission to use moderation commands."
-    );
-
+      moderatorId
+    ))
+  ) {
     return true;
   }
 
-  /*
-   * Only the Bot Owner can unban another administrator.
-   * Trusted admins can unban normal members.
-   */
-
   const targetId =
-    String(args[0] || "")
+    String(
+      args[0] || ""
+    )
       .replace(/^@/, "")
       .replace(/[<>]/g, "")
       .trim();
@@ -1960,10 +2915,6 @@ async function handleAdminLog(
   threadID,
   moderatorId
 ) {
-  /*
-   * Only Bot Owner can inspect administrator abuse logs.
-   */
-
   if (
     !isBotOwner(moderatorId)
   ) {
@@ -2150,10 +3101,6 @@ async function inspectEconomyCommand(
     };
   }
 
-  /*
-   * Bot Owner bypasses administrator economy locks.
-   */
-
   if (
     !isBotOwner(adminId) &&
     (await checkAdminRestriction(
@@ -2181,23 +3128,18 @@ async function inspectEconomyCommand(
   }
 
   const amount =
-    parseAmount(parts[1]);
+    parseAmount(
+      parts[1]
+    );
 
-  /*
-   * Let economy.js handle malformed commands
-   * so its normal usage/error response remains intact.
-   */
-
-  if (amount === null) {
+  if (
+    amount === null
+  ) {
     return {
       handled: false,
       blocked: false,
     };
   }
-
-  /*
-   * Rate limit.
-   */
 
   if (
     !isBotOwner(adminId) &&
@@ -2245,10 +3187,6 @@ async function inspectEconomyCommand(
       ? MAX_SINGLE_XP_AMOUNT
       : MAX_SINGLE_MONEY_AMOUNT;
 
-  /*
-   * Excessive single transaction.
-   */
-
   if (
     !isBotOwner(adminId) &&
     amount > maxAmount
@@ -2280,13 +3218,6 @@ async function inspectEconomyCommand(
     };
   }
 
-  /*
-   * Extra protection:
-   *
-   * setmoney / setbank can instantly replace an existing
-   * balance, so record them as higher-risk than add/remove.
-   */
-
   let severity =
     "low";
 
@@ -2297,11 +3228,6 @@ async function inspectEconomyCommand(
   ) {
     severity = "medium";
   }
-
-  /*
-   * Normal admin economy commands remain allowed.
-   * They are audited but NOT blocked.
-   */
 
   await logAdminAbuse({
     threadID,
@@ -2322,7 +3248,7 @@ async function inspectEconomyCommand(
 
 /*
 |--------------------------------------------------------------------------
-| LOCAL BAN ENFORCEMENT
+| LOCAL BAN / MUTE ENFORCEMENT
 |--------------------------------------------------------------------------
 */
 
@@ -2332,26 +3258,35 @@ async function enforceLocalBan(
   threadID,
   senderId
 ) {
-  /*
-   * Never block the Bot Owner.
-   */
-
   if (
     isBotOwner(senderId)
   ) {
     return false;
   }
 
-  const mute = await isMuted(threadID, senderId);
+  /*
+   * Mute takes priority.
+   */
+  const mute =
+    await isMuted(
+      threadID,
+      senderId
+    );
+
   if (mute) {
     await logModeration({
       threadID,
-      moderatorId: mute.moderator_id,
-      targetId: senderId,
-      action: "blocked_mute_attempt",
-      reason: mute.reason,
+      moderatorId:
+        mute.moderator_id,
+      targetId:
+        senderId,
+      action:
+        "blocked_mute_attempt",
+      reason:
+        mute.reason,
       success: true,
     });
+
     return true;
   }
 
@@ -2365,16 +3300,12 @@ async function enforceLocalBan(
     return false;
   }
 
-  /*
-   * Do NOT repeatedly send a message for every command.
-   * Simply consume the message.
-   */
-
   await logModeration({
     threadID,
     moderatorId:
       ban.moderator_id,
-    targetId: senderId,
+    targetId:
+      senderId,
     action:
       "blocked_local_ban_attempt",
     reason:
@@ -2423,15 +3354,20 @@ async function handleModerationMessage(
   }
 
   /*
-   * ================================================================
-   * LOCAL BAN CHECK
-   * ================================================================
+   * Owner activity is recorded before anything else.
    *
-   * This is now performed for EVERY incoming message.
-   *
-   * Because moderation.js runs before RPG/games/economy/AI
-   * in index.js, a locally banned user cannot simply use
-   * another bot command to bypass the local ban.
+   * This means sending any message to the group resets
+   * the 15-minute owner-away timer.
+   */
+  noteOwnerActivity(
+    threadID,
+    senderId
+  );
+
+  /*
+   * ================================================================
+   * LOCAL BAN / MUTE CHECK
+   * ================================================================
    */
 
   if (
@@ -2456,21 +3392,50 @@ async function handleModerationMessage(
   const args =
     parts.slice(1);
 
-  noteOwnerActivity(threadID, senderId);
+  /*
+   * ================================================================
+   * AUTOMOD COMMAND
+   * ================================================================
+   */
 
-  if (command === "!automod") {
-    return handleAutoModCommand(api, threadID, senderId, args);
-  }
-
-  if (!command.startsWith("!")) {
-    const autoModHandled = await evaluateAutoMod({
+  if (
+    command === "!automod"
+  ) {
+    return handleAutoModCommand(
       api,
-      event,
       threadID,
       senderId,
-      text: clean,
-    });
-    if (autoModHandled) return true;
+      args
+    );
+  }
+
+  /*
+   * ================================================================
+   * AUTONOMOUS MODERATION
+   * ================================================================
+   *
+   * Only normal messages are analyzed.
+   *
+   * Commands are left to the normal bot routing system.
+   */
+
+  if (
+    !command.startsWith("!")
+  ) {
+    const autoModHandled =
+      await evaluateAutoMod({
+        api,
+        event,
+        threadID,
+        senderId,
+        text: clean,
+      });
+
+    if (
+      autoModHandled
+    ) {
+      return true;
+    }
   }
 
   /*
@@ -2503,11 +3468,6 @@ async function handleModerationMessage(
 
       return true;
     }
-
-    /*
-     * Normal economy commands continue
-     * to economy.js.
-     */
   }
 
   /*
@@ -2579,12 +3539,15 @@ async function handleModerationMessage(
 
 module.exports = {
   handleModerationMessage,
+
   isBotOwner,
   isTrustedAdmin,
   isAdmin,
   getAdminLevel,
+
   isLocallyBanned,
   inspectEconomyCommand,
+
   setAutoModAnalyzer,
   noteOwnerActivity,
   getAutoModSettings,
