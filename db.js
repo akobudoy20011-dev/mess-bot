@@ -201,6 +201,42 @@ async function connect() {
 
     CREATE INDEX IF NOT EXISTS admin_abuse_logs_lookup_idx
       ON admin_abuse_logs(thread_id, admin_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS moderation_mutes (
+      id BIGSERIAL PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      moderator_id TEXT NOT NULL,
+      reason TEXT,
+      expires_at BIGINT NOT NULL,
+      active BOOLEAN DEFAULT TRUE,
+      created_at BIGINT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_moderation_mutes_active
+      ON moderation_mutes(thread_id, user_id, active);
+
+    CREATE TABLE IF NOT EXISTS automod_settings (
+      thread_id TEXT PRIMARY KEY,
+      enabled BOOLEAN DEFAULT FALSE,
+      owner_away_timeout BIGINT DEFAULT 900000,
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS automod_incidents (
+      id BIGSERIAL PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      severity INTEGER NOT NULL,
+      confidence REAL NOT NULL,
+      action TEXT NOT NULL,
+      reason TEXT,
+      created_at BIGINT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_automod_incidents_user
+      ON automod_incidents(thread_id, user_id, created_at);
   `);
 
   // ═════════════════════════════════════════════════════════
