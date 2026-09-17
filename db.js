@@ -230,7 +230,11 @@ async function connect() {
       category TEXT NOT NULL,
       severity INTEGER NOT NULL,
       confidence REAL NOT NULL,
-      action TEXT NOT NULL,
+      suggested_action TEXT NOT NULL DEFAULT 'none',
+      action TEXT NOT NULL,    ALTER TABLE automod_incidents
+      ADD COLUMN IF NOT EXISTS suggested_action TEXT NOT NULL DEFAULT 'none';
+
+
       reason TEXT,
       created_at BIGINT NOT NULL
     );
