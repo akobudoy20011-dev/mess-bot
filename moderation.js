@@ -1,4 +1,8 @@
 const db = require("./db");
+const {
+  classifyForAutoMod,
+  isAutoModClassifierConfigured,
+} = require("./ai/moderation-classifier");
 
 const ADMIN_IDS = String(process.env.ADMIN_IDS || "")
   .split(",")
@@ -95,10 +99,14 @@ async function ensureAutoModTables() {
         category TEXT NOT NULL,
         severity INTEGER NOT NULL,
         confidence REAL NOT NULL,
+        suggested_action TEXT NOT NULL DEFAULT 'none',
         action TEXT NOT NULL,
         reason TEXT,
         created_at BIGINT NOT NULL
       );
+      ALTER TABLE automod_incidents
+        ADD COLUMN IF NOT EXISTS suggested_action TEXT NOT NULL DEFAULT 'none';
+
       CREATE INDEX IF NOT EXISTS idx_automod_incidents_user
         ON automod_incidents(thread_id, user_id, created_at);
       CREATE TABLE IF NOT EXISTS moderation_mutes (
@@ -217,13 +225,13 @@ async function getRecentAutoModIncidents(threadID, userId) {
   return result.rows;
 }
 
-async function logAutoModIncident({ threadID, userId, category, severity, confidence, action, reason }) {
+async function logAutoModIncident({ threadID, userId, category, severity, confidence, suggestedAction = action, action, reason }) {
   await ensureAutoModTables();
   await db.query(`
     INSERT INTO automod_incidents
-      (thread_id, user_id, category, severity, confidence, action, reason, created_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-  `, [threadID, userId, category, severity, confidence, action, reason, now()]);
+      (thread_id, user_id, category, severity, confidence, suggested_action, action, reason, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+  `, [threadID, userId, category, severity, confidence, suggestedAction, action, reason, now()]);
 }
 
 async function createMute(threadID, userId, moderatorId, durationMs, reason) {
@@ -257,6 +265,10 @@ async function isMuted(threadID, userId) {
   return null;
 }
 
+if (isAutoModClassifierConfigured()) {
+  setAutoModAnalyzer(classifyForAutoMod);
+}
+
 async function evaluateAutoMod({ api, event, threadID, senderId, text }) {
   if (!threadID || !senderId || !text) return false;
   if (isBotOwner(senderId) || isAdmin(senderId)) return false;
@@ -273,6 +285,7 @@ async function evaluateAutoMod({ api, event, threadID, senderId, text }) {
       category: analysis.category,
       severity: analysis.severity,
       confidence: analysis.confidence,
+      suggestedAction: analysis.action,
       action: "none",
       reason: "Low-confidence classification: " + analysis.reason,
     });
@@ -284,7 +297,7 @@ async function evaluateAutoMod({ api, event, threadID, senderId, text }) {
   let action = analysis.action;
   if (action === "ban" && totalSeverity < AUTOMOD_BAN_LEVEL) action = "mute";
   if (action === "mute" && totalSeverity < AUTOMOD_MUTE_LEVEL) action = "warn";
-  if (action === "warn" && analysis.severity <= 0) action = "none";
+  if (action === "warn" && analysis.severity < 2) action = "none";
 
   await logAutoModIncident({
     threadID,
@@ -292,6 +305,7 @@ async function evaluateAutoMod({ api, event, threadID, senderId, text }) {
     category: analysis.category,
     severity: analysis.severity,
     confidence: analysis.confidence,
+    suggestedAction: analysis.action,
     action,
     reason: analysis.reason,
   });
@@ -318,8 +332,7 @@ async function evaluateAutoMod({ api, event, threadID, senderId, text }) {
   }
 
   if (action === "ban") {
-    const permission = canModerateTarget("AUTOMOD", senderId);
-    if (!permission.allowed) return false;
+    if (!canAutoModTarget(senderId)) return false;
     await createBan(threadID, senderId, "AUTOMOD", analysis.reason);
     const removed = await removeFromGroup(api, threadID, senderId);
     await logModeration({ threadID, moderatorId: "AUTOMOD", targetId: senderId, action: "automod_ban", reason: analysis.reason, success: removed });
@@ -396,6 +409,10 @@ function isTrustedAdmin(userId) {
 
 function isAdmin(userId) {
   return isBotOwner(userId) || isTrustedAdmin(userId);
+}
+
+function canAutoModTarget(userId) {
+  return !isBotOwner(userId) && !isTrustedAdmin(userId);
 }
 
 function getAdminLevel(userId) {
