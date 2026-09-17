@@ -82,6 +82,14 @@ const {
 } = require("./youtube");
 
 // ============================================================
+// LYRICS
+// ============================================================
+
+const {
+  getSyncedLyrics,
+} = require("./lyrics");
+
+// ============================================================
 // TRIGGERS
 // ============================================================
 
@@ -242,6 +250,790 @@ function sendMessengerMessage(
 }
 
 // ============================================================
+// MESSENGER MESSAGE WRAPPER WITH MESSAGE INFO
+// ============================================================
+
+/*
+ * Same as sendMessengerMessage(), but preserves the
+ * message information returned by ws3-fca.
+ *
+ * This is required for lyrics because we need the
+ * messageID of the single lyrics panel so that it
+ * can be edited instead of sending new messages.
+ */
+function sendMessengerMessageWithInfo(
+  api,
+  message,
+  threadID
+) {
+  return new Promise((resolve, reject) => {
+    try {
+      api.sendMessage(
+        message,
+        threadID,
+        (error, messageInfo) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve(
+              messageInfo || null
+            );
+          }
+        }
+      );
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// ============================================================
+// SYNCHRONIZED MUSIC LYRICS
+// ============================================================
+
+/*
+ * Messenger edit calls can occasionally fail or hang.
+ *
+ * We use the same defensive approach used by the game
+ * system:
+ *
+ * - 5 second edit timeout
+ * - maximum 2 retries
+ * - 400ms retry delay
+ *
+ * IMPORTANT:
+ * If an edit ultimately fails, we STOP the lyrics session.
+ *
+ * We deliberately do NOT send a new message as a fallback.
+ * This prevents one lyric line from becoming dozens of
+ * separate Messenger messages.
+ */
+
+const MUSIC_EDIT_TIMEOUT_MS = 5000;
+const MUSIC_EDIT_MAX_RETRIES = 2;
+const MUSIC_EDIT_RETRY_DELAY_MS = 400;
+
+const musicLyricSessions = new Map();
+
+// ------------------------------------------------------------
+// CANCEL LYRICS FOR A THREAD
+// ------------------------------------------------------------
+
+function cancelMusicLyrics(threadID) {
+  const key =
+    String(threadID);
+
+  const session =
+    musicLyricSessions.get(key);
+
+  if (!session) {
+    return;
+  }
+
+  session.cancelled = true;
+
+  if (session.timer) {
+    clearTimeout(
+      session.timer
+    );
+
+    session.timer = null;
+  }
+
+  musicLyricSessions.delete(
+    key
+  );
+
+  console.log(
+    `[Music Lyrics] Cancelled session for ${key}`
+  );
+}
+
+// ------------------------------------------------------------
+// SAFE MESSAGE EDIT
+// ------------------------------------------------------------
+
+function editMessageSafe(
+  api,
+  newText,
+  messageID
+) {
+  return new Promise((resolve) => {
+    if (!messageID) {
+      resolve(false);
+      return;
+    }
+
+    let finished = false;
+
+    const timer =
+      setTimeout(() => {
+        if (finished) {
+          return;
+        }
+
+        finished = true;
+        resolve(false);
+      }, MUSIC_EDIT_TIMEOUT_MS);
+
+    try {
+      api.editMessage(
+        newText,
+        messageID,
+        (error) => {
+          if (finished) {
+            return;
+          }
+
+          finished = true;
+          clearTimeout(timer);
+
+          resolve(!error);
+        }
+      );
+    } catch (error) {
+      if (finished) {
+        return;
+      }
+
+      finished = true;
+      clearTimeout(timer);
+
+      resolve(false);
+    }
+  });
+}
+
+// ------------------------------------------------------------
+// EDIT WITH RETRIES
+// ------------------------------------------------------------
+
+async function editMessageWithRetry(
+  api,
+  newText,
+  messageID
+) {
+  for (
+    let attempt = 0;
+    attempt <= MUSIC_EDIT_MAX_RETRIES;
+    attempt++
+  ) {
+    const ok =
+      await editMessageSafe(
+        api,
+        newText,
+        messageID
+      );
+
+    if (ok) {
+      return true;
+    }
+
+    if (
+      attempt <
+      MUSIC_EDIT_MAX_RETRIES
+    ) {
+      await new Promise(
+        (resolve) =>
+          setTimeout(
+            resolve,
+            MUSIC_EDIT_RETRY_DELAY_MS
+          )
+      );
+    }
+  }
+
+  return false;
+}
+
+// ------------------------------------------------------------
+// PARSE DISPLAY DURATION
+// ------------------------------------------------------------
+
+function parseDurationSeconds(
+  duration
+) {
+  if (
+    typeof duration !== "string"
+  ) {
+    return null;
+  }
+
+  const value =
+    duration.trim();
+
+  if (!value) {
+    return null;
+  }
+
+  const parts =
+    value
+      .split(":")
+      .map(
+        (part) =>
+          Number(part)
+      );
+
+  if (
+    parts.some(
+      (part) =>
+        !Number.isFinite(part)
+    )
+  ) {
+    return null;
+  }
+
+  if (parts.length === 2) {
+    const minutes =
+      parts[0];
+
+    const seconds =
+      parts[1];
+
+    if (
+      minutes < 0 ||
+      seconds < 0 ||
+      seconds >= 60
+    ) {
+      return null;
+    }
+
+    return (
+      minutes * 60 +
+      seconds
+    );
+  }
+
+  if (parts.length === 3) {
+    const hours =
+      parts[0];
+
+    const minutes =
+      parts[1];
+
+    const seconds =
+      parts[2];
+
+    if (
+      hours < 0 ||
+      minutes < 0 ||
+      minutes >= 60 ||
+      seconds < 0 ||
+      seconds >= 60
+    ) {
+      return null;
+    }
+
+    return (
+      hours * 3600 +
+      minutes * 60 +
+      seconds
+    );
+  }
+
+  return null;
+}
+
+// ------------------------------------------------------------
+// FORMAT CLOCK
+// ------------------------------------------------------------
+
+function formatLyricsClock(
+  seconds
+) {
+  const safeSeconds =
+    Math.max(
+      0,
+      Math.floor(
+        Number(seconds) || 0
+      )
+    );
+
+  const minutes =
+    Math.floor(
+      safeSeconds / 60
+    );
+
+  const remainingSeconds =
+    safeSeconds % 60;
+
+  return (
+    `${String(minutes).padStart(2, "0")}:` +
+    `${String(remainingSeconds).padStart(2, "0")}`
+  );
+}
+
+// ------------------------------------------------------------
+// BUILD LYRICS PANEL
+// ------------------------------------------------------------
+
+function buildLyricsPanel({
+  title,
+  author,
+  lyricText,
+  elapsedSeconds,
+  duration,
+  unavailable = false,
+  ended = false,
+}) {
+  const cleanTitle =
+    String(
+      title || "Unknown Title"
+    ).trim();
+
+  const cleanAuthor =
+    String(
+      author || ""
+    ).trim();
+
+  let durationSeconds =
+    parseDurationSeconds(
+      duration
+    );
+
+  let timeDisplay =
+    formatLyricsClock(
+      elapsedSeconds
+    );
+
+  if (
+    Number.isFinite(
+      durationSeconds
+    )
+  ) {
+    timeDisplay +=
+      ` / ${formatLyricsClock(
+        durationSeconds
+      )}`;
+  }
+
+  let currentLine;
+
+  if (unavailable) {
+    currentLine =
+      "♫ Synced lyrics unavailable";
+  } else if (ended) {
+    currentLine =
+      "♫ END OF LYRICS";
+  } else {
+    currentLine =
+      String(
+        lyricText ||
+          "♫ Waiting for lyrics..."
+      ).trim();
+  }
+
+  return [
+    "╭━━━━━━━━━━━━━━━━━━━━━━╮",
+    "        🌑 ECLIPSE",
+    "       NOW PLAYING",
+    "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+    "",
+    `     🎵 ${cleanTitle}`,
+    cleanAuthor
+      ? `        ${cleanAuthor}`
+      : "",
+    "",
+    "──────────────────────",
+    currentLine,
+    "──────────────────────",
+    `⏱  ${timeDisplay}`,
+    "──────────────────────",
+    "       ECLIPSE LYRICS",
+    "──────────────────────",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+// ------------------------------------------------------------
+// START SYNCHRONIZED LYRICS
+// ------------------------------------------------------------
+
+async function startMusicLyrics(
+  api,
+  threadID,
+  {
+    title,
+    author,
+    duration,
+    lyrics,
+  }
+) {
+  const key =
+    String(threadID);
+
+  /*
+   * Any existing lyrics in this thread belong to an
+   * older !play command. Stop them before starting the
+   * new session.
+   */
+  cancelMusicLyrics(
+    key
+  );
+
+  const lines =
+    Array.isArray(
+      lyrics?.lines
+    )
+      ? lyrics.lines
+          .filter(
+            (line) =>
+              line &&
+              Number.isFinite(
+                Number(line.time)
+              ) &&
+              typeof line.text ===
+                "string" &&
+              line.text.trim()
+          )
+          .map(
+            (line) => ({
+              time: Math.max(
+                0,
+                Number(line.time)
+              ),
+              text:
+                line.text.trim(),
+            })
+          )
+          .sort(
+            (a, b) =>
+              a.time - b.time
+          )
+      : [];
+
+  /*
+   * No synced lyrics:
+   *
+   * Send one separate lyrics panel and stop.
+   */
+  if (lines.length === 0) {
+    try {
+      await sendMessengerMessage(
+        api,
+        buildLyricsPanel({
+          title,
+          author,
+          duration,
+          elapsedSeconds: 0,
+          unavailable: true,
+        }),
+        threadID
+      );
+    } catch (error) {
+      console.error(
+        "[Music Lyrics] Failed to send unavailable panel:",
+        error
+      );
+    }
+
+    return;
+  }
+
+  const session = {
+    id: crypto.randomUUID(),
+    threadID: key,
+    cancelled: false,
+    timer: null,
+    messageID: null,
+    lines,
+    title:
+      String(
+        title || ""
+      ).trim(),
+    author:
+      String(
+        author || ""
+      ).trim(),
+    duration:
+      String(
+        duration || ""
+      ).trim(),
+    startedAt: Date.now(),
+    currentIndex: -1,
+  };
+
+  musicLyricSessions.set(
+    key,
+    session
+  );
+
+  /*
+   * Send the lyrics panel first.
+   *
+   * The actual message ID returned by Messenger is
+   * captured so every future lyric line edits this
+   * same message.
+   */
+  try {
+    const messageInfo =
+      await sendMessengerMessageWithInfo(
+        api,
+        buildLyricsPanel({
+          title:
+            session.title,
+          author:
+            session.author,
+          duration:
+            session.duration,
+          elapsedSeconds: 0,
+          lyricText:
+            "♫ Syncing lyrics...",
+        }),
+        threadID
+      );
+
+    /*
+     * A newer !play may have started while the
+     * Messenger request was in progress.
+     */
+    if (
+      session.cancelled ||
+      musicLyricSessions.get(
+        key
+      ) !== session
+    ) {
+      return;
+    }
+
+    session.messageID =
+      messageInfo?.messageID ||
+      messageInfo?.messageId ||
+      messageInfo?.id ||
+      null;
+
+    if (!session.messageID) {
+      console.error(
+        "[Music Lyrics] Messenger did not return a message ID. Lyrics updater stopped."
+      );
+
+      session.cancelled = true;
+
+      if (
+        session.timer
+      ) {
+        clearTimeout(
+          session.timer
+        );
+
+        session.timer = null;
+      }
+
+      if (
+        musicLyricSessions.get(
+          key
+        ) === session
+      ) {
+        musicLyricSessions.delete(
+          key
+        );
+      }
+
+      return;
+    }
+
+    console.log(
+      `[Music Lyrics] Started "${session.title}" in ${key}`
+    );
+  } catch (error) {
+    console.error(
+      "[Music Lyrics] Failed to send lyrics panel:",
+      error
+    );
+
+    session.cancelled = true;
+
+    if (
+      musicLyricSessions.get(
+        key
+      ) === session
+    ) {
+      musicLyricSessions.delete(
+        key
+      );
+    }
+
+    return;
+  }
+
+  /*
+   * Schedule lyric updates using the original LRC
+   * timestamps rather than repeatedly adding delays.
+   *
+   * This reduces accumulated timer drift.
+   */
+  const scheduleNextLine =
+    () => {
+      if (
+        session.cancelled ||
+        musicLyricSessions.get(
+          key
+        ) !== session
+      ) {
+        return;
+      }
+
+      const nextIndex =
+        session.currentIndex + 1;
+
+      if (
+        nextIndex >=
+        session.lines.length
+      ) {
+        /*
+         * Lyrics have finished.
+         *
+         * Leave the final lyric visible instead of
+         * repeatedly editing the message.
+         */
+        session.timer = null;
+
+        if (
+          musicLyricSessions.get(
+            key
+          ) === session
+        ) {
+          musicLyricSessions.delete(
+            key
+          );
+        }
+
+        console.log(
+          `[Music Lyrics] Finished "${session.title}" in ${key}`
+        );
+
+        return;
+      }
+
+      const nextLine =
+        session.lines[
+          nextIndex
+        ];
+
+      const targetTimeMs =
+        Math.max(
+          0,
+          Number(
+            nextLine.time
+          ) * 1000
+        );
+
+      const elapsedMs =
+        Date.now() -
+        session.startedAt;
+
+      const delayMs =
+        Math.max(
+          0,
+          targetTimeMs -
+            elapsedMs
+        );
+
+      session.timer =
+        setTimeout(
+          async () => {
+            session.timer =
+              null;
+
+            if (
+              session.cancelled ||
+              musicLyricSessions.get(
+                key
+              ) !== session
+            ) {
+              return;
+            }
+
+            session.currentIndex =
+              nextIndex;
+
+            const elapsedSeconds =
+              Math.max(
+                0,
+                (
+                  Date.now() -
+                  session.startedAt
+                ) / 1000
+              );
+
+            const panel =
+              buildLyricsPanel({
+                title:
+                  session.title,
+                author:
+                  session.author,
+                duration:
+                  session.duration,
+                lyricText:
+                  nextLine.text,
+                elapsedSeconds,
+              });
+
+            const success =
+              await editMessageWithRetry(
+                api,
+                panel,
+                session.messageID
+              );
+
+            /*
+             * Check again after the async edit.
+             *
+             * A newer !play could have cancelled this
+             * session while editMessage was running.
+             */
+            if (
+              session.cancelled ||
+              musicLyricSessions.get(
+                key
+              ) !== session
+            ) {
+              return;
+            }
+
+            if (!success) {
+              /*
+               * IMPORTANT:
+               *
+               * Never send another message here.
+               * A failed edit ends the updater so we
+               * don't spam the group with lyric lines.
+               */
+              console.error(
+                `[Music Lyrics] Failed to edit lyrics message in ${key}; stopping session.`
+              );
+
+              session.cancelled =
+                true;
+
+              if (
+                musicLyricSessions.get(
+                  key
+                ) === session
+              ) {
+                musicLyricSessions.delete(
+                  key
+                );
+              }
+
+              return;
+            }
+
+            scheduleNextLine();
+          },
+          delayMs
+        );
+    };
+
+  /*
+   * Start the timer only after the lyrics message
+   * itself has successfully been sent.
+   */
+  scheduleNextLine();
+}
+
+// ============================================================
 // YOUTUBE AUDIO — ECLIPSE MUSIC PLAYER
 // ============================================================
 
@@ -250,6 +1042,14 @@ async function sendAudioTrack(
   requestedSong,
   threadID
 ) {
+  /*
+   * A new !play always invalidates any existing
+   * synchronized lyrics session in this thread.
+   */
+  cancelMusicLyrics(
+    threadID
+  );
+
   if (
     typeof requestedSong !== "string" ||
     !requestedSong.trim()
@@ -405,6 +1205,70 @@ async function sendAudioTrack(
     console.log(
       `[Music] Sent "${title}" to ${threadID}`
     );
+
+    // ========================================================
+    // SYNCHRONIZED LYRICS
+    // ========================================================
+
+    try {
+      const syncedLyrics =
+        await getSyncedLyrics({
+          videoId:
+            video.videoId ||
+            video.videoID ||
+            video.id ||
+            null,
+          title,
+          author,
+        });
+
+      /*
+       * startMusicLyrics() sends the lyrics panel
+       * separately from the audio message.
+       */
+      await startMusicLyrics(
+        api,
+        threadID,
+        {
+          title,
+          author,
+          duration,
+          lyrics:
+            syncedLyrics,
+        }
+      );
+    } catch (lyricsError) {
+      console.error(
+        "[Music Lyrics] Lyrics system failed:",
+        lyricsError
+      );
+
+      /*
+       * Do not allow a lyrics problem to turn the
+       * already-successful audio command into a
+       * playback failure.
+       *
+       * We send a single unavailable panel.
+       */
+      try {
+        await sendMessengerMessage(
+          api,
+          buildLyricsPanel({
+            title,
+            author,
+            duration,
+            elapsedSeconds: 0,
+            unavailable: true,
+          }),
+          threadID
+        );
+      } catch (fallbackError) {
+        console.error(
+          "[Music Lyrics] Failed to send fallback panel:",
+          fallbackError
+        );
+      }
+    }
   } catch (error) {
     console.error(
       "[Music] Audio command failed:",
