@@ -82,14 +82,6 @@ const {
 } = require("./youtube");
 
 // ============================================================
-// LYRICS
-// ============================================================
-
-const {
-  getSyncedLyrics,
-} = require("./lyrics");
-
-// ============================================================
 // TRIGGERS
 // ============================================================
 
@@ -122,53 +114,60 @@ const RANDOM_ROAST_COOLDOWN_MS =
     ? parsedCooldown
     : 30_000;
 
-/*
- * Maximum number of thread IDs retained in memory
- * for broadcasting.
- */
 const MAX_ACTIVE_THREADS = 1000;
 
-/*
- * Threads older than this are removed from the
- * in-memory broadcast tracker.
- */
 const ACTIVE_THREAD_EXPIRY_MS =
   30 * 24 * 60 * 60 * 1000;
 
 const lastRandomRoastByThread = new Map();
-
-/*
- * Map:
- *
- * threadID -> lastSeenTimestamp
- *
- * This replaces the old unbounded Set while
- * preserving broadcast functionality.
- */
 const activeThreads = new Map();
 
 // ============================================================
-// MEMORY MONITOR
+// MUSIC RESOURCE PROTECTION
+// ============================================================
+//
+// Per GC:
+//   - maximum 2 music jobs total
+//   - active + pending both count toward the limit
+//
+// Globally:
+//   - maximum 2 simultaneous YouTube downloads
+//
+// This prevents multiple groups from spawning unlimited
+// downloads and exhausting Render memory / CPU / disk.
 // ============================================================
 
-setInterval(() => {
-  const m = process.memoryUsage();
+const MUSIC_MAX_PER_GC = 2;
+const MUSIC_MAX_GLOBAL_DOWNLOADS = 2;
+const MUSIC_MAX_GLOBAL_QUEUE = 50;
 
-  console.log(
-    `[MEMORY] RSS: ${Math.round(
-      m.rss / 1024 / 1024
-    )} MB | ` +
-      `Heap: ${Math.round(
-        m.heapUsed / 1024 / 1024
-      )} / ` +
-      `${Math.round(
-        m.heapTotal / 1024 / 1024
-      )} MB | ` +
-      `External: ${Math.round(
-        m.external / 1024 / 1024
-      )} MB`
-  );
-}, 60_000);
+const MUSIC_SEARCH_TIMEOUT_MS = 45_000;
+const MUSIC_DOWNLOAD_TIMEOUT_MS = 180_000;
+const MUSIC_SEND_TIMEOUT_MS = 60_000;
+
+const MUSIC_REQUEST_MAX_LENGTH = 300;
+
+const parsedMusicFileLimit = Number(
+  process.env.MAX_MUSIC_FILE_BYTES || "26214400"
+);
+
+const MAX_MUSIC_FILE_BYTES =
+  Number.isFinite(parsedMusicFileLimit) &&
+  parsedMusicFileLimit > 0
+    ? parsedMusicFileLimit
+    : 25 * 1024 * 1024;
+
+// Per-thread array of music jobs.
+const musicQueues = new Map();
+
+// Jobs waiting globally for a download slot.
+const musicPendingJobs = [];
+
+// Number of currently running download jobs.
+let activeMusicDownloads = 0;
+
+// Monotonically increasing job ID.
+let musicJobCounter = 0;
 
 // ============================================================
 // GLOBAL BOT STATE
@@ -176,6 +175,10 @@ setInterval(() => {
 
 if (typeof global.botDisabled !== "boolean") {
   global.botDisabled = false;
+}
+
+if (typeof global.botPaused !== "boolean") {
+  global.botPaused = false;
 }
 
 // ============================================================
@@ -193,7 +196,6 @@ function withTimeout(
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
-
         reject(
           new Error(timeoutMessage)
         );
@@ -250,331 +252,15 @@ function sendMessengerMessage(
 }
 
 // ============================================================
-// MESSENGER MESSAGE WRAPPER WITH MESSAGE INFO
+// COQUETTE MUSIC PANEL
 // ============================================================
 
-/*
- * Same as sendMessengerMessage(), but preserves the
- * message information returned by ws3-fca.
- *
- * This is required for lyrics because we need the
- * messageID of the single lyrics panel so that it
- * can be edited instead of sending new messages.
- */
-function sendMessengerMessageWithInfo(
-  api,
-  message,
-  threadID
-) {
-  return new Promise((resolve, reject) => {
-    try {
-      api.sendMessage(
-        message,
-        threadID,
-        (error, messageInfo) => {
-          if (error) {
-            reject(error);
-          } else {
-            resolve(
-              messageInfo || null
-            );
-          }
-        }
-      );
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-// ============================================================
-// SYNCHRONIZED MUSIC LYRICS
-// ============================================================
-
-/*
- * Messenger edit calls can occasionally fail or hang.
- *
- * We use the same defensive approach used by the game
- * system:
- *
- * - 5 second edit timeout
- * - maximum 2 retries
- * - 400ms retry delay
- *
- * IMPORTANT:
- * If an edit ultimately fails, we STOP the lyrics session.
- *
- * We deliberately do NOT send a new message as a fallback.
- * This prevents one lyric line from becoming dozens of
- * separate Messenger messages.
- */
-
-const MUSIC_EDIT_TIMEOUT_MS = 5000;
-const MUSIC_EDIT_MAX_RETRIES = 2;
-const MUSIC_EDIT_RETRY_DELAY_MS = 400;
-
-const musicLyricSessions = new Map();
-
-// ------------------------------------------------------------
-// CANCEL LYRICS FOR A THREAD
-// ------------------------------------------------------------
-
-function cancelMusicLyrics(threadID) {
-  const key =
-    String(threadID);
-
-  const session =
-    musicLyricSessions.get(key);
-
-  if (!session) {
-    return;
-  }
-
-  session.cancelled = true;
-
-  if (session.timer) {
-    clearTimeout(
-      session.timer
-    );
-
-    session.timer = null;
-  }
-
-  musicLyricSessions.delete(
-    key
-  );
-
-  console.log(
-    `[Music Lyrics] Cancelled session for ${key}`
-  );
-}
-
-// ------------------------------------------------------------
-// SAFE MESSAGE EDIT
-// ------------------------------------------------------------
-
-function editMessageSafe(
-  api,
-  newText,
-  messageID
-) {
-  return new Promise((resolve) => {
-    if (!messageID) {
-      resolve(false);
-      return;
-    }
-
-    let finished = false;
-
-    const timer =
-      setTimeout(() => {
-        if (finished) {
-          return;
-        }
-
-        finished = true;
-        resolve(false);
-      }, MUSIC_EDIT_TIMEOUT_MS);
-
-    try {
-      api.editMessage(
-        newText,
-        messageID,
-        (error) => {
-          if (finished) {
-            return;
-          }
-
-          finished = true;
-          clearTimeout(timer);
-
-          resolve(!error);
-        }
-      );
-    } catch (error) {
-      if (finished) {
-        return;
-      }
-
-      finished = true;
-      clearTimeout(timer);
-
-      resolve(false);
-    }
-  });
-}
-
-// ------------------------------------------------------------
-// EDIT WITH RETRIES
-// ------------------------------------------------------------
-
-async function editMessageWithRetry(
-  api,
-  newText,
-  messageID
-) {
-  for (
-    let attempt = 0;
-    attempt <= MUSIC_EDIT_MAX_RETRIES;
-    attempt++
-  ) {
-    const ok =
-      await editMessageSafe(
-        api,
-        newText,
-        messageID
-      );
-
-    if (ok) {
-      return true;
-    }
-
-    if (
-      attempt <
-      MUSIC_EDIT_MAX_RETRIES
-    ) {
-      await new Promise(
-        (resolve) =>
-          setTimeout(
-            resolve,
-            MUSIC_EDIT_RETRY_DELAY_MS
-          )
-      );
-    }
-  }
-
-  return false;
-}
-
-// ------------------------------------------------------------
-// PARSE DISPLAY DURATION
-// ------------------------------------------------------------
-
-function parseDurationSeconds(
-  duration
-) {
-  if (
-    typeof duration !== "string"
-  ) {
-    return null;
-  }
-
-  const value =
-    duration.trim();
-
-  if (!value) {
-    return null;
-  }
-
-  const parts =
-    value
-      .split(":")
-      .map(
-        (part) =>
-          Number(part)
-      );
-
-  if (
-    parts.some(
-      (part) =>
-        !Number.isFinite(part)
-    )
-  ) {
-    return null;
-  }
-
-  if (parts.length === 2) {
-    const minutes =
-      parts[0];
-
-    const seconds =
-      parts[1];
-
-    if (
-      minutes < 0 ||
-      seconds < 0 ||
-      seconds >= 60
-    ) {
-      return null;
-    }
-
-    return (
-      minutes * 60 +
-      seconds
-    );
-  }
-
-  if (parts.length === 3) {
-    const hours =
-      parts[0];
-
-    const minutes =
-      parts[1];
-
-    const seconds =
-      parts[2];
-
-    if (
-      hours < 0 ||
-      minutes < 0 ||
-      minutes >= 60 ||
-      seconds < 0 ||
-      seconds >= 60
-    ) {
-      return null;
-    }
-
-    return (
-      hours * 3600 +
-      minutes * 60 +
-      seconds
-    );
-  }
-
-  return null;
-}
-
-// ------------------------------------------------------------
-// FORMAT CLOCK
-// ------------------------------------------------------------
-
-function formatLyricsClock(
-  seconds
-) {
-  const safeSeconds =
-    Math.max(
-      0,
-      Math.floor(
-        Number(seconds) || 0
-      )
-    );
-
-  const minutes =
-    Math.floor(
-      safeSeconds / 60
-    );
-
-  const remainingSeconds =
-    safeSeconds % 60;
-
-  return (
-    `${String(minutes).padStart(2, "0")}:` +
-    `${String(remainingSeconds).padStart(2, "0")}`
-  );
-}
-
-// ------------------------------------------------------------
-// BUILD LYRICS PANEL
-// ------------------------------------------------------------
-
-function buildLyricsPanel({
+function buildMusicPanel({
   title,
   author,
-  lyricText,
-  elapsedSeconds,
   duration,
-  unavailable = false,
-  ended = false,
+  state = "searching",
+  position = null,
 }) {
   const cleanTitle =
     String(
@@ -586,514 +272,344 @@ function buildLyricsPanel({
       author || ""
     ).trim();
 
-  let durationSeconds =
-    parseDurationSeconds(
-      duration
-    );
+  const cleanDuration =
+    String(
+      duration || "--:--"
+    ).trim();
 
-  let timeDisplay =
-    formatLyricsClock(
-      elapsedSeconds
-    );
+  const stateMap = {
+    pending: {
+      icon: "୨୧",
+      label: "PENDING",
+      detail: "waiting for an available music slot ♡",
+    },
 
-  if (
-    Number.isFinite(
-      durationSeconds
-    )
-  ) {
-    timeDisplay +=
-      ` / ${formatLyricsClock(
-        durationSeconds
-      )}`;
-  }
+    searching: {
+      icon: "୨୧",
+      label: "SEARCHING YOUTUBE",
+      detail: "finding your song ♡",
+    },
 
-  let currentLine;
+    processing: {
+      icon: "♡",
+      label: "PREPARING AUDIO",
+      detail: "softly processing your track ♡",
+    },
 
-  if (unavailable) {
-    currentLine =
-      "♫ Synced lyrics unavailable";
-  } else if (ended) {
-    currentLine =
-      "♫ END OF LYRICS";
-  } else {
-    currentLine =
-      String(
-        lyricText ||
-          "♫ Waiting for lyrics..."
-      ).trim();
-  }
+    downloading: {
+      icon: "୨୧",
+      label: "DOWNLOADING",
+      detail: "getting your song ready ♡",
+    },
+
+    streaming: {
+      icon: "♡",
+      label: "NOW PLAYING",
+      detail: "enjoy your music ♡",
+    },
+
+    failed: {
+      icon: "୨୧",
+      label: "PLAYBACK FAILED",
+      detail: "try another search ♡",
+    },
+
+    cancelled: {
+      icon: "୨୧",
+      label: "CANCELLED",
+      detail: "music request was cancelled ♡",
+    },
+  };
+
+  const selected =
+    stateMap[state] ||
+    stateMap.streaming;
+
+  const queueLine =
+    position !== null &&
+    Number.isFinite(Number(position))
+      ? `│ ♡ queue   #${Number(position)}`
+      : null;
 
   return [
-    "╭━━━━━━━━━━━━━━━━━━━━━━╮",
-    "        🌑 ECLIPSE",
-    "       NOW PLAYING",
-    "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+    "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+    "        🎀 E C L I P S E",
+    "          M U S I C",
+    "╰─────── ୨୧ ♡ ୨୧ ───────╯",
     "",
-    `     🎵 ${cleanTitle}`,
+    `        ${selected.icon} ${selected.label}`,
+    "",
+    `୨୧  ${cleanTitle}`,
     cleanAuthor
-      ? `        ${cleanAuthor}`
+      ? `     ♡ ${cleanAuthor}`
       : "",
     "",
-    "──────────────────────",
-    currentLine,
-    "──────────────────────",
-    `⏱  ${timeDisplay}`,
-    "──────────────────────",
-    "       ECLIPSE LYRICS",
-    "──────────────────────",
+    "╭────────────────────────╮",
+    `│ ♡ status  ${selected.detail}`,
+    queueLine,
+    `│ ♡ source  YouTube`,
+    `│ ♡ time    ${cleanDuration}`,
+    "╰────────────────────────╯",
+    "",
+    "        ♡ ୨୧ 🎀 ୨୧ ♡",
   ]
     .filter(Boolean)
     .join("\n");
 }
 
-// ------------------------------------------------------------
-// START SYNCHRONIZED LYRICS
-// ------------------------------------------------------------
+// ============================================================
+// MUSIC HELPERS
+// ============================================================
 
-async function startMusicLyrics(
-  api,
-  threadID,
-  {
-    title,
-    author,
-    duration,
-    lyrics,
+function getMusicQueue(threadID) {
+  const id = String(threadID);
+
+  let queue =
+    musicQueues.get(id);
+
+  if (!queue) {
+    queue = [];
+
+    musicQueues.set(
+      id,
+      queue
+    );
   }
-) {
-  const key =
-    String(threadID);
 
-  /*
-   * Any existing lyrics in this thread belong to an
-   * older !play command. Stop them before starting the
-   * new session.
-   */
-  cancelMusicLyrics(
-    key
-  );
+  return queue;
+}
 
-  const lines =
-    Array.isArray(
-      lyrics?.lines
-    )
-      ? lyrics.lines
-          .filter(
-            (line) =>
-              line &&
-              Number.isFinite(
-                Number(line.time)
-              ) &&
-              typeof line.text ===
-                "string" &&
-              line.text.trim()
-          )
-          .map(
-            (line) => ({
-              time: Math.max(
-                0,
-                Number(line.time)
-              ),
-              text:
-                line.text.trim(),
-            })
-          )
-          .sort(
-            (a, b) =>
-              a.time - b.time
-          )
-      : [];
+function getMusicStats() {
+  let totalJobs = 0;
+  let pendingJobs = 0;
+  let activeJobs = 0;
 
-  /*
-   * No synced lyrics:
-   *
-   * Send one separate lyrics panel and stop.
-   */
-  if (lines.length === 0) {
-    try {
-      await sendMessengerMessage(
-        api,
-        buildLyricsPanel({
-          title,
-          author,
-          duration,
-          elapsedSeconds: 0,
-          unavailable: true,
-        }),
-        threadID
-      );
-    } catch (error) {
-      console.error(
-        "[Music Lyrics] Failed to send unavailable panel:",
-        error
-      );
+  for (const queue of musicQueues.values()) {
+    totalJobs += queue.length;
+
+    for (const job of queue) {
+      if (job.status === "pending") {
+        pendingJobs++;
+      }
+
+      if (
+        job.status === "searching" ||
+        job.status === "processing" ||
+        job.status === "downloading"
+      ) {
+        activeJobs++;
+      }
     }
-
-    return;
   }
 
-  const session = {
-    id: crypto.randomUUID(),
-    threadID: key,
-    cancelled: false,
-    timer: null,
-    messageID: null,
-    lines,
-    title:
-      String(
-        title || ""
-      ).trim(),
-    author:
-      String(
-        author || ""
-      ).trim(),
-    duration:
-      String(
-        duration || ""
-      ).trim(),
-    startedAt: Date.now(),
-    currentIndex: -1,
+  return {
+    totalJobs,
+    pendingJobs,
+    activeJobs,
+    activeDownloads:
+      activeMusicDownloads,
+    waitingGlobal:
+      musicPendingJobs.length,
+    trackedGCs:
+      musicQueues.size,
   };
+}
 
-  musicLyricSessions.set(
-    key,
-    session
-  );
-
-  /*
-   * Send the lyrics panel first.
-   *
-   * The actual message ID returned by Messenger is
-   * captured so every future lyric line edits this
-   * same message.
-   */
-  try {
-    const messageInfo =
-      await sendMessengerMessageWithInfo(
-        api,
-        buildLyricsPanel({
-          title:
-            session.title,
-          author:
-            session.author,
-          duration:
-            session.duration,
-          elapsedSeconds: 0,
-          lyricText:
-            "♫ Syncing lyrics...",
-        }),
-        threadID
-      );
-
-    /*
-     * A newer !play may have started while the
-     * Messenger request was in progress.
-     */
-    if (
-      session.cancelled ||
-      musicLyricSessions.get(
-        key
-      ) !== session
-    ) {
-      return;
-    }
-
-    session.messageID =
-      messageInfo?.messageID ||
-      messageInfo?.messageId ||
-      messageInfo?.id ||
-      null;
-
-    if (!session.messageID) {
-      console.error(
-        "[Music Lyrics] Messenger did not return a message ID. Lyrics updater stopped."
-      );
-
-      session.cancelled = true;
-
-      if (
-        session.timer
-      ) {
-        clearTimeout(
-          session.timer
-        );
-
-        session.timer = null;
-      }
-
-      if (
-        musicLyricSessions.get(
-          key
-        ) === session
-      ) {
-        musicLyricSessions.delete(
-          key
-        );
-      }
-
-      return;
-    }
-
-    console.log(
-      `[Music Lyrics] Started "${session.title}" in ${key}`
-    );
-  } catch (error) {
-    console.error(
-      "[Music Lyrics] Failed to send lyrics panel:",
-      error
-    );
-
-    session.cancelled = true;
-
-    if (
-      musicLyricSessions.get(
-        key
-      ) === session
-    ) {
-      musicLyricSessions.delete(
-        key
-      );
-    }
-
+function removeMusicJob(job) {
+  if (!job) {
     return;
   }
 
-  /*
-   * Schedule lyric updates using the original LRC
-   * timestamps rather than repeatedly adding delays.
-   *
-   * This reduces accumulated timer drift.
-   */
-  const scheduleNextLine =
-    () => {
-      if (
-        session.cancelled ||
-        musicLyricSessions.get(
-          key
-        ) !== session
-      ) {
-        return;
-      }
+  const queue =
+    musicQueues.get(
+      job.threadID
+    );
 
-      const nextIndex =
-        session.currentIndex + 1;
+  if (!queue) {
+    return;
+  }
 
-      if (
-        nextIndex >=
-        session.lines.length
-      ) {
-        /*
-         * Lyrics have finished.
-         *
-         * Leave the final lyric visible instead of
-         * repeatedly editing the message.
-         */
-        session.timer = null;
+  const index =
+    queue.indexOf(job);
 
-        if (
-          musicLyricSessions.get(
-            key
-          ) === session
-        ) {
-          musicLyricSessions.delete(
-            key
-          );
-        }
+  if (index !== -1) {
+    queue.splice(
+      index,
+      1
+    );
+  }
 
-        console.log(
-          `[Music Lyrics] Finished "${session.title}" in ${key}`
-        );
+  if (queue.length === 0) {
+    musicQueues.delete(
+      job.threadID
+    );
+  }
+}
 
-        return;
-      }
+function removePendingMusicJob(job) {
+  const index =
+    musicPendingJobs.indexOf(
+      job
+    );
 
-      const nextLine =
-        session.lines[
-          nextIndex
-        ];
+  if (index !== -1) {
+    musicPendingJobs.splice(
+      index,
+      1
+    );
+  }
+}
 
-      const targetTimeMs =
-        Math.max(
-          0,
-          Number(
-            nextLine.time
-          ) * 1000
-        );
+function getMusicQueuePosition(job) {
+  const queue =
+    musicQueues.get(
+      job.threadID
+    );
 
-      const elapsedMs =
-        Date.now() -
-        session.startedAt;
+  if (!queue) {
+    return null;
+  }
 
-      const delayMs =
-        Math.max(
-          0,
-          targetTimeMs -
-            elapsedMs
-        );
+  const index =
+    queue.indexOf(job);
 
-      session.timer =
-        setTimeout(
-          async () => {
-            session.timer =
-              null;
+  if (index === -1) {
+    return null;
+  }
 
-            if (
-              session.cancelled ||
-              musicLyricSessions.get(
-                key
-              ) !== session
-            ) {
-              return;
-            }
+  return index + 1;
+}
 
-            session.currentIndex =
-              nextIndex;
+function formatMusicBytes(bytes) {
+  if (
+    !Number.isFinite(bytes) ||
+    bytes <= 0
+  ) {
+    return "0 B";
+  }
 
-            const elapsedSeconds =
-              Math.max(
-                0,
-                (
-                  Date.now() -
-                  session.startedAt
-                ) / 1000
-              );
+  const units = [
+    "B",
+    "KB",
+    "MB",
+    "GB",
+  ];
 
-            const panel =
-              buildLyricsPanel({
-                title:
-                  session.title,
-                author:
-                  session.author,
-                duration:
-                  session.duration,
-                lyricText:
-                  nextLine.text,
-                elapsedSeconds,
-              });
+  let value = bytes;
+  let unitIndex = 0;
 
-            const success =
-              await editMessageWithRetry(
-                api,
-                panel,
-                session.messageID
-              );
+  while (
+    value >= 1024 &&
+    unitIndex <
+      units.length - 1
+  ) {
+    value /= 1024;
+    unitIndex++;
+  }
 
-            /*
-             * Check again after the async edit.
-             *
-             * A newer !play could have cancelled this
-             * session while editMessage was running.
-             */
-            if (
-              session.cancelled ||
-              musicLyricSessions.get(
-                key
-              ) !== session
-            ) {
-              return;
-            }
-
-            if (!success) {
-              /*
-               * IMPORTANT:
-               *
-               * Never send another message here.
-               * A failed edit ends the updater so we
-               * don't spam the group with lyric lines.
-               */
-              console.error(
-                `[Music Lyrics] Failed to edit lyrics message in ${key}; stopping session.`
-              );
-
-              session.cancelled =
-                true;
-
-              if (
-                musicLyricSessions.get(
-                  key
-                ) === session
-              ) {
-                musicLyricSessions.delete(
-                  key
-                );
-              }
-
-              return;
-            }
-
-            scheduleNextLine();
-          },
-          delayMs
-        );
-    };
-
-  /*
-   * Start the timer only after the lyrics message
-   * itself has successfully been sent.
-   */
-  scheduleNextLine();
+  return `${value.toFixed(
+    unitIndex === 0 ? 0 : 1
+  )} ${units[unitIndex]}`;
 }
 
 // ============================================================
-// YOUTUBE AUDIO — ECLIPSE MUSIC PLAYER
+// MUSIC QUEUE PROCESSOR
 // ============================================================
 
-async function sendAudioTrack(
-  api,
-  requestedSong,
-  threadID
-) {
-  /*
-   * A new !play always invalidates any existing
-   * synchronized lyrics session in this thread.
-   */
-  cancelMusicLyrics(
-    threadID
-  );
-
+function processMusicQueue() {
   if (
-    typeof requestedSong !== "string" ||
-    !requestedSong.trim()
+    global.botDisabled === true ||
+    global.botPaused === true
   ) {
-    sendReplyWithTyping(
-      api,
-      "🎵 Usage: !play <song>",
-      threadID
-    );
-
     return;
   }
 
-  const cleanSong =
-    requestedSong.trim();
+  while (
+    activeMusicDownloads <
+      MUSIC_MAX_GLOBAL_DOWNLOADS &&
+    musicPendingJobs.length > 0
+  ) {
+    const job =
+      musicPendingJobs.shift();
 
-  const temporaryFile = path.join(
-    os.tmpdir(),
-    `audio-${crypto.randomUUID()}.mp3`
-  );
+    if (!job) {
+      continue;
+    }
+
+    if (
+      job.cancelled ||
+      job.status !== "pending"
+    ) {
+      continue;
+    }
+
+    activeMusicDownloads++;
+
+    void processMusicJob(
+      job
+    ).finally(() => {
+      activeMusicDownloads =
+        Math.max(
+          0,
+          activeMusicDownloads - 1
+        );
+
+      removeMusicJob(job);
+
+      setImmediate(
+        processMusicQueue
+      );
+    });
+  }
+}
+
+// ============================================================
+// MUSIC JOB
+// ============================================================
+
+async function processMusicJob(job) {
+  const {
+    api,
+    threadID,
+  } = job;
+
+  const temporaryFile =
+    path.join(
+      os.tmpdir(),
+      `eclipse-audio-${crypto.randomUUID()}.mp3`
+    );
+
+  job.temporaryFile =
+    temporaryFile;
 
   try {
+    if (
+      global.botDisabled === true
+    ) {
+      job.cancelled = true;
+      return;
+    }
+
+    job.status =
+      "searching";
+
     await sendMessengerMessage(
       api,
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━━━╮",
-        "        🌑 ECLIPSE",
-        "       MUSIC PLAYER",
-        "╰━━━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "     🔎 SEARCHING...",
-        `        ${cleanSong}`,
-        "",
-        "──────────────────────",
-        "       ECLIPSE AUDIO",
-        "          ENGINE",
-        "──────────────────────",
-      ].join("\n"),
+      buildMusicPanel({
+        title: job.requestedSong,
+        state: "searching",
+      }),
       threadID
     );
 
     const video =
-      await searchYouTube(
-        cleanSong
+      await withTimeout(
+        () =>
+          searchYouTube(
+            job.requestedSong
+          ),
+        MUSIC_SEARCH_TIMEOUT_MS,
+        "YouTube search timed out."
       );
 
     if (
@@ -1101,47 +617,81 @@ async function sendAudioTrack(
       !video.url
     ) {
       throw new Error(
-        `No YouTube result found for "${cleanSong}".`
+        `No YouTube result found for "${job.requestedSong}".`
       );
     }
 
     const title =
       String(
-        video.title || cleanSong
+        video.title ||
+          job.requestedSong
       ).trim();
 
     const author =
       String(
-        video.author || ""
+        video.author ||
+          video.channel ||
+          ""
       ).trim();
+
+    let duration =
+      String(
+        video.duration ||
+          video.timestamp ||
+          ""
+      ).trim();
+
+    if (!duration) {
+      duration = "--:--";
+    }
+
+    job.title = title;
+    job.author = author;
+    job.duration = duration;
+
+    job.status =
+      "processing";
 
     await sendMessengerMessage(
       api,
-      [
-        "╭━━━━━━━━━━━━━━━━━━━━━━╮",
-        "        🌑 ECLIPSE",
-        "       MUSIC PLAYER",
-        "╰━━━━━━━━━━━━━━━━━━━━━━╯",
-        "",
-        "     ⚙️ PROCESSING AUDIO",
-        `        ${title}`,
-        author
-          ? `        ${author}`
-          : "",
-        "",
-        "──────────────────────",
-        "▶  PREPARING STREAM",
-        "📡  YouTube",
-        "──────────────────────",
-      ]
-        .filter(Boolean)
-        .join("\n"),
+      buildMusicPanel({
+        title,
+        author,
+        duration,
+        state: "processing",
+      }),
       threadID
     );
 
-    await downloadYouTubeAudio(
-      video.url,
-      temporaryFile
+    if (
+      global.botDisabled === true
+    ) {
+      job.cancelled = true;
+      return;
+    }
+
+    job.status =
+      "downloading";
+
+    await sendMessengerMessage(
+      api,
+      buildMusicPanel({
+        title,
+        author,
+        duration,
+        state: "downloading",
+      }),
+      threadID
+    );
+
+    await withTimeout(
+      () =>
+        downloadYouTubeAudio(
+          video.url,
+          temporaryFile
+        ),
+      MUSIC_DOWNLOAD_TIMEOUT_MS,
+      "YouTube audio download timed out."
     );
 
     const fileInfo =
@@ -1158,120 +708,71 @@ async function sendAudioTrack(
       );
     }
 
-    let duration =
-      String(
-        video.duration || ""
-      ).trim();
-
-    if (!duration) {
-      duration = "--:--";
+    if (
+      fileInfo.size >
+      MAX_MUSIC_FILE_BYTES
+    ) {
+      throw new Error(
+        `Audio file is too large (${formatMusicBytes(
+          fileInfo.size
+        )}). Maximum allowed is ${formatMusicBytes(
+          MAX_MUSIC_FILE_BYTES
+        )}.`
+      );
     }
 
-    const playerMessage = [
-      "╭━━━━━━━━━━━━━━━━━━━━━━╮",
-      "        🌑 ECLIPSE",
-      "       MUSIC PLAYER",
-      "╰━━━━━━━━━━━━━━━━━━━━━━╯",
-      "",
-      `     🎵 ${title}`,
-      author
-        ? `        ${author}`
-        : "",
-      "",
-      "──────────────────────",
-      "▶  STREAMING",
-      `⏱  ${duration}     •     YouTube`,
-      "",
-      "──────────────────────",
-      "       ECLIPSE AUDIO",
-      "          ENGINE",
-      "──────────────────────",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    if (
+      global.botDisabled === true
+    ) {
+      job.cancelled = true;
+      return;
+    }
 
-    await sendMessengerMessage(
-      api,
-      {
-        body: playerMessage,
-        attachment:
-          fs.createReadStream(
-            temporaryFile
-          ),
-      },
-      threadID
+    job.status =
+      "streaming";
+
+    const playerMessage =
+      buildMusicPanel({
+        title,
+        author,
+        duration,
+        state: "streaming",
+      });
+
+    await withTimeout(
+      () =>
+        sendMessengerMessage(
+          api,
+          {
+            body:
+              playerMessage,
+            attachment:
+              fs.createReadStream(
+                temporaryFile
+              ),
+          },
+          threadID
+        ),
+      MUSIC_SEND_TIMEOUT_MS,
+      "Sending the audio to Messenger timed out."
     );
 
     console.log(
       `[Music] Sent "${title}" to ${threadID}`
     );
-
-    // ========================================================
-    // SYNCHRONIZED LYRICS
-    // ========================================================
-
-    try {
-      const syncedLyrics =
-        await getSyncedLyrics({
-          videoId:
-            video.videoId ||
-            video.videoID ||
-            video.id ||
-            null,
-          title,
-          author,
-        });
-
-      /*
-       * startMusicLyrics() sends the lyrics panel
-       * separately from the audio message.
-       */
-      await startMusicLyrics(
-        api,
-        threadID,
-        {
-          title,
-          author,
-          duration,
-          lyrics:
-            syncedLyrics,
-        }
-      );
-    } catch (lyricsError) {
-      console.error(
-        "[Music Lyrics] Lyrics system failed:",
-        lyricsError
-      );
-
-      /*
-       * Do not allow a lyrics problem to turn the
-       * already-successful audio command into a
-       * playback failure.
-       *
-       * We send a single unavailable panel.
-       */
-      try {
-        await sendMessengerMessage(
-          api,
-          buildLyricsPanel({
-            title,
-            author,
-            duration,
-            elapsedSeconds: 0,
-            unavailable: true,
-          }),
-          threadID
-        );
-      } catch (fallbackError) {
-        console.error(
-          "[Music Lyrics] Failed to send fallback panel:",
-          fallbackError
-        );
-      }
-    }
   } catch (error) {
+    if (
+      job.cancelled
+    ) {
+      console.log(
+        `[Music] Job ${job.id} cancelled.`
+      );
+
+      return;
+    }
+
     console.error(
-      "[Music] Audio command failed:",
+      `[Music] Job ${job.id} failed:`,
       error
     );
 
@@ -1280,58 +781,428 @@ async function sendAudioTrack(
       String(error);
 
     if (
-      errorMessage.length > 1000
+      errorMessage.length > 500
     ) {
       errorMessage =
         errorMessage.slice(
           0,
-          1000
+          500
         );
+    }
+
+    try {
+      await sendMessengerMessage(
+        api,
+        [
+          "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+          "          🎀 MUSIC",
+          "╰─────── ୨୧ ♡ ୨୧ ───────╯",
+          "",
+          "୨୧  PLAYBACK FAILED",
+          "",
+          `♡ ${errorMessage}`,
+          "",
+          "୨୧ try another song ♡",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+    } catch (sendError) {
+      console.error(
+        "[Music] Failed to send error message:",
+        sendError
+      );
+    }
+  } finally {
+    await fsp
+      .unlink(
+        temporaryFile
+      )
+      .catch(() => {});
+
+    job.temporaryFile =
+      null;
+  }
+}
+
+// ============================================================
+// ENQUEUE MUSIC
+// ============================================================
+
+function enqueueMusic(
+  api,
+  requestedSong,
+  threadID
+) {
+  const queue =
+    getMusicQueue(threadID);
+
+  if (
+    queue.length >=
+    MUSIC_MAX_PER_GC
+  ) {
+    return {
+      accepted: false,
+      reason: "gc_limit",
+    };
+  }
+
+  if (
+    musicPendingJobs.length >=
+    MUSIC_MAX_GLOBAL_QUEUE
+  ) {
+    return {
+      accepted: false,
+      reason: "global_limit",
+    };
+  }
+
+  const job = {
+    id:
+      ++musicJobCounter,
+    api,
+    threadID:
+      String(threadID),
+    requestedSong:
+      requestedSong.trim(),
+    title:
+      requestedSong.trim(),
+    author: "",
+    duration: "--:--",
+    status: "pending",
+    createdAt:
+      Date.now(),
+    temporaryFile: null,
+    cancelled: false,
+  };
+
+  queue.push(job);
+  musicPendingJobs.push(job);
+
+  return {
+    accepted: true,
+    job,
+    position:
+      getMusicQueuePosition(job),
+  };
+}
+
+// ============================================================
+// ADD MUSIC QUEUE AFTER PAUSE RESUMES
+// ============================================================
+
+function resumeMusicProcessing() {
+  setImmediate(
+    processMusicQueue
+  );
+}
+
+// ============================================================
+// COQUETTE MUSIC COMMAND
+// ============================================================
+
+function handleMusicCommand(
+  api,
+  requestedSong,
+  threadID
+) {
+  if (
+    typeof requestedSong !==
+      "string" ||
+    !requestedSong.trim()
+  ) {
+    sendReplyWithTyping(
+      api,
+      [
+        "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+        "          🎀 MUSIC",
+        "╰─────── ୨୧ ♡ ୨୧ ───────╯",
+        "",
+        "♡ usage",
+        "   !play <song>",
+        "",
+        "୨୧ example",
+        "   !play Die With A Smile",
+        "",
+        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+      ].join("\n"),
+      threadID
+    );
+
+    return;
+  }
+
+  const cleanSong =
+    requestedSong.trim();
+
+  if (
+    cleanSong.length >
+    MUSIC_REQUEST_MAX_LENGTH
+  ) {
+    sendReplyWithTyping(
+      api,
+      [
+        "╭────── 🎀  MUSIC  🎀 ──────╮",
+        "",
+        "🔴 REQUEST TOO LONG",
+        "",
+        `♡ Maximum: ${MUSIC_REQUEST_MAX_LENGTH} characters.`,
+        "",
+        "Please shorten your song search.",
+        "",
+        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+      ].join("\n"),
+      threadID
+    );
+
+    return;
+  }
+
+  if (
+    global.botDisabled === true
+  ) {
+    return;
+  }
+
+  if (
+    global.botPaused === true
+  ) {
+    sendReplyWithTyping(
+      api,
+      [
+        "╭────── 🎀  MUSIC  🎀 ──────╮",
+        "",
+        "🟡 MUSIC IS PAUSED",
+        "",
+        "Your request was not queued.",
+        "",
+        "♡ Please wait until ECLIPSE resumes.",
+        "",
+        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+      ].join("\n"),
+      threadID
+    );
+
+    return;
+  }
+
+  const result =
+    enqueueMusic(
+      api,
+      cleanSong,
+      threadID
+    );
+
+  if (
+    !result.accepted
+  ) {
+    if (
+      result.reason ===
+      "gc_limit"
+    ) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  MUSIC QUEUE  🎀 ──────╮",
+          "",
+          "🔴 GC MUSIC LIMIT REACHED",
+          "",
+          `୨୧ maximum: ${MUSIC_MAX_PER_GC} songs`,
+          "୨୧ active + pending both count",
+          "",
+          "♡ Please wait for one song to finish.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
     }
 
     sendReplyWithTyping(
       api,
       [
-        "╭━━━━━━━━━━━━━━━━━━━━━━╮",
-        "        🌑 ECLIPSE",
-        "       MUSIC PLAYER",
-        "╰━━━━━━━━━━━━━━━━━━━━━━╯",
+        "╭────── 🎀  MUSIC QUEUE  🎀 ──────╮",
         "",
-        "🔴 PLAYBACK FAILED",
+        "🔴 MUSIC SYSTEM BUSY",
         "",
-        errorMessage,
+        "Too many music requests are currently",
+        "waiting across ECLIPSE.",
         "",
-        "Try another song or search again.",
-        "──────────────────────",
-        "       ECLIPSE AUDIO",
-        "          ENGINE",
-        "──────────────────────",
+        "♡ Please try again shortly.",
+        "",
+        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
       ].join("\n"),
       threadID
     );
-  } finally {
-    await fsp
-      .unlink(temporaryFile)
-      .catch(() => {});
+
+    return;
   }
+
+  const {
+    job,
+    position,
+  } = result;
+
+  const queue =
+    getMusicQueue(threadID);
+
+  if (
+    position > 1
+  ) {
+    sendReplyWithTyping(
+      api,
+      buildMusicPanel({
+        title:
+          cleanSong,
+        state:
+          "pending",
+        position,
+      }),
+      threadID
+    );
+  }
+
+  console.log(
+    `[Music] Queued job ${job.id} for ${threadID}: "${cleanSong}"`
+  );
+
+  processMusicQueue();
 }
 
 // ============================================================
-// RENDER HEALTH-CHECK WEB SERVER
+// MUSIC STATUS
+// ============================================================
+
+function sendMusicStatus(
+  api,
+  threadID
+) {
+  const queue =
+    getMusicQueue(threadID);
+
+  const stats =
+    getMusicStats();
+
+  if (
+    queue.length === 0
+  ) {
+    sendReplyWithTyping(
+      api,
+      [
+        "╭────── 🎀  MUSIC STATUS  🎀 ──────╮",
+        "",
+        "♡ this GC has no music requests.",
+        "",
+        `୨୧ global downloads: ${stats.activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
+        `୨୧ global pending: ${stats.waitingGlobal}`,
+        "",
+        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+      ].join("\n"),
+      threadID
+    );
+
+    return;
+  }
+
+  const lines = [
+    "╭────── 🎀  MUSIC STATUS  🎀 ──────╮",
+    "",
+    `୨୧ GC queue: ${queue.length}/${MUSIC_MAX_PER_GC}`,
+    "",
+  ];
+
+  queue.forEach(
+    (job, index) => {
+      const label =
+        job.title ||
+        job.requestedSong;
+
+      const state =
+        String(
+          job.status
+        ).toUpperCase();
+
+      lines.push(
+        `${index + 1}. ${state}`,
+        `   ♡ ${label.slice(0, 80)}`
+      );
+    }
+  );
+
+  lines.push(
+    "",
+    "୨୧ global protection",
+    `    ♡ downloads: ${stats.activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
+    `    ♡ pending: ${stats.waitingGlobal}/${MUSIC_MAX_GLOBAL_QUEUE}`,
+    "",
+    "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯"
+  );
+
+  sendReplyWithTyping(
+    api,
+    lines.join("\n"),
+    threadID
+  );
+}
+
+// ============================================================
+// RENDER HEALTH CHECK
 // ============================================================
 
 const app = express();
 
 app.get("/", (_req, res) => {
   res.status(200).send(
-    "Bot is running ✅"
+    "ECLIPSE is running ♡"
   );
 });
 
-const port = Number.parseInt(
-  process.env.PORT || "3000",
-  10
-);
+app.get("/health", (_req, res) => {
+  const music =
+    getMusicStats();
+
+  res.status(200).json({
+    ok: true,
+
+    botDisabled:
+      global.botDisabled === true,
+
+    botPaused:
+      global.botPaused === true,
+
+    uptime:
+      process.uptime(),
+
+    music: {
+      activeDownloads:
+        music.activeDownloads,
+
+      globalPending:
+        music.waitingGlobal,
+
+      trackedGCs:
+        music.trackedGCs,
+
+      activeJobs:
+        music.activeJobs,
+
+      pendingJobs:
+        music.pendingJobs,
+    },
+
+    timestamp:
+      new Date().toISOString(),
+  });
+});
+
+const port =
+  Number.parseInt(
+    process.env.PORT || "3000",
+    10
+  );
 
 if (
   !Number.isInteger(port) ||
@@ -1343,24 +1214,28 @@ if (
   );
 }
 
-const server = app.listen(
-  port,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `Web server listening on port ${port}`
-    );
-  }
-);
-
-server.on("error", (error) => {
-  console.error(
-    "Web server error:",
-    error
+const server =
+  app.listen(
+    port,
+    "0.0.0.0",
+    () => {
+      console.log(
+        `Web server listening on port ${port}`
+      );
+    }
   );
 
-  process.exitCode = 1;
-});
+server.on(
+  "error",
+  (error) => {
+    console.error(
+      "Web server error:",
+      error
+    );
+
+    process.exitCode = 1;
+  }
+);
 
 // ============================================================
 // FACEBOOK COOKIES
@@ -1382,10 +1257,19 @@ function readAppState() {
   let parsed;
 
   try {
-    parsed = JSON.parse(rawCookies);
+    parsed =
+      JSON.parse(
+        rawCookies
+      );
 
-    if (typeof parsed === "string") {
-      parsed = JSON.parse(parsed);
+    if (
+      typeof parsed ===
+      "string"
+    ) {
+      parsed =
+        JSON.parse(
+          parsed
+        );
     }
   } catch {
     throw new Error(
@@ -1402,43 +1286,50 @@ function readAppState() {
     );
   }
 
-  return parsed.map((cookie) => {
-    if (
-      !cookie ||
-      typeof cookie !== "object" ||
-      Array.isArray(cookie)
-    ) {
-      throw new Error(
-        "Each FB_COOKIES entry must be an object."
-      );
+  return parsed.map(
+    (cookie) => {
+      if (
+        !cookie ||
+        typeof cookie !==
+          "object" ||
+        Array.isArray(cookie)
+      ) {
+        throw new Error(
+          "Each FB_COOKIES entry must be an object."
+        );
+      }
+
+      const key =
+        typeof cookie.key ===
+        "string"
+          ? cookie.key
+          : cookie.name;
+
+      if (
+        typeof key !==
+          "string" ||
+        !key.trim() ||
+        typeof cookie.value !==
+          "string"
+      ) {
+        throw new Error(
+          "Every cookie must contain string name/key and value fields."
+        );
+      }
+
+      return {
+        ...cookie,
+        key,
+      };
     }
-
-    const key =
-      typeof cookie.key === "string"
-        ? cookie.key
-        : cookie.name;
-
-    if (
-      typeof key !== "string" ||
-      !key.trim() ||
-      typeof cookie.value !== "string"
-    ) {
-      throw new Error(
-        "Every cookie must contain string name/key and value fields."
-      );
-    }
-
-    return {
-      ...cookie,
-      key,
-    };
-  });
+  );
 }
 
 let appState;
 
 try {
-  appState = readAppState();
+  appState =
+    readAppState();
 } catch (error) {
   console.error(
     `Configuration error: ${error.message}`
@@ -1448,7 +1339,7 @@ try {
 }
 
 // ============================================================
-// LOGIN TO FACEBOOK
+// FACEBOOK LOGIN
 // ============================================================
 
 login(
@@ -1460,7 +1351,10 @@ login(
     randomUserAgent: false,
   },
 
-  async (loginError, api) => {
+  async (
+    loginError,
+    api
+  ) => {
     if (loginError) {
       console.error(
         "Login failed:",
@@ -1483,7 +1377,7 @@ login(
     );
 
     // ========================================================
-    // DATABASE CONNECTION
+    // DATABASE
     // ========================================================
 
     try {
@@ -1502,7 +1396,7 @@ login(
     }
 
     // ========================================================
-    // AUTOMATIC CLEANUP
+    // CLEANUP
     // ========================================================
 
     try {
@@ -1519,7 +1413,7 @@ login(
     }
 
     // ========================================================
-    // FACEBOOK LISTENER OPTIONS
+    // LISTENER
     // ========================================================
 
     api.setOptions({
@@ -1532,7 +1426,18 @@ login(
 
     if (startupThreadID) {
       api.sendMessage(
-        "🟢 Bot is online and ready.",
+        [
+          "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+          "        🎀 E C L I P S E",
+          "          ONLINE ♡",
+          "╰─────── ୨୧ ♡ ୨୧ ───────╯",
+          "",
+          "୨୧ bot is online and ready ♡",
+          "",
+          "♡ music protection: 2 / GC",
+          "♡ global downloads: 2",
+          "♡ pause system: ready",
+        ].join("\n"),
         startupThreadID,
         (sendError) => {
           if (sendError) {
@@ -1546,11 +1451,14 @@ login(
     }
 
     console.log(
-      "Listener started. Send a message from a different Facebook account."
+      "Listener started."
     );
 
     api.listenMqtt(
-      (listenError, event) => {
+      (
+        listenError,
+        event
+      ) => {
         if (listenError) {
           console.error(
             "Listener error:",
@@ -1562,29 +1470,25 @@ login(
 
         if (
           !event ||
-          typeof event !== "object"
+          typeof event !==
+            "object"
         ) {
           return;
         }
 
-        console.log(
-          "Incoming event:",
-          {
-            type: event.type,
-            senderID: event.senderID,
-            threadID: event.threadID,
-          }
-        );
-
         if (
           (
-            event.type === "message" ||
-            event.type === "message_reply"
+            event.type ===
+              "message" ||
+            event.type ===
+              "message_reply"
           ) &&
           event.threadID
         ) {
           const threadID =
-            String(event.threadID);
+            String(
+              event.threadID
+            );
 
           registerActiveThread(
             threadID
@@ -1592,15 +1496,13 @@ login(
 
           void registerGCActivity(
             threadID
-          ).catch((error) => {
-            console.error(
-              "[GC ACTIVITY] Failed to register activity:",
-              error
-            );
-          });
-
-          console.log(
-            `[Threads] Active threads tracked: ${activeThreads.size}`
+          ).catch(
+            (error) => {
+              console.error(
+                "[GC ACTIVITY] Failed to register activity:",
+                error
+              );
+            }
           );
 
           void handleMessage(
@@ -1632,49 +1534,7 @@ function registerActiveThread(
     now
   );
 
-  for (
-    const [
-      knownThreadID,
-      lastSeenAt,
-    ] of activeThreads.entries()
-  ) {
-    if (
-      now - lastSeenAt >
-      ACTIVE_THREAD_EXPIRY_MS
-    ) {
-      activeThreads.delete(
-        knownThreadID
-      );
-    }
-  }
-
-  if (
-    activeThreads.size >
-    MAX_ACTIVE_THREADS
-  ) {
-    const entries =
-      Array.from(
-        activeThreads.entries()
-      )
-        .sort(
-          (a, b) =>
-            a[1] - b[1]
-        );
-
-    const excess =
-      activeThreads.size -
-      MAX_ACTIVE_THREADS;
-
-    for (
-      let i = 0;
-      i < excess;
-      i++
-    ) {
-      activeThreads.delete(
-        entries[i][0]
-      );
-    }
-  }
+  registerActiveThreadCleanup();
 }
 
 // ============================================================
@@ -1693,7 +1553,8 @@ async function handleMessage(
 
   if (
     !threadID ||
-    typeof body !== "string" ||
+    typeof body !==
+      "string" ||
     !body.trim()
   ) {
     return;
@@ -1709,11 +1570,336 @@ async function handleMessage(
     originalText.toLowerCase();
 
   const senderId =
-    String(senderID || "").trim();
+    String(
+      senderID || ""
+    ).trim();
 
-  // ============================================================
+  const isAdmin =
+    ADMIN_IDS.includes(
+      senderId
+    );
+
+  // ==========================================================
+  // PAUSE / RESUME / BOT CONTROL
+  // These MUST be checked before normal AI/training so that
+  // pause actually pauses normal message processing.
+  // ==========================================================
+
+  const pauseMatch =
+    originalText.match(
+      /^!pause(?:\s+(status))?$/i
+    );
+
+  const resumeMatch =
+    /^!resume$/i.test(
+      originalText
+    );
+
+  if (
+    pauseMatch ||
+    resumeMatch
+  ) {
+    if (!isAdmin) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  PAUSE CONTROL  🎀 ──────╮",
+          "",
+          "🔒 ADMIN ONLY",
+          "",
+          "Only the bot admin can control",
+          "the global pause state.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadId
+      );
+
+      return;
+    }
+
+    if (resumeMatch) {
+      global.botPaused =
+        false;
+
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  E C L I P S E  🎀 ──────╮",
+          "",
+          "🟢 BOT RESUMED",
+          "",
+          "୨୧ global pause",
+          "    ♡ OFF",
+          "",
+          "Normal commands are active again.",
+          "",
+          "♡ pending music may now continue.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadId
+      );
+
+      resumeMusicProcessing();
+
+      return;
+    }
+
+    if (
+      pauseMatch[1] ===
+      "status"
+    ) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  PAUSE STATUS  🎀 ──────╮",
+          "",
+          "୨୧ global pause",
+          `    ♡ ${
+            global.botPaused
+              ? "🟡 PAUSED"
+              : "🟢 ACTIVE"
+          }`,
+          "",
+          "୨୧ process",
+          "    ♡ 🟢 STILL RUNNING",
+          "",
+          "୨୧ music",
+          `    ♡ active downloads: ${
+            getMusicStats()
+              .activeDownloads
+          }/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
+          `    ♡ pending: ${
+            getMusicStats()
+              .waitingGlobal
+          }`,
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadId
+      );
+
+      return;
+    }
+
+    global.botPaused =
+      true;
+
+    sendReplyWithTyping(
+      api,
+      [
+        "╭────── 🎀  E C L I P S E  🎀 ──────╮",
+        "",
+        "🟡 BOT IS NOW PAUSED",
+        "",
+        "୨୧ global pause",
+        "    ♡ ON",
+        "",
+        "Normal commands are now ignored.",
+        "",
+        "♡ Render process remains alive.",
+        "♡ Messenger listener remains alive.",
+        "♡ !resume remains available.",
+        "",
+        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+      ].join("\n"),
+      threadId
+    );
+
+    return;
+  }
+
+  // ==========================================================
+  // GLOBAL BOT CONTROL
+  // ==========================================================
+
+  const botControlMatch =
+    originalText.match(
+      /^!(bot(?:\s+(off|on|status))?|shutdown|startup)$/i
+    );
+
+  if (botControlMatch) {
+    if (!isAdmin) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+          "",
+          "🔒 ADMIN ONLY",
+          "",
+          "Only the bot admin can use",
+          "global bot controls.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    const rawControl =
+      (
+        botControlMatch[1] ||
+        "bot"
+      ).toLowerCase();
+
+    if (
+      rawControl ===
+      "bot"
+    ) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+          "୨୧ status",
+          "    ♡ !bot status",
+          "",
+          "୨୧ controls",
+          "    ♡ !bot on",
+          "    ♡ !bot off",
+          "    ♡ !shutdown",
+          "    ♡ !startup",
+          "",
+          "୨୧ pause",
+          "    ♡ !pause",
+          "    ♡ !pause status",
+          "    ♡ !resume",
+          "",
+          "୨୧ communication",
+          "    ♡ !broadcast <message>",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    if (
+      rawControl ===
+      "bot status"
+    ) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  BOT STATUS  🎀 ──────╮",
+          "",
+          "୨୧ global status",
+          `    ♡ ${
+            global.botDisabled
+              ? "🔴 OFF"
+              : "🟢 ON"
+          }`,
+          "",
+          "୨୧ pause status",
+          `    ♡ ${
+            global.botPaused
+              ? "🟡 PAUSED"
+              : "🟢 ACTIVE"
+          }`,
+          "",
+          "୨୧ music protection",
+          `    ♡ global downloads: ${getMusicStats().activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
+          `    ♡ global pending: ${getMusicStats().waitingGlobal}`,
+          "",
+          "୨୧ controls",
+          "    ♡ !bot on",
+          "    ♡ !bot off",
+          "    ♡ !pause",
+          "    ♡ !resume",
+          "    ♡ !shutdown",
+          "    ♡ !startup",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    if (
+      rawControl ===
+        "bot off" ||
+      rawControl ===
+        "shutdown"
+    ) {
+      global.botDisabled =
+        true;
+
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+          "",
+          "🔴 BOT IS NOW OFF",
+          "",
+          "୨୧ global state",
+          "    ♡ OFF",
+          "",
+          "Normal commands are now ignored.",
+          "",
+          "୨୧ admin controls remain available",
+          "    ♡ !bot status",
+          "    ♡ !bot on",
+          "    ♡ !startup",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    if (
+      rawControl ===
+        "bot on" ||
+      rawControl ===
+        "startup"
+    ) {
+      global.botDisabled =
+        false;
+
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+          "",
+          "🟢 BOT IS NOW ON",
+          "",
+          "୨୧ global state",
+          "    ♡ ON",
+          "",
+          "Normal commands are active again.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      resumeMusicProcessing();
+
+      return;
+    }
+  }
+
+  // ==========================================================
+  // GLOBAL DISABLED / PAUSED STATE
+  // ==========================================================
+
+  if (
+    global.botDisabled === true ||
+    global.botPaused === true
+  ) {
+    return;
+  }
+
+  // ==========================================================
   // AI TRAINING / ADAPTATION
-  // ============================================================
+  // ==========================================================
 
   try {
     const trainingHandled =
@@ -1723,17 +1909,24 @@ async function handleMessage(
         originalText
       );
 
-    if (trainingHandled) {
+    if (
+      trainingHandled
+    ) {
       return;
     }
 
     if (
-      !originalText.startsWith("!")
+      !originalText.startsWith(
+        "!"
+      )
     ) {
       await observeMessage({
-        senderID: senderId,
-        threadID: threadId,
-        body: originalText,
+        senderID:
+          senderId,
+        threadID:
+          threadId,
+        body:
+          originalText,
       });
     }
   } catch (error) {
@@ -1743,9 +1936,9 @@ async function handleMessage(
     );
   }
 
-  // ============================================================
-  // ECLIPSE SYSTEM CONSOLE
-  // ============================================================
+  // ==========================================================
+  // DEBUG
+  // ==========================================================
 
   try {
     if (
@@ -1765,9 +1958,9 @@ async function handleMessage(
     );
   }
 
-  // ============================================================
-  // ECLIPSE CLEANUP COMMANDS
-  // ============================================================
+  // ==========================================================
+  // CLEANUP
+  // ==========================================================
 
   const cleanupMatch =
     originalText.match(
@@ -1775,9 +1968,7 @@ async function handleMessage(
     );
 
   if (cleanupMatch) {
-    if (
-      !ADMIN_IDS.includes(senderId)
-    ) {
+    if (!isAdmin) {
       return;
     }
 
@@ -1786,10 +1977,6 @@ async function handleMessage(
         cleanupMatch[1] ||
         ""
       ).toLowerCase();
-
-    // ----------------------------------------------------------
-    // CLEANUP MENU
-    // ----------------------------------------------------------
 
     if (!cleanupCommand) {
       sendReplyWithTyping(
@@ -1812,12 +1999,9 @@ async function handleMessage(
       return;
     }
 
-    // ----------------------------------------------------------
-    // STATUS
-    // ----------------------------------------------------------
-
     if (
-      cleanupCommand === "status"
+      cleanupCommand ===
+      "status"
     ) {
       const status =
         getCleanupStatus();
@@ -1828,25 +2012,19 @@ async function handleMessage(
           "╭────── 🎀  CLEANUP  🎀 ──────╮",
           "୨୧ status",
           `    ♡ scheduler: ${
-              status.schedulerActive
-                ? "🟢 ACTIVE"
-                : "🔴 OFF"
-            }`,
+            status.schedulerActive
+              ? "🟢 ACTIVE"
+              : "🔴 OFF"
+          }`,
           `    ♡ running: ${
-              status.running
-                ? "🟡 YES"
-                : "🟢 NO"
-            }`,
+            status.running
+              ? "🟡 YES"
+              : "🟢 NO"
+          }`,
           `    ♡ last run: ${
-              status.lastCleanupAt ||
-              "Never"
-            }`,
-          "",
-          "୨୧ maintenance",
-          "    ♡ !cleanup run",
-          "    ♡ !cleanup repair",
-          "    ♡ !cleanup optimize",
-          "    ♡ !cleanup full",
+            status.lastCleanupAt ||
+            "Never"
+          }`,
           "",
           "୨୧ schedule",
           "    ♡ every 24 hours",
@@ -1859,10 +2037,6 @@ async function handleMessage(
       return;
     }
 
-    // ----------------------------------------------------------
-    // CLEANUP MODE
-    // ----------------------------------------------------------
-
     const modeMap = {
       run: "clean",
       repair: "repair",
@@ -1871,7 +2045,9 @@ async function handleMessage(
     };
 
     const mode =
-      modeMap[cleanupCommand];
+      modeMap[
+        cleanupCommand
+      ];
 
     if (!mode) {
       return;
@@ -1883,7 +2059,9 @@ async function handleMessage(
           mode,
         });
 
-      if (result?.skipped) {
+      if (
+        result?.skipped
+      ) {
         sendReplyWithTyping(
           api,
           [
@@ -1905,13 +2083,15 @@ async function handleMessage(
       const temporaryFiles =
         Number(
           result?.cleaned
-            ?.temporaryFiles || 0
+            ?.temporaryFiles ||
+            0
         );
 
       const expiredSessions =
         Number(
           result?.cleaned
-            ?.expiredSessions || 0
+            ?.expiredSessions ||
+            0
         );
 
       const repairs =
@@ -1928,54 +2108,8 @@ async function handleMessage(
           result?.optimizer
             ?.findings
         )
-          ? result.optimizer.findings
-          : [];
-
-      const optimizerCount =
-        optimizerFindings.length;
-
-      const optimizerDetails =
-        optimizerCount > 0
-          ? [
-              "",
-              "୨୧ optimizer findings",
-              ...optimizerFindings.map(
-                (finding, index) => {
-                  if (
-                    typeof finding === "string"
-                  ) {
-                    return `    ♡ ${index + 1}. ${finding}`;
-                  }
-
-                  if (
-                    finding &&
-                    typeof finding === "object"
-                  ) {
-                    const file =
-                      finding.file ||
-                      finding.path ||
-                      finding.filePath ||
-                      "Unknown file";
-
-                    const line =
-                      finding.line != null
-                        ? `:${finding.line}`
-                        : "";
-
-                    const message =
-                      finding.message ||
-                      finding.issue ||
-                      finding.reason ||
-                      finding.description ||
-                      JSON.stringify(finding);
-
-                    return `    ♡ ${index + 1}. ${file}${line} — ${message}`;
-                  }
-
-                  return `    ♡ ${index + 1}. ${String(finding)}`;
-                }
-              ),
-            ]
+          ? result.optimizer
+              .findings
           : [];
 
       const gc =
@@ -1988,22 +2122,22 @@ async function handleMessage(
           "          ♡ COMPLETE ♡",
           "╰─────────────────────────────╯",
           "",
-          `୨୧ mode`,
+          "୨୧ mode",
           `    ♡ ${mode.toUpperCase()}`,
           "",
           "୨୧ cleaned",
           `    ♡ temporary files: ${temporaryFiles}`,
           `    ♡ expired sessions: ${expiredSessions}`,
           `    ♡ repairs: ${repairs}`,
-          `    ♡ optimizer findings: ${optimizerCount}`,
-          ...optimizerDetails,
+          `    ♡ optimizer findings: ${optimizerFindings.length}`,
           "",
           "୨୧ gc maintenance",
           `    ♡ inactive: ${Number(
             gc.markedInactive || 0
           )}`,
-          `    ♡ features disabled: ${Number(
-            gc.expensiveFeaturesDisabled || 0
+          `    ♡ features off: ${Number(
+            gc.expensiveFeaturesDisabled ||
+              0
           )}`,
           `    ♡ archived: ${Number(
             gc.archived || 0
@@ -2047,18 +2181,16 @@ async function handleMessage(
     return;
   }
 
-  // ============================================================
-  // ECLIPSE GC MONITOR
-  // ============================================================
+  // ==========================================================
+  // GC STATUS
+  // ==========================================================
 
   if (
     /^!gcstatus$/i.test(
       originalText
     )
   ) {
-    if (
-      !ADMIN_IDS.includes(senderId)
-    ) {
+    if (!isAdmin) {
       sendReplyWithTyping(
         api,
         "❌ Admin only.",
@@ -2118,280 +2250,9 @@ async function handleMessage(
     return;
   }
 
-  // ============================================================
-  // GLOBAL BOT CONTROL
-  // ============================================================
-
-  const botControlMatch =
-    originalText.match(
-      /^!(bot(?:\s+(off|on|status))?|shutdown|startup)$/i
-    );
-
-  if (botControlMatch) {
-    if (
-      !ADMIN_IDS.includes(senderId)
-    ) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
-          "",
-          "🔒 ADMIN ONLY",
-          "",
-          "Only the bot admin can use",
-          "global bot controls.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    const rawControl =
-      (
-        botControlMatch[1] || "bot"
-      ).toLowerCase();
-
-    // ----------------------------------------------------------
-    // BOT MENU
-    // ----------------------------------------------------------
-
-    if (
-      rawControl === "bot"
-    ) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
-          "୨୧ status",
-          "    ♡ !bot status",
-          "",
-          "୨୧ controls",
-          "    ♡ !bot on",
-          "    ♡ !bot off",
-          "    ♡ !shutdown",
-          "    ♡ !startup",
-          "",
-          "୨୧ communication",
-          "    ♡ !broadcast <message>",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    // ----------------------------------------------------------
-    // STATUS
-    // ----------------------------------------------------------
-
-    if (
-      rawControl === "bot status"
-    ) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BOT STATUS  🎀 ──────╮",
-          "",
-          `୨୧ global status`,
-          `    ♡ ${
-            global.botDisabled
-              ? "🔴 OFF"
-              : "🟢 ON"
-          }`,
-          "",
-          `୨୧ normal commands`,
-          `    ♡ ${
-            global.botDisabled
-              ? "🔴 DISABLED"
-              : "🟢 ACTIVE"
-          }`,
-          "",
-          "୨୧ controls",
-          "    ♡ !bot on",
-          "    ♡ !bot off",
-          "    ♡ !shutdown",
-          "    ♡ !startup",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    // ----------------------------------------------------------
-    // OFF
-    // ----------------------------------------------------------
-
-    if (
-      rawControl === "bot off" ||
-      rawControl === "shutdown"
-    ) {
-      global.botDisabled = true;
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
-          "",
-          "🔴 BOT IS NOW OFF",
-          "",
-          "୨୧ global state",
-          "    ♡ OFF",
-          "",
-          "Normal commands will now be",
-          "ignored across all groups.",
-          "",
-          "୨୧ admin controls remain available",
-          "    ♡ !bot status",
-          "    ♡ !bot on",
-          "    ♡ !startup",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    // ----------------------------------------------------------
-    // ON
-    // ----------------------------------------------------------
-
-    if (
-      rawControl === "bot on" ||
-      rawControl === "startup"
-    ) {
-      global.botDisabled = false;
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
-          "",
-          "🟢 BOT IS NOW ON",
-          "",
-          "୨୧ global state",
-          "    ♡ ON",
-          "",
-          "Normal commands are active",
-          "again across all groups.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-  }
-
-  // ============================================================
-  // GLOBAL BOT DISABLED STATE
-  // ============================================================
-
-  if (
-    global.botDisabled === true
-  ) {
-    const trimmedText =
-      originalText.trim();
-
-    const isAdmin =
-      ADMIN_IDS.includes(senderId);
-
-    const isBotMenu =
-      /^!bot$/i.test(
-        trimmedText
-      );
-
-    const isBotStatus =
-      /^!bot\s+status$/i.test(
-        trimmedText
-      );
-
-    const isBotOn =
-      /^!bot\s+on$/i.test(
-        trimmedText
-      );
-
-    const isBotOff =
-      /^!bot\s+off$/i.test(
-        trimmedText
-      );
-
-    const isStartup =
-      /^!startup$/i.test(
-        trimmedText
-      );
-
-    const isShutdown =
-      /^!shutdown$/i.test(
-        trimmedText
-      );
-
-    const isGameToggle =
-      /^!game\s+(on|off)$/i.test(
-        trimmedText
-      );
-
-    if (
-      isAdmin &&
-      (
-        isBotMenu ||
-        isBotStatus ||
-        isBotOn ||
-        isBotOff ||
-        isStartup ||
-        isShutdown
-      )
-    ) {
-      return;
-    }
-
-    if (
-      isAdmin &&
-      isGameToggle
-    ) {
-      // Allow admins to configure games
-      // while the general bot is disabled.
-    } else if (
-      /^!(?:game|games|play)\b/i.test(
-        trimmedText
-      )
-    ) {
-      let gamesEnabled = false;
-
-      try {
-        gamesEnabled =
-          await db.isGameEnabled(
-            threadID
-          );
-      } catch (error) {
-        console.error(
-          "[SHUTDOWN] Failed to check game state:",
-          error
-        );
-
-        return;
-      }
-
-      if (!gamesEnabled) {
-        return;
-      }
-    } else {
-      return;
-    }
-  }
-
-  // ============================================================
-  // SIMPLE DIRECT COMMANDS
-  // ============================================================
+  // ==========================================================
+  // PING
+  // ==========================================================
 
   if (
     text === "!ping"
@@ -2405,9 +2266,9 @@ async function handleMessage(
     return;
   }
 
-  // ============================================================
-  // PUBLIC HELP
-  // ============================================================
+  // ==========================================================
+  // HELP
+  // ==========================================================
 
   if (
     text === "!help"
@@ -2415,122 +2276,67 @@ async function handleMessage(
     sendReplyWithTyping(
       api,
       [
-        "╭━━━━━━━━━━━━━━━━━━━━╮",
-        "          🌑 ECLIPSE",
-        "        PUBLIC MENU",
-        "╰━━━━━━━━━━━━━━━━━━━━╯",
+        "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+        "        🎀 E C L I P S E",
+        "         P U B L I C",
+        "╰─────── ୨୧ ♡ ୨୧ ───────╯",
         "",
-        "⚡ GENERAL",
-        "• !ping",
-        "  Check if the bot is online.",
+        "୨୧ GENERAL",
+        "♡ !ping",
+        "♡ !help",
         "",
-        "• !help",
-        "  Show this public command menu.",
+        "୨୧ MUSIC",
+        "♡ !play <song>",
+        "  Search YouTube + send audio.",
+        "♡ !music status",
+        "  Show the GC music queue.",
+        "♡ Maximum 2 songs per GC.",
         "",
-        "🎵 MUSIC",
-        "• !play <song>",
-        "  Search YouTube and send the audio.",
-        "  Example: !play Die With A Smile",
+        "୨୧ BOT CONTROL",
+        "♡ !pause",
+        "♡ !pause status",
+        "♡ !resume",
         "",
-        "🖼️ PICTURES",
-        "• !pic",
-        "  Send a random picture.",
+        "୨୧ PICTURES",
+        "♡ !pic",
+        "♡ !picture",
+        "♡ !photo",
         "",
-        "• !picture",
-        "  Send a random picture.",
+        "୨୧ ECLIPSE RPG",
+        "♡ !rpg help",
+        "♡ !rpg profile",
+        "♡ !rpg kingdom",
+        "♡ !rpg property",
+        "♡ !rpg train <unit> <amount>",
+        "♡ !rpg march <region>",
         "",
-        "• !photo",
-        "  Send a random picture.",
+        "୨୧ ECONOMY",
+        "♡ !balance / !bal",
+        "♡ !daily",
+        "♡ !work",
+        "♡ !pay <amount>",
+        "♡ !leaderboard / !lb",
+        "♡ !shop",
+        "♡ !buy <item>",
+        "♡ !inventory / !inv",
         "",
-        "🌑 ECLIPSE RPG",
-        "• !rpg help",
-        "  Open the persistent RPG system.",
+        "୨୧ GAME CENTER",
+        "♡ !games",
+        "♡ !games rules",
+        "♡ !games status",
+        "♡ !trivia",
+        "♡ !rps <choice>",
+        "♡ !roll <amount>",
+        "♡ !guess <number>",
+        "♡ !coinflip <amount> <side>",
+        "♡ !slots <amount>",
+        "♡ !blackjack",
+        "♡ !hit / !stand",
+        "♡ !math",
+        "♡ !riddle",
+        "♡ !8ball <question>",
         "",
-        "• !rpg profile",
-        "  View your character and progression.",
-        "",
-        "• !rpg kingdom",
-        "  View your kingdom and domain.",
-        "",
-        "• !rpg property",
-        "  Manage your property.",
-        "",
-        "• !rpg train <unit> <amount>",
-        "  Train troops using your wallet.",
-        "",
-        "• !rpg march <region>",
-        "  Travel through the world map.",
-        "",
-        "💰 ECONOMY",
-        "• !balance / !bal",
-        "  Check your coins.",
-        "",
-        "• !daily",
-        "  Claim your daily reward.",
-        "",
-        "• !work",
-        "  Work for coins.",
-        "",
-        "• !pay <amount>",
-        "  Pay someone by replying to them.",
-        "",
-        "• !leaderboard / !lb",
-        "  View the richest players.",
-        "",
-        "• !shop",
-        "  View available items.",
-        "",
-        "• !buy <item>",
-        "  Purchase an item.",
-        "",
-        "• !inventory / !inv",
-        "  View your items.",
-        "",
-        "🎮 GAMES",
-        "• !games",
-        "  Open the ECLIPSE Game Center.",
-        "",
-        "• !games rules",
-        "  View detailed game rules.",
-        "",
-        "• !games status",
-        "  View your game status.",
-        "",
-        "🧠 !trivia",
-        "  Answer the generated question.",
-        "",
-        "✊ !rps <rock|paper|scissors>",
-        "  Play Rock, Paper, Scissors.",
-        "",
-        "🎲 !roll <amount>",
-        "  Roll the generated range.",
-        "",
-        "🎯 !guess <number>",
-        "  Guess the secret number.",
-        "",
-        "🪙 !coinflip <amount> <heads|tails>",
-        "  Bet on heads or tails.",
-        "",
-        "🎰 !slots <amount>",
-        "  Spin the slot machine.",
-        "",
-        "🃏 !blackjack",
-        "  Start Blackjack.",
-        "  Use !hit or !stand.",
-        "",
-        "🧮 !math",
-        "  Solve the generated problem.",
-        "",
-        "🧩 !riddle",
-        "  Solve the generated riddle.",
-        "",
-        "🔮 !8ball <question>",
-        "  Ask the Magic 8-Ball.",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "🌑 Explore ECLIPSE RPG",
-        "   to discover more systems.",
-        "━━━━━━━━━━━━━━━━━━━━━━",
+        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
       ].join("\n"),
       threadID
     );
@@ -2538,20 +2344,24 @@ async function handleMessage(
     return;
   }
 
-  // ============================================================
+  // ==========================================================
   // MUSIC
-  // ============================================================
+  // ==========================================================
 
   if (
     text === "!play" ||
-    text.startsWith("!play ")
+    text.startsWith(
+      "!play "
+    )
   ) {
     const requestedSong =
       originalText
-        .slice("!play".length)
+        .slice(
+          "!play".length
+        )
         .trim();
 
-    void sendAudioTrack(
+    handleMusicCommand(
       api,
       requestedSong,
       threadID
@@ -2560,9 +2370,26 @@ async function handleMessage(
     return;
   }
 
-  // ============================================================
-  // RANDOM PICTURE
-  // ============================================================
+  // ==========================================================
+  // MUSIC STATUS
+  // ==========================================================
+
+  if (
+    /^!music\s+status$/i.test(
+      originalText
+    )
+  ) {
+    sendMusicStatus(
+      api,
+      threadID
+    );
+
+    return;
+  }
+
+  // ==========================================================
+  // PICTURES
+  // ==========================================================
 
   if (
     text === "!pic" ||
@@ -2590,16 +2417,16 @@ async function handleMessage(
     return;
   }
 
-  // ============================================================
+  // ==========================================================
   // BROADCAST
-  // ============================================================
+  // ==========================================================
 
   if (
-    text.startsWith("!broadcast ")
+    text.startsWith(
+      "!broadcast "
+    )
   ) {
-    if (
-      !ADMIN_IDS.includes(senderId)
-    ) {
+    if (!isAdmin) {
       sendReplyWithTyping(
         api,
         [
@@ -2619,7 +2446,9 @@ async function handleMessage(
 
     const message =
       originalText
-        .slice("!broadcast ".length)
+        .slice(
+          "!broadcast ".length
+        )
         .trim();
 
     if (!message) {
@@ -2630,9 +2459,6 @@ async function handleMessage(
           "",
           "୨୧ usage",
           "    ♡ !broadcast <message>",
-          "",
-          "Example:",
-          "    ♡ !broadcast Server maintenance tonight.",
           "",
           "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
         ].join("\n"),
@@ -2657,14 +2483,11 @@ async function handleMessage(
         "",
         "📢 BROADCAST QUEUED",
         "",
-        `୨୧ active threads`,
+        "୨୧ active threads",
         `    ♡ ${targetCount}`,
         "",
         "୨୧ status",
         "    ♡ 🟢 queued",
-        "",
-        "The announcement has been",
-        "queued for active threads.",
         "",
         "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
       ].join("\n"),
@@ -2674,9 +2497,9 @@ async function handleMessage(
     return;
   }
 
-  // ============================================================
+  // ==========================================================
   // MODERATION
-  // ============================================================
+  // ==========================================================
 
   try {
     if (
@@ -2696,9 +2519,9 @@ async function handleMessage(
     );
   }
 
-  // ============================================================
+  // ==========================================================
   // AI
-  // ============================================================
+  // ==========================================================
 
   try {
     if (
@@ -2718,9 +2541,9 @@ async function handleMessage(
     );
   }
 
-  // ============================================================
+  // ==========================================================
   // RPG CHARACTER AI
-  // ============================================================
+  // ==========================================================
 
   try {
     if (
@@ -2740,9 +2563,9 @@ async function handleMessage(
     );
   }
 
-  // ============================================================
+  // ==========================================================
   // GAME RESPONSE
-  // ============================================================
+  // ==========================================================
 
   try {
     if (
@@ -2762,14 +2585,14 @@ async function handleMessage(
     );
   }
 
-  // ============================================================
+  // ==========================================================
   // RPG / LOVE QUEST / GAMES / ECONOMY
-  // ============================================================
+  // ==========================================================
 
   try {
-    // ==========================================================
+    // --------------------------------------------------------
     // RPG
-    // ==========================================================
+    // --------------------------------------------------------
 
     if (
       /^!rpg(?:\s|$)/i.test(
@@ -2784,12 +2607,14 @@ async function handleMessage(
       const rpgArgs =
         rpgParts.slice(1);
 
-      // ========================================================
+      // ------------------------------------------------------
       // LOVE QUEST
-      // ========================================================
+      // ------------------------------------------------------
 
       if (
-        isSpecialPlayer(senderId)
+        isSpecialPlayer(
+          senderId
+        )
       ) {
         try {
           const loveQuestHandled =
@@ -2821,10 +2646,6 @@ async function handleMessage(
         }
       }
 
-      // ========================================================
-      // RPG EXPLORE
-      // ========================================================
-
       const isRpgExplore =
         /^!rpg\s+explore(?:\s|$)/i.test(
           originalText
@@ -2843,7 +2664,9 @@ async function handleMessage(
       ) {
         if (
           isRpgExplore &&
-          isSpecialPlayer(senderId)
+          isSpecialPlayer(
+            senderId
+          )
         ) {
           try {
             await discoverLoveQuest(
@@ -2863,19 +2686,19 @@ async function handleMessage(
       }
     }
 
-    // ==========================================================
+    // --------------------------------------------------------
     // GAME CONTROL
-    // ==========================================================
+    // --------------------------------------------------------
 
     const gameControlMatch =
       text.match(
         /^!game(?:\s+(on|off|status))?$/i
       );
 
-    if (gameControlMatch) {
-      if (
-        !ADMIN_IDS.includes(senderId)
-      ) {
+    if (
+      gameControlMatch
+    ) {
+      if (!isAdmin) {
         sendReplyWithTyping(
           api,
           [
@@ -2900,10 +2723,6 @@ async function handleMessage(
           ""
         ).toLowerCase();
 
-      // --------------------------------------------------------
-      // GAME MENU
-      // --------------------------------------------------------
-
       if (!gameSubcommand) {
         let currentStatus =
           false;
@@ -2915,7 +2734,7 @@ async function handleMessage(
             );
         } catch (error) {
           console.error(
-            "[GAME] Failed to check game status:",
+            "[GAME] Failed to check status:",
             error
           );
         }
@@ -2948,12 +2767,9 @@ async function handleMessage(
         return;
       }
 
-      // --------------------------------------------------------
-      // GAME STATUS
-      // --------------------------------------------------------
-
       if (
-        gameSubcommand === "status"
+        gameSubcommand ===
+        "status"
       ) {
         try {
           const enabled =
@@ -2977,32 +2793,19 @@ async function handleMessage(
               "    ♡ !game on",
               "    ♡ !game off",
               "",
-              "୨୧ game center",
-              "    ♡ !games",
-              "    ♡ !games rules",
-              "    ♡ !games status",
-              "",
               "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
             ].join("\n"),
             threadID
           );
         } catch (error) {
           console.error(
-            "[game status] Error:",
+            "[GAME STATUS] Error:",
             error
           );
 
           sendReplyWithTyping(
             api,
-            [
-              "╭────── 🎀  GAME STATUS  🎀 ──────╮",
-              "",
-              "🔴 STATUS CHECK FAILED",
-              "",
-              "Unable to read the game setting.",
-              "",
-              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-            ].join("\n"),
+            "🔴 Unable to read the game setting.",
             threadID
           );
         }
@@ -3010,12 +2813,9 @@ async function handleMessage(
         return;
       }
 
-      // --------------------------------------------------------
-      // GAME ON/OFF
-      // --------------------------------------------------------
-
       const enabled =
-        gameSubcommand === "on";
+        gameSubcommand ===
+        "on";
 
       try {
         await db.setGameEnabled(
@@ -3039,31 +2839,19 @@ async function handleMessage(
                 : "OFF"
             }`,
             "",
-            enabled
-              ? "Players can now use the game system."
-              : "Players can no longer start normal games.",
-            "",
             "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
           ].join("\n"),
           threadID
         );
       } catch (error) {
         console.error(
-          "[game toggle] Error:",
+          "[GAME TOGGLE] Error:",
           error
         );
 
         sendReplyWithTyping(
           api,
-          [
-            "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
-            "",
-            "🔴 UPDATE FAILED",
-            "",
-            "Failed to change the game setting.",
-            "",
-            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-          ].join("\n"),
+          "🔴 Failed to change the game setting.",
           threadID
         );
       }
@@ -3071,16 +2859,18 @@ async function handleMessage(
       return;
     }
 
-    // ==========================================================
+    // --------------------------------------------------------
     // GAME COMMANDS
-    // ==========================================================
+    // --------------------------------------------------------
 
     const gameMatch =
       text.match(
         /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
       );
 
-    if (gameMatch) {
+    if (
+      gameMatch
+    ) {
       const gameCommand =
         gameMatch[1].toLowerCase();
 
@@ -3092,13 +2882,9 @@ async function handleMessage(
           : [];
 
       if (
-        gameCommand === "games"
+        gameCommand ===
+        "games"
       ) {
-        const subcommand =
-          (
-            gameArgs[0] || ""
-          ).toLowerCase();
-
         const handled =
           await handleGamesCommand(
             api,
@@ -3107,21 +2893,16 @@ async function handleMessage(
             gameArgs
           );
 
-        if (handled) {
-          return;
-        }
-
         if (
-          subcommand === "" ||
-          subcommand === "menu"
+          handled
         ) {
-          sendGameCenter(
-            api,
-            threadID
-          );
-
           return;
         }
+
+        sendGameCenter(
+          api,
+          threadID
+        );
 
         return;
       }
@@ -3131,7 +2912,9 @@ async function handleMessage(
           threadID
         );
 
-      if (!gamesEnabled) {
+      if (
+        !gamesEnabled
+      ) {
         sendReplyWithTyping(
           api,
           [
@@ -3162,9 +2945,9 @@ async function handleMessage(
       }
     }
 
-    // ==========================================================
+    // --------------------------------------------------------
     // ECONOMY
-    // ==========================================================
+    // --------------------------------------------------------
 
     if (
       await handleEconomyCommand(
@@ -3183,28 +2966,25 @@ async function handleMessage(
     );
   }
 
-  // ============================================================
+  // ==========================================================
   // BANAT CONTROL
-  // ============================================================
+  // ==========================================================
 
   const banatControlMatch =
     text.match(
       /^!banat(?:\s+(on|off|status))?$/i
     );
 
-  if (banatControlMatch) {
-    if (
-      !ADMIN_IDS.includes(senderId)
-    ) {
+  if (
+    banatControlMatch
+  ) {
+    if (!isAdmin) {
       sendReplyWithTyping(
         api,
         [
           "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
           "",
           "🔒 ADMIN ONLY",
-          "",
-          "Only the bot admin can configure",
-          "banat.",
           "",
           "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
         ].join("\n"),
@@ -3220,11 +3000,9 @@ async function handleMessage(
         ""
       ).toLowerCase();
 
-    // ----------------------------------------------------------
-    // BANAT MENU
-    // ----------------------------------------------------------
-
-    if (!banatSubcommand) {
+    if (
+      !banatSubcommand
+    ) {
       let enabled =
         false;
 
@@ -3235,7 +3013,7 @@ async function handleMessage(
           );
       } catch (error) {
         console.error(
-          "[BANAT] Failed to check roast status:",
+          "[BANAT] Failed to check status:",
           error
         );
       }
@@ -3246,11 +3024,10 @@ async function handleMessage(
           "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
           "୨୧ status",
           `    ♡ ${
-              enabled
-                ? "🟢 ON"
-                : "🔴 OFF"
-            }`,
-          "    ♡ !banat status",
+            enabled
+              ? "🟢 ON"
+              : "🔴 OFF"
+          }`,
           "",
           "୨୧ controls",
           "    ♡ !banat on",
@@ -3263,12 +3040,9 @@ async function handleMessage(
       return;
     }
 
-    // ----------------------------------------------------------
-    // BANAT STATUS
-    // ----------------------------------------------------------
-
     if (
-      banatSubcommand === "status"
+      banatSubcommand ===
+      "status"
     ) {
       try {
         const enabled =
@@ -3298,34 +3072,17 @@ async function handleMessage(
         );
       } catch (error) {
         console.error(
-          "[BANAT] Status check failed:",
+          "[BANAT] Status failed:",
           error
-        );
-
-        sendReplyWithTyping(
-          api,
-          [
-            "╭────── 🎀  BANAT STATUS  🎀 ──────╮",
-            "",
-            "🔴 STATUS CHECK FAILED",
-            "",
-            "Unable to read the banat setting.",
-            "",
-            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-          ].join("\n"),
-          threadID
         );
       }
 
       return;
     }
 
-    // ----------------------------------------------------------
-    // BANAT ON/OFF
-    // ----------------------------------------------------------
-
     const enabled =
-      banatSubcommand === "on";
+      banatSubcommand ===
+      "on";
 
     try {
       await db.setRoastEnabled(
@@ -3350,14 +3107,10 @@ async function handleMessage(
           "",
           "୨୧ group status",
           `    ♡ ${
-              enabled
-                ? "ON"
-                : "OFF"
-            }`,
-          "",
-          enabled
-            ? "Automatic banat has been enabled."
-            : "Automatic banat has been disabled.",
+            enabled
+              ? "ON"
+              : "OFF"
+          }`,
           "",
           "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
         ].join("\n"),
@@ -3365,23 +3118,13 @@ async function handleMessage(
       );
     } catch (error) {
       console.error(
-        enabled
-          ? "Failed to enable banat:"
-          : "Failed to disable banat:",
+        "[BANAT] Update failed:",
         error
       );
 
       sendReplyWithTyping(
         api,
-        [
-          "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
-          "",
-          "🔴 UPDATE FAILED",
-          "",
-          "Failed to update the banat setting.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
+        "🔴 Failed to update banat.",
         threadID
       );
     }
@@ -3389,11 +3132,12 @@ async function handleMessage(
     return;
   }
 
-  // ============================================================
+  // ==========================================================
   // BANAT STATUS
-  // ============================================================
+  // ==========================================================
 
-  let roastEnabled = false;
+  let roastEnabled =
+    false;
 
   try {
     roastEnabled =
@@ -3405,15 +3149,15 @@ async function handleMessage(
       "[BANAT] Failed to check roast status:",
       error
     );
-
-    roastEnabled = false;
   }
 
-  // ============================================================
-  // TARGETED TRIGGER / ROAST
-  // ============================================================
+  // ==========================================================
+  // TARGETED TRIGGER
+  // ==========================================================
 
-  if (roastEnabled) {
+  if (
+    roastEnabled
+  ) {
     try {
       const triggerReply =
         await getTriggerReply(
@@ -3422,7 +3166,9 @@ async function handleMessage(
           threadId
         );
 
-      if (triggerReply) {
+      if (
+        triggerReply
+      ) {
         sendReplyWithTyping(
           api,
           triggerReply,
@@ -3440,9 +3186,9 @@ async function handleMessage(
     }
   }
 
-  // ============================================================
-  // PUBLIC RANDOM ROAST
-  // ============================================================
+  // ==========================================================
+  // RANDOM ROAST
+  // ==========================================================
 
   if (
     !RANDOM_ROAST_ENABLED ||
@@ -3459,7 +3205,9 @@ async function handleMessage(
     const publicReply =
       getNextPublicReply();
 
-    if (publicReply) {
+    if (
+      publicReply
+    ) {
       lastRandomRoastByThread.set(
         threadId,
         Date.now()
@@ -3476,7 +3224,7 @@ async function handleMessage(
 }
 
 // ============================================================
-// GAME CENTER FALLBACK
+// GAME CENTER
 // ============================================================
 
 function sendGameCenter(
@@ -3486,50 +3234,51 @@ function sendGameCenter(
   sendReplyWithTyping(
     api,
     [
-      "╭━━━━━━━━━━━━━━━━━━━━╮",
-      "          🌑 ECLIPSE",
-      "        GAME CENTER",
-      "╰━━━━━━━━━━━━━━━━━━━━╯",
+      "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+      "        🎀 E C L I P S E",
+      "        G A M E S ♡",
+      "╰─────── ୨୧ ♡ ୨୧ ───────╯",
       "",
-      "🧠 TRIVIA",
-      "!trivia",
-      "Answer the generated question.",
+      "୨୧ 🧠 TRIVIA",
+      "♡ !trivia",
       "",
-      "✊ ROCK • PAPER • SCISSORS",
-      "!rps rock",
-      "!rps paper",
-      "!rps scissors",
+      "୨୧ ✊ RPS",
+      "♡ !rps rock",
+      "♡ !rps paper",
+      "♡ !rps scissors",
       "",
-      "🎲 ROLL",
-      "!roll 100",
+      "୨୧ 🎲 ROLL",
+      "♡ !roll 100",
       "",
-      "🎯 GUESS",
-      "!guess 7",
+      "୨୧ 🎯 GUESS",
+      "♡ !guess 7",
       "",
-      "🪙 COINFLIP",
-      "!coinflip 100 heads",
+      "୨୧ 🪙 COINFLIP",
+      "♡ !coinflip 100 heads",
       "",
-      "🎰 SLOTS",
-      "!slots 100",
+      "୨୧ 🎰 SLOTS",
+      "♡ !slots 100",
       "",
-      "🃏 BLACKJACK",
-      "!blackjack",
-      "!hit",
-      "!stand",
+      "୨୧ 🃏 BLACKJACK",
+      "♡ !blackjack",
+      "♡ !hit",
+      "♡ !stand",
       "",
-      "🧮 MATH",
-      "!math",
+      "୨୧ 🧮 MATH",
+      "♡ !math",
       "",
-      "🧩 RIDDLE",
-      "!riddle",
+      "୨୧ 🧩 RIDDLE",
+      "♡ !riddle",
       "",
-      "🔮 8-BALL",
-      "!8ball Will I win?",
+      "୨୧ 🔮 8-BALL",
+      "♡ !8ball Will I win?",
       "",
-      "━━━━━━━━━━━━━━━━━━━━━━",
-      "📜 !games rules",
-      "📊 !games status",
-      "━━━━━━━━━━━━━━━━━━━━━━",
+      "╭────────────────────────╮",
+      "│ ♡ !games rules",
+      "│ ♡ !games status",
+      "╰────────────────────────╯",
+      "",
+      "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
     ].join("\n"),
     threadID
   );
@@ -3600,7 +3349,7 @@ function broadcastToAllThreads(
     !message.trim()
   ) {
     console.log(
-      "[Broadcast] No message to broadcast."
+      "[Broadcast] No message."
     );
 
     return;
@@ -3627,34 +3376,45 @@ function broadcastToAllThreads(
     `[Broadcast] Broadcasting to ${threads.length} threads.`
   );
 
-  const broadcastMessage = [
-    "╭━━━━━━━━━━━━━━━━╮",
-    "        📢 ANNOUNCEMENT",
-    "╰━━━━━━━━━━━━━━━━╯",
-    "",
-    message.trim(),
-  ].join("\n");
+  const broadcastMessage =
+    [
+      "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+      "        🎀 ANNOUNCEMENT",
+      "╰─────── ୨୧ ♡ ୨୧ ───────╯",
+      "",
+      message.trim(),
+      "",
+      "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+    ].join("\n");
 
   threads.forEach(
-    (threadID, index) => {
-      setTimeout(() => {
-        api.sendMessage(
-          broadcastMessage,
-          threadID,
-          (sendError) => {
-            if (sendError) {
-              console.error(
-                `[Broadcast] Failed for ${threadID}:`,
+    (
+      threadID,
+      index
+    ) => {
+      setTimeout(
+        () => {
+          api.sendMessage(
+            broadcastMessage,
+            threadID,
+            (sendError) => {
+              if (
                 sendError
-              );
-            } else {
-              console.log(
-                `[Broadcast] Sent to ${threadID}`
-              );
+              ) {
+                console.error(
+                  `[Broadcast] Failed for ${threadID}:`,
+                  sendError
+                );
+              } else {
+                console.log(
+                  `[Broadcast] Sent to ${threadID}`
+                );
+              }
             }
-          }
-        );
-      }, index * 500);
+          );
+        },
+        index * 500
+      );
     }
   );
 }
@@ -3713,7 +3473,7 @@ function registerActiveThreadCleanup() {
 }
 
 // ============================================================
-// SAFE REPLY HELPER
+// SAFE REPLY
 // ============================================================
 
 function sendReplyWithTyping(
@@ -3733,7 +3493,9 @@ function sendReplyWithTyping(
       api.sendTypingIndicator(
         threadID,
         (typingError) => {
-          if (typingError) {
+          if (
+            typingError
+          ) {
             console.error(
               "Typing indicator failed:",
               typingError
@@ -3749,43 +3511,49 @@ function sendReplyWithTyping(
     );
   }
 
-  setTimeout(() => {
-    try {
-      const memePath =
-        attachMeme
-          ? getRandomMemePath()
-          : null;
+  setTimeout(
+    () => {
+      try {
+        const memePath =
+          attachMeme
+            ? getRandomMemePath()
+            : null;
 
-      const outgoingMessage =
-        memePath
-          ? {
-              body: message,
-              attachment:
-                fs.createReadStream(
-                  memePath
-                ),
-            }
-          : message;
+        const outgoingMessage =
+          memePath
+            ? {
+                body:
+                  message,
+                attachment:
+                  fs.createReadStream(
+                    memePath
+                  ),
+              }
+            : message;
 
-      api.sendMessage(
-        outgoingMessage,
-        threadID,
-        (sendError) => {
-          if (sendError) {
-            console.error(
-              "Reply failed:",
+        api.sendMessage(
+          outgoingMessage,
+          threadID,
+          (sendError) => {
+            if (
               sendError
-            );
+            ) {
+              console.error(
+                "Reply failed:",
+                sendError
+              );
+            }
           }
-        }
-      );
-    } catch (sendError) {
-      console.error(
-        "Reply error:",
-        sendError
-      );
-    }
-  }, typingDelayMs);
+        );
+      } catch (sendError) {
+        console.error(
+          "Reply error:",
+          sendError
+        );
+      }
+    },
+    typingDelayMs
+  );
 }
 
 // ============================================================
@@ -3826,7 +3594,9 @@ function getRandomMemePath() {
           (fileName) =>
             supportedExtensions.has(
               path
-                .extname(fileName)
+                .extname(
+                  fileName
+                )
                 .toLowerCase()
             )
         );
@@ -3841,7 +3611,7 @@ function getRandomMemePath() {
       files[
         Math.floor(
           Math.random() *
-          files.length
+            files.length
         )
       ];
 
@@ -3858,3 +3628,127 @@ function getRandomMemePath() {
     return null;
   }
 }
+
+// ============================================================
+// PROCESS / SHUTDOWN PROTECTION
+// ============================================================
+
+async function cleanupMusicFiles() {
+  const files = new Set();
+
+  for (const queue of musicQueues.values()) {
+    for (const job of queue) {
+      if (job.temporaryFile) {
+        files.add(
+          job.temporaryFile
+        );
+      }
+    }
+  }
+
+  for (const file of files) {
+    await fsp
+      .unlink(file)
+      .catch(() => {});
+  }
+}
+
+let shuttingDown =
+  false;
+
+async function gracefulShutdown(
+  signal
+) {
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
+
+  console.log(
+    `[SYSTEM] Received ${signal}. Cleaning up ECLIPSE...`
+  );
+
+  for (
+    const job of musicPendingJobs
+  ) {
+    job.cancelled =
+      true;
+  }
+
+  musicPendingJobs.length = 0;
+
+  try {
+    await cleanupMusicFiles();
+  } catch (error) {
+    console.error(
+      "[SYSTEM] Music cleanup failed:",
+      error
+    );
+  }
+
+  try {
+    if (server) {
+      await new Promise(
+        (resolve) => {
+          server.close(
+            () => resolve()
+          );
+        }
+      );
+    }
+  } catch (error) {
+    console.error(
+      "[SYSTEM] Server shutdown failed:",
+      error
+    );
+  }
+
+  process.exit(0);
+}
+
+process.once(
+  "SIGTERM",
+  () => {
+    void gracefulShutdown(
+      "SIGTERM"
+    );
+  }
+);
+
+process.once(
+  "SIGINT",
+  () => {
+    void gracefulShutdown(
+      "SIGINT"
+    );
+  }
+);
+
+// ============================================================
+// MEMORY MONITOR
+// ============================================================
+
+setInterval(() => {
+  const m =
+    process.memoryUsage();
+
+  const music =
+    getMusicStats();
+
+  console.log(
+    `[MEMORY] RSS: ${Math.round(
+      m.rss / 1024 / 1024
+    )} MB | ` +
+      `Heap: ${Math.round(
+        m.heapUsed / 1024 / 1024
+      )} / ` +
+      `${Math.round(
+        m.heapTotal / 1024 / 1024
+      )} MB | ` +
+      `External: ${Math.round(
+        m.external / 1024 / 1024
+      )} MB | ` +
+      `Music: ${music.activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS} downloads`
+  );
+}, 60_000);
