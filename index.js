@@ -94,9 +94,6 @@ const {
 // CONFIGURATION
 // ============================================================
 
-const YOUTUBE_SEARCH_TIMEOUT_MS = 30_000;
-const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 180_000;
-
 const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .split(",")
   .map((id) => id.trim())
@@ -117,8 +114,36 @@ const RANDOM_ROAST_COOLDOWN_MS =
     ? parsedCooldown
     : 30_000;
 
+/*
+ * Maximum number of thread IDs retained in memory
+ * for broadcasting.
+ *
+ * This prevents the in-memory Set from growing
+ * forever on long-running Render instances.
+ */
+const MAX_ACTIVE_THREADS = 1000;
+
+/*
+ * Threads older than this are removed from the
+ * in-memory broadcast tracker.
+ *
+ * GC activity itself is persisted separately in
+ * the database through registerGCActivity().
+ */
+const ACTIVE_THREAD_EXPIRY_MS =
+  30 * 24 * 60 * 60 * 1000;
+
 const lastRandomRoastByThread = new Map();
-const activeThreads = new Set();
+
+/*
+ * Map:
+ *
+ * threadID -> lastSeenTimestamp
+ *
+ * This replaces the old unbounded Set while
+ * preserving broadcast functionality.
+ */
+const activeThreads = new Map();
 
 // ============================================================
 // MEMORY MONITOR
@@ -287,13 +312,19 @@ async function sendAudioTrack(
     // SEARCH YOUTUBE
     // ==========================================================
 
-    const video = await withTimeout(
-      () => searchYouTube(cleanSong),
-      YOUTUBE_SEARCH_TIMEOUT_MS,
-      "YouTube search timed out. Please try again."
-    );
+    /*
+     * youtube.js already owns the YouTube search timeout.
+     * Do not wrap it in another timeout here.
+     */
+    const video =
+      await searchYouTube(
+        cleanSong
+      );
 
-    if (!video || !video.url) {
+    if (
+      !video ||
+      !video.url
+    ) {
       throw new Error(
         `No YouTube result found for "${cleanSong}".`
       );
@@ -341,14 +372,20 @@ async function sendAudioTrack(
     // DOWNLOAD
     // ==========================================================
 
-    await withTimeout(
-      () =>
-        downloadYouTubeAudio(
-          video.url,
-          temporaryFile
-        ),
-      YOUTUBE_DOWNLOAD_TIMEOUT_MS,
-      "YouTube download timed out. Please try again."
+    /*
+     * youtube.js now has:
+     *
+     * - download timeout
+     * - yt-dlp process termination
+     * - forced process cleanup
+     * - concurrency protection
+     *
+     * Therefore index.js should not add another
+     * timeout layer around the same operation.
+     */
+    await downloadYouTubeAudio(
+      video.url,
+      temporaryFile
     );
 
     // ==========================================================
@@ -468,17 +505,13 @@ async function sendAudioTrack(
       ].join("\n"),
       threadID
     );
-    } finally {
+  } finally {
     await fsp
       .unlink(temporaryFile)
       .catch(() => {});
   }
 }
 
-// ============================================================
-// RENDER HEALTH-CHECK WEB SERVER
-// ============================================================
-  
 // ============================================================
 // RENDER HEALTH-CHECK WEB SERVER
 // ============================================================
@@ -749,7 +782,13 @@ login(
           const threadID =
             String(event.threadID);
 
-          activeThreads.add(threadID);
+          /*
+           * Track the thread for broadcasting,
+           * but keep the tracker bounded.
+           */
+          registerActiveThread(
+            threadID
+          );
 
           // Register activity with the
           // ECLIPSE maintenance engine.
@@ -763,7 +802,7 @@ login(
           });
 
           console.log(
-            `[Threads] Active threads: ${activeThreads.size}`
+            `[Threads] Active threads tracked: ${activeThreads.size}`
           );
 
           void handleMessage(
@@ -775,6 +814,81 @@ login(
     );
   }
 );
+
+// ============================================================
+// ACTIVE THREAD TRACKING
+// ============================================================
+
+function registerActiveThread(
+  threadID
+) {
+  if (!threadID) {
+    return;
+  }
+
+  const now =
+    Date.now();
+
+  /*
+   * Refresh the thread timestamp.
+   */
+  activeThreads.set(
+    String(threadID),
+    now
+  );
+
+  /*
+   * Remove stale threads.
+   */
+  for (
+    const [
+      knownThreadID,
+      lastSeenAt,
+    ] of activeThreads.entries()
+  ) {
+    if (
+      now - lastSeenAt >
+      ACTIVE_THREAD_EXPIRY_MS
+    ) {
+      activeThreads.delete(
+        knownThreadID
+      );
+    }
+  }
+
+  /*
+   * Hard safety cap.
+   *
+   * Remove the oldest entries first.
+   */
+  if (
+    activeThreads.size >
+    MAX_ACTIVE_THREADS
+  ) {
+    const entries =
+      Array.from(
+        activeThreads.entries()
+      )
+        .sort(
+          (a, b) =>
+            a[1] - b[1]
+        );
+
+    const excess =
+      activeThreads.size -
+      MAX_ACTIVE_THREADS;
+
+    for (
+      let i = 0;
+      i < excess;
+      i++
+    ) {
+      activeThreads.delete(
+        entries[i][0]
+      );
+    }
+  }
+}
 
 // ============================================================
 // MESSAGE HANDLING
@@ -826,12 +940,13 @@ async function handleMessage(
       return;
     }
 
-    // Do not feed ordinary bot commands into
-    // personality/adaptation observations.
-    //
-    // This keeps !commands from contaminating
-    // the AI's learned conversational style.
-    if (!originalText.startsWith("!")) {
+    /*
+     * Do not feed ordinary bot commands into
+     * personality/adaptation observations.
+     */
+    if (
+      !originalText.startsWith("!")
+    ) {
       await observeMessage({
         senderID: senderId,
         threadID: threadId,
@@ -876,8 +991,9 @@ async function handleMessage(
       originalText
     )
   ) {
-    // ADMIN ONLY
-    if (!ADMIN_IDS.includes(senderId)) {
+    if (
+      !ADMIN_IDS.includes(senderId)
+    ) {
       return;
     }
 
@@ -991,8 +1107,6 @@ async function handleMessage(
               .stateFiles.length
           : 0;
 
-      // Keep the actual findings instead of
-      // only calculating the count.
       const optimizerFindings =
         Array.isArray(
           result?.optimizer
@@ -1118,8 +1232,9 @@ async function handleMessage(
       originalText
     )
   ) {
-    // ADMIN ONLY
-    if (!ADMIN_IDS.includes(senderId)) {
+    if (
+      !ADMIN_IDS.includes(senderId)
+    ) {
       sendReplyWithTyping(
         api,
         "❌ Admin only.",
@@ -1193,28 +1308,15 @@ async function handleMessage(
   // GLOBAL BOT CONTROL
   // ============================================================
 
-  // Supported:
-  //
-  // !bot off
-  // !bot on
-  // !bot status
-  //
-  // Legacy aliases:
-  //
-  // !shutdown
-  // !startup
-  //
-  // This is a process-wide/global command state.
-  // It does NOT remove the bot from Messenger groups.
-  // ============================================================
-
   const botControlMatch =
     originalText.match(
       /^!(bot\s+(off|on|status)|shutdown|startup)$/i
     );
 
   if (botControlMatch) {
-    if (!ADMIN_IDS.includes(senderId)) {
+    if (
+      !ADMIN_IDS.includes(senderId)
+    ) {
       sendReplyWithTyping(
         api,
         "❌ Only the bot admin can use this command.",
@@ -1288,7 +1390,9 @@ async function handleMessage(
   // GLOBAL BOT DISABLED STATE
   // ============================================================
 
-  if (global.botDisabled === true) {
+  if (
+    global.botDisabled === true
+  ) {
     const trimmedText =
       originalText.trim();
 
@@ -1335,7 +1439,6 @@ async function handleMessage(
         isShutdown
       )
     ) {
-      // Global control commands are handled above.
       return;
     }
 
@@ -1378,7 +1481,9 @@ async function handleMessage(
   // SIMPLE DIRECT COMMANDS
   // ============================================================
 
-  if (text === "!ping") {
+  if (
+    text === "!ping"
+  ) {
     sendReplyWithTyping(
       api,
       "🏓 Pong!",
@@ -1392,7 +1497,9 @@ async function handleMessage(
   // PUBLIC HELP
   // ============================================================
 
-  if (text === "!help") {
+  if (
+    text === "!help"
+  ) {
     sendReplyWithTyping(
       api,
       [
@@ -1899,8 +2006,6 @@ async function handleMessage(
             gameArgs[0] || ""
           ).toLowerCase();
 
-        // Let games.js handle all supported
-        // !games subcommands exactly once.
         const handled =
           await handleGamesCommand(
             api,
@@ -1913,8 +2018,6 @@ async function handleMessage(
           return;
         }
 
-        // Only use the local menu fallback when
-        // games.js did not handle the command.
         if (
           subcommand === "" ||
           subcommand === "menu"
@@ -2213,7 +2316,8 @@ function sendGameCenter(
 function canRandomRoastThread(
   threadID
 ) {
-  const now = Date.now();
+  const now =
+    Date.now();
 
   const lastRoastAt =
     lastRandomRoastByThread.get(
@@ -2244,7 +2348,8 @@ function canRandomRoastThread(
       ] of lastRandomRoastByThread.entries()
     ) {
       if (
-        now - roastAt > expiry
+        now - roastAt >
+        expiry
       ) {
         lastRandomRoastByThread.delete(
           knownThreadID
@@ -2275,8 +2380,16 @@ function broadcastToAllThreads(
     return;
   }
 
+  /*
+   * Refresh/remove stale threads before
+   * creating the broadcast snapshot.
+   */
+  registerActiveThreadCleanup();
+
   const threads =
-    Array.from(activeThreads);
+    Array.from(
+      activeThreads.keys()
+    );
 
   if (
     threads.length === 0
@@ -2325,6 +2438,59 @@ function broadcastToAllThreads(
 }
 
 // ============================================================
+// ACTIVE THREAD CLEANUP
+// ============================================================
+
+function registerActiveThreadCleanup() {
+  const now =
+    Date.now();
+
+  for (
+    const [
+      threadID,
+      lastSeenAt,
+    ] of activeThreads.entries()
+  ) {
+    if (
+      now - lastSeenAt >
+      ACTIVE_THREAD_EXPIRY_MS
+    ) {
+      activeThreads.delete(
+        threadID
+      );
+    }
+  }
+
+  if (
+    activeThreads.size >
+    MAX_ACTIVE_THREADS
+  ) {
+    const entries =
+      Array.from(
+        activeThreads.entries()
+      )
+        .sort(
+          (a, b) =>
+            a[1] - b[1]
+        );
+
+    const excess =
+      activeThreads.size -
+      MAX_ACTIVE_THREADS;
+
+    for (
+      let i = 0;
+      i < excess;
+      i++
+    ) {
+      activeThreads.delete(
+        entries[i][0]
+      );
+    }
+  }
+}
+
+// ============================================================
 // SAFE REPLY HELPER
 // ============================================================
 
@@ -2334,7 +2500,8 @@ function sendReplyWithTyping(
   threadID,
   attachMeme = false
 ) {
-  const typingDelayMs = 1200;
+  const typingDelayMs =
+    1200;
 
   try {
     if (
