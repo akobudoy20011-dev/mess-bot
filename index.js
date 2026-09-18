@@ -240,23 +240,117 @@ function sendMessengerMessage(
 ) {
   return new Promise((resolve, reject) => {
     try {
+      if (
+        !api ||
+        typeof api.sendMessage !==
+          "function"
+      ) {
+        reject(
+          new Error(
+            "Messenger sendMessage is unavailable."
+          )
+        );
+
+        return;
+      }
+
       api.sendMessage(
         message,
         threadID,
         (error, messageInfo) => {
           if (error) {
             reject(error);
-          } else {
-            resolve(
-              messageInfo || null
-            );
+            return;
           }
+
+          resolve(
+            messageInfo || null
+          );
         }
       );
     } catch (error) {
       reject(error);
     }
   });
+}
+
+// ============================================================
+// MESSAGE ID EXTRACTION
+// ============================================================
+//
+// ws3-fca normally returns messageID, but different versions
+// / wrappers may expose it under slightly different shapes.
+// Keep the extraction defensive so music can reliably reuse
+// the original status message.
+// ============================================================
+
+function getMessengerMessageID(
+  messageInfo
+) {
+  if (!messageInfo) {
+    return null;
+  }
+
+  if (
+    typeof messageInfo ===
+    "object"
+  ) {
+    const directID =
+      messageInfo.messageID ||
+      messageInfo.messageId ||
+      messageInfo.id ||
+      messageInfo.mid;
+
+    if (directID) {
+      return String(
+        directID
+      );
+    }
+
+    const nestedID =
+      messageInfo.message?.messageID ||
+      messageInfo.message?.messageId ||
+      messageInfo.message?.id ||
+      messageInfo.message?.mid;
+
+    if (nestedID) {
+      return String(
+        nestedID
+      );
+    }
+
+    if (
+      Array.isArray(
+        messageInfo
+      )
+    ) {
+      for (
+        const item of messageInfo
+      ) {
+        const found =
+          getMessengerMessageID(
+            item
+          );
+
+        if (found) {
+          return found;
+        }
+      }
+    }
+  }
+
+  if (
+    typeof messageInfo ===
+      "string" ||
+    typeof messageInfo ===
+      "number"
+  ) {
+    return String(
+      messageInfo
+    );
+  }
+
+  return null;
 }
 
 // ============================================================
@@ -274,7 +368,7 @@ function editMessengerMessage(
 ) {
   return new Promise((resolve, reject) => {
     if (
-      !messageID ||
+      !api ||
       typeof api.editMessage !==
         "function"
     ) {
@@ -287,10 +381,20 @@ function editMessengerMessage(
       return;
     }
 
+    if (!messageID) {
+      reject(
+        new Error(
+          "Cannot edit Messenger message: message ID is missing."
+        )
+      );
+
+      return;
+    }
+
     try {
       api.editMessage(
         message,
-        messageID,
+        String(messageID),
         (error) => {
           if (error) {
             reject(error);
@@ -303,6 +407,74 @@ function editMessengerMessage(
       reject(error);
     }
   });
+}
+
+// ============================================================
+// MUSIC STATUS EDIT WITH RETRIES
+// ============================================================
+//
+// Messenger can occasionally reject an edit transiently.
+// Retry the SAME message ID instead of creating another status
+// message. This keeps the music flow clean.
+// ============================================================
+
+async function editMusicStatus(
+  api,
+  messageID,
+  panel,
+  jobID,
+  state
+) {
+  if (!messageID) {
+    console.warn(
+      `[Music] Job ${jobID}: cannot edit ${state}; message ID is missing.`
+    );
+
+    return false;
+  }
+
+  const maxRetries = 3;
+  const retryDelayMs = 500;
+
+  for (
+    let attempt = 1;
+    attempt <= maxRetries;
+    attempt++
+  ) {
+    try {
+      await editMessengerMessage(
+        api,
+        panel,
+        messageID
+      );
+
+      console.log(
+        `[Music] Job ${jobID}: status edited → ${state}`
+      );
+
+      return true;
+    } catch (error) {
+      console.error(
+        `[Music] Job ${jobID}: edit ${state} failed (attempt ${attempt}/${maxRetries}):`,
+        error
+      );
+
+      if (
+        attempt <
+        maxRetries
+      ) {
+        await new Promise(
+          (resolve) =>
+            setTimeout(
+              resolve,
+              retryDelayMs
+            )
+        );
+      }
+    }
+  }
+
+  return false;
 }
 
 // ============================================================
@@ -424,8 +596,11 @@ function buildMusicPanel({
 // MUSIC HELPERS
 // ============================================================
 
-function getMusicQueue(threadID) {
-  const id = String(threadID);
+function getMusicQueue(
+  threadID
+) {
+  const id =
+    String(threadID);
 
   let queue =
     musicQueues.get(id);
@@ -447,10 +622,16 @@ function getMusicStats() {
   let pendingJobs = 0;
   let activeJobs = 0;
 
-  for (const queue of musicQueues.values()) {
-    totalJobs += queue.length;
+  for (
+    const queue of
+      musicQueues.values()
+  ) {
+    totalJobs +=
+      queue.length;
 
-    for (const job of queue) {
+    for (
+      const job of queue
+    ) {
       if (
         job.status ===
         "pending"
@@ -484,7 +665,9 @@ function getMusicStats() {
   };
 }
 
-function removeMusicJob(job) {
+function removeMusicJob(
+  job
+) {
   if (!job) {
     return;
   }
@@ -508,14 +691,19 @@ function removeMusicJob(job) {
     );
   }
 
-  if (queue.length === 0) {
+  if (
+    queue.length ===
+    0
+  ) {
     musicQueues.delete(
       job.threadID
     );
   }
 }
 
-function removePendingMusicJob(job) {
+function removePendingMusicJob(
+  job
+) {
   const index =
     musicPendingJobs.indexOf(
       job
@@ -529,7 +717,9 @@ function removePendingMusicJob(job) {
   }
 }
 
-function getMusicQueuePosition(job) {
+function getMusicQueuePosition(
+  job
+) {
   const queue =
     musicQueues.get(
       job.threadID
@@ -549,7 +739,9 @@ function getMusicQueuePosition(job) {
   return index + 1;
 }
 
-function formatMusicBytes(bytes) {
+function formatMusicBytes(
+  bytes
+) {
   if (
     !Number.isFinite(bytes) ||
     bytes <= 0
@@ -598,7 +790,8 @@ function processMusicQueue() {
   while (
     activeMusicDownloads <
       MUSIC_MAX_GLOBAL_DOWNLOADS &&
-    musicPendingJobs.length > 0
+    musicPendingJobs.length >
+      0
   ) {
     const job =
       musicPendingJobs.shift();
@@ -617,21 +810,32 @@ function processMusicQueue() {
 
     activeMusicDownloads++;
 
-    void processMusicJob(
-      job
-    ).finally(() => {
-      activeMusicDownloads =
-        Math.max(
-          0,
-          activeMusicDownloads - 1
+    void processMusicJob(job)
+      .catch((error) => {
+        console.error(
+          `[Music] Unhandled job ${job.id} error:`,
+          error
+        );
+      })
+      .finally(() => {
+        activeMusicDownloads =
+          Math.max(
+            0,
+            activeMusicDownloads - 1
+          );
+
+        removePendingMusicJob(
+          job
         );
 
-      removeMusicJob(job);
+        removeMusicJob(
+          job
+        );
 
-      setImmediate(
-        processMusicQueue
-      );
-    });
+        setImmediate(
+          processMusicQueue
+        );
+      });
   }
 }
 
@@ -651,7 +855,9 @@ function processMusicQueue() {
 //
 // ============================================================
 
-async function processMusicJob(job) {
+async function processMusicJob(
+  job
+) {
   const {
     api,
     threadID,
@@ -697,20 +903,24 @@ async function processMusicJob(job) {
         threadID
       );
 
-    // ws3-fca normally exposes the message ID as messageID.
-    // The fallbacks make this safer across versions.
     statusMessageID =
-      statusMessage?.messageID ||
-      statusMessage?.messageId ||
-      statusMessage?.id ||
-      null;
+      getMessengerMessageID(
+        statusMessage
+      );
 
     job.statusMessageID =
       statusMessageID;
 
+    console.log(
+      `[Music] Job ${job.id}: initial status message ID = ${
+        statusMessageID ||
+        "MISSING"
+      }`
+    );
+
     if (!statusMessageID) {
       console.warn(
-        `[Music] Job ${job.id}: Messenger did not return a message ID.`
+        `[Music] Job ${job.id}: Messenger did not return a usable message ID.`
       );
     }
 
@@ -751,16 +961,13 @@ async function processMusicJob(job) {
           ""
       ).trim();
 
-    let duration =
+    const duration =
       String(
         video.duration ||
           video.timestamp ||
-          ""
-      ).trim();
-
-    if (!duration) {
-      duration = "--:--";
-    }
+          "--:--"
+      ).trim() ||
+      "--:--";
 
     job.title =
       title;
@@ -780,26 +987,19 @@ async function processMusicJob(job) {
     job.status =
       "processing";
 
-    if (statusMessageID) {
-      try {
-        await editMessengerMessage(
-          api,
-          buildMusicPanel({
-            title,
-            author,
-            duration,
-            state:
-              "processing",
-          }),
-          statusMessageID
-        );
-      } catch (editError) {
-        console.error(
-          `[Music] Failed to edit status to processing for job ${job.id}:`,
-          editError
-        );
-      }
-    }
+    await editMusicStatus(
+      api,
+      statusMessageID,
+      buildMusicPanel({
+        title,
+        author,
+        duration,
+        state:
+          "processing",
+      }),
+      job.id,
+      "PREPARING AUDIO"
+    );
 
     if (
       global.botDisabled === true
@@ -817,25 +1017,25 @@ async function processMusicJob(job) {
     job.status =
       "downloading";
 
-    if (statusMessageID) {
-      try {
-        await editMessengerMessage(
-          api,
-          buildMusicPanel({
-            title,
-            author,
-            duration,
-            state:
-              "downloading",
-          }),
-          statusMessageID
-        );
-      } catch (editError) {
-        console.error(
-          `[Music] Failed to edit status to downloading for job ${job.id}:`,
-          editError
-        );
-      }
+    await editMusicStatus(
+      api,
+      statusMessageID,
+      buildMusicPanel({
+        title,
+        author,
+        duration,
+        state:
+          "downloading",
+      }),
+      job.id,
+      "DOWNLOADING"
+    );
+
+    if (
+      global.botDisabled === true
+    ) {
+      job.cancelled = true;
+      return;
     }
 
     // ========================================================
@@ -864,7 +1064,14 @@ async function processMusicJob(job) {
       );
 
     if (
-      !fileInfo.isFile() ||
+      !fileInfo.isFile()
+    ) {
+      throw new Error(
+        "Downloaded audio is not a valid file."
+      );
+    }
+
+    if (
       fileInfo.size <= 0
     ) {
       throw new Error(
@@ -884,6 +1091,12 @@ async function processMusicJob(job) {
         )}.`
       );
     }
+
+    console.log(
+      `[Music] Job ${job.id}: verified ${formatMusicBytes(
+        fileInfo.size
+      )} audio file.`
+    );
 
     if (
       global.botDisabled === true
@@ -930,14 +1143,14 @@ async function processMusicJob(job) {
     );
 
     console.log(
-      `[Music] Sent "${title}" to ${threadID}`
+      `[Music] Job ${job.id}: sent actual song "${title}" to ${threadID}.`
     );
   } catch (error) {
     if (
       job.cancelled
     ) {
       console.log(
-        `[Music] Job ${job.id} cancelled.`
+        `[Music] Job ${job.id}: cancelled.`
       );
 
       return;
@@ -991,11 +1204,20 @@ async function processMusicJob(job) {
       if (
         statusMessageID
       ) {
-        await editMessengerMessage(
-          api,
-          failedPanel,
-          statusMessageID
-        );
+        const edited =
+          await editMusicStatus(
+            api,
+            statusMessageID,
+            failedPanel,
+            job.id,
+            "PLAYBACK FAILED"
+          );
+
+        if (!edited) {
+          console.warn(
+            `[Music] Job ${job.id}: could not edit original failure status. No duplicate failure message will be created.`
+          );
+        }
       } else {
         await sendMessengerMessage(
           api,
@@ -1005,7 +1227,7 @@ async function processMusicJob(job) {
       }
     } catch (sendError) {
       console.error(
-        "[Music] Failed to update error message:",
+        `[Music] Job ${job.id}: failed to display failure status:`,
         sendError
       );
     }
@@ -1890,7 +2112,9 @@ async function handleMessage(
           "୨୧ music",
           `    ♡ active downloads: ${
             music.activeDownloads
-          }/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
+          }/${
+            MUSIC_MAX_GLOBAL_DOWNLOADS
+          }`,
           `    ♡ pending: ${
             music.waitingGlobal
           }`,
@@ -3858,11 +4082,19 @@ function getRandomMemePath() {
 // ============================================================
 
 async function cleanupMusicFiles() {
-  const files = new Set();
+  const files =
+    new Set();
 
-  for (const queue of musicQueues.values()) {
-    for (const job of queue) {
-      if (job.temporaryFile) {
+  for (
+    const queue of
+      musicQueues.values()
+  ) {
+    for (
+      const job of queue
+    ) {
+      if (
+        job.temporaryFile
+      ) {
         files.add(
           job.temporaryFile
         );
@@ -3870,7 +4102,9 @@ async function cleanupMusicFiles() {
     }
   }
 
-  for (const file of files) {
+  for (
+    const file of files
+  ) {
     await fsp
       .unlink(file)
       .catch(() => {});
@@ -3900,7 +4134,8 @@ async function gracefulShutdown(
       true;
   }
 
-  musicPendingJobs.length = 0;
+  musicPendingJobs.length =
+    0;
 
   try {
     await cleanupMusicFiles();
