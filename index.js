@@ -132,9 +132,6 @@ const activeThreads = new Map();
 //
 // Globally:
 //   - maximum 2 simultaneous YouTube downloads
-//
-// This prevents multiple groups from spawning unlimited
-// downloads and exhausting Render memory / CPU / disk.
 // ============================================================
 
 const MUSIC_MAX_PER_GC = 2;
@@ -227,11 +224,6 @@ function withTimeout(
 // ============================================================
 // MESSENGER PROMISE WRAPPER
 // ============================================================
-//
-// General Messenger send wrapper.
-//
-// Music no longer depends on message IDs or editMessage().
-// ============================================================
 
 function sendMessengerMessage(
   api,
@@ -242,8 +234,7 @@ function sendMessengerMessage(
     try {
       if (
         !api ||
-        typeof api.sendMessage !==
-          "function"
+        typeof api.sendMessage !== "function"
       ) {
         reject(
           new Error(
@@ -278,20 +269,9 @@ function sendMessengerMessage(
 // MUSIC STATUS MESSAGE
 // ============================================================
 //
-// IMPORTANT:
-// Music deliberately does NOT use editMessage() anymore.
+// Music deliberately does NOT use editMessage().
 //
-// Every status is its own normal Messenger message:
-//
-// SEARCHING
-//      ↓
-// PREPARING AUDIO
-//      ↓
-// DOWNLOADING
-//      ↓
-// NOW PLAYING + AUDIO
-//
-// This prevents a failed edit from breaking the music flow.
+// Every status is its own normal Messenger message.
 // ============================================================
 
 function sendMusicStatusMessage(
@@ -302,8 +282,7 @@ function sendMusicStatusMessage(
   try {
     if (
       !api ||
-      typeof api.sendMessage !==
-        "function"
+      typeof api.sendMessage !== "function"
     ) {
       console.error(
         "[Music] Messenger sendMessage is unavailable."
@@ -336,20 +315,18 @@ function sendMusicStatusMessage(
 // MUSIC AUDIO SENDER
 // ============================================================
 //
-// Dedicated audio sender.
-//
-// It watches BOTH:
+// Watches:
 //   1. Messenger callback errors
 //   2. Read-stream errors
-//
-// It does not use editMessage() or depend on a status message.
+//   3. Job cancellation state
 // ============================================================
 
 function sendMusicAudio(
   api,
   filePath,
   body,
-  threadID
+  threadID,
+  job = null
 ) {
   return new Promise(
     (resolve, reject) => {
@@ -360,21 +337,19 @@ function sendMusicAudio(
         if (settled) return;
 
         settled = true;
+
         reject(
           error instanceof Error
             ? error
-            : new Error(
-                String(error)
-              )
+            : new Error(String(error))
         );
       };
 
-      const succeed = (
-        messageInfo
-      ) => {
+      const succeed = (messageInfo) => {
         if (settled) return;
 
         settled = true;
+
         resolve(
           messageInfo || null
         );
@@ -383,8 +358,7 @@ function sendMusicAudio(
       try {
         if (
           !api ||
-          typeof api.sendMessage !==
-            "function"
+          typeof api.sendMessage !== "function"
         ) {
           fail(
             new Error(
@@ -397,13 +371,21 @@ function sendMusicAudio(
 
         if (
           !filePath ||
-          !fs.existsSync(
-            filePath
-          )
+          !fs.existsSync(filePath)
         ) {
           fail(
             new Error(
               "Audio file no longer exists."
+            )
+          );
+
+          return;
+        }
+
+        if (job?.cancelled) {
+          fail(
+            new Error(
+              "Music request was cancelled."
             )
           );
 
@@ -415,6 +397,10 @@ function sendMusicAudio(
             filePath
           );
 
+        if (job) {
+          job.audioStream = stream;
+        }
+
         stream.once(
           "error",
           (streamError) => {
@@ -423,9 +409,7 @@ function sendMusicAudio(
               streamError
             );
 
-            fail(
-              streamError
-            );
+            fail(streamError);
           }
         );
 
@@ -441,10 +425,12 @@ function sendMusicAudio(
             messageInfo
           ) => {
             if (sendError) {
-              fail(
-                sendError
-              );
+              fail(sendError);
+              return;
+            }
 
+            if (job?.cancelled) {
+              succeed(null);
               return;
             }
 
@@ -613,7 +599,8 @@ function getMusicStats() {
       queue.length;
 
     for (
-      const job of queue
+      const job of
+      queue
     ) {
       if (
         job.status ===
@@ -628,7 +615,9 @@ function getMusicStats() {
         job.status ===
           "processing" ||
         job.status ===
-          "downloading"
+          "downloading" ||
+        job.status ===
+          "streaming"
       ) {
         activeJobs++;
       }
@@ -720,6 +709,205 @@ function getMusicQueuePosition(
   }
 
   return index + 1;
+}
+
+// ============================================================
+// MUSIC CANCELLATION HELPERS
+// ============================================================
+
+function markMusicJobCancelled(
+  job,
+  reason = "cancelled"
+) {
+  if (!job) {
+    return;
+  }
+
+  job.cancelled = true;
+  job.cancelReason = reason;
+  job.status = "cancelled";
+
+  if (
+    job.audioStream &&
+    typeof job.audioStream.destroy ===
+      "function"
+  ) {
+    try {
+      job.audioStream.destroy();
+    } catch (error) {
+      console.error(
+        `[Music] Failed to destroy audio stream for job ${job.id}:`,
+        error
+      );
+    }
+
+    job.audioStream = null;
+  }
+}
+
+function getMusicJobsForThread(
+  threadID
+) {
+  const queue =
+    musicQueues.get(
+      String(threadID)
+    );
+
+  if (!queue) {
+    return [];
+  }
+
+  return [...queue];
+}
+
+function cancelAllMusicForThread(
+  threadID,
+  reason = "stop"
+) {
+  const jobs =
+    getMusicJobsForThread(
+      threadID
+    );
+
+  let cancelledCount = 0;
+
+  for (
+    const job of jobs
+  ) {
+    if (!job.cancelled) {
+      markMusicJobCancelled(
+        job,
+        reason
+      );
+
+      removePendingMusicJob(
+        job
+      );
+
+      cancelledCount++;
+    }
+  }
+
+  const queue =
+    musicQueues.get(
+      String(threadID)
+    );
+
+  if (queue) {
+    queue.length = 0;
+  }
+
+  musicQueues.delete(
+    String(threadID)
+  );
+
+  return {
+    cancelledCount,
+  };
+}
+
+function clearQueuedMusicForThread(
+  threadID
+) {
+  const queue =
+    musicQueues.get(
+      String(threadID)
+    );
+
+  if (
+    !queue ||
+    queue.length === 0
+  ) {
+    return {
+      clearedCount: 0,
+    };
+  }
+
+  let clearedCount = 0;
+
+  for (
+    const job of [...queue]
+  ) {
+    if (
+      job.status ===
+      "pending"
+    ) {
+      markMusicJobCancelled(
+        job,
+        "clear"
+      );
+
+      removePendingMusicJob(
+        job
+      );
+
+      removeMusicJob(
+        job
+      );
+
+      clearedCount++;
+    }
+  }
+
+  return {
+    clearedCount,
+  };
+}
+
+function getActiveMusicJobsForThread(
+  threadID
+) {
+  const queue =
+    musicQueues.get(
+      String(threadID)
+    );
+
+  if (!queue) {
+    return [];
+  }
+
+  return queue.filter(
+    (job) =>
+      !job.cancelled &&
+      (
+        job.status === "searching" ||
+        job.status === "processing" ||
+        job.status === "downloading" ||
+        job.status === "streaming"
+      )
+  );
+}
+
+function skipCurrentMusicForThread(
+  threadID
+) {
+  const activeJobs =
+    getActiveMusicJobsForThread(
+      threadID
+    );
+
+  if (
+    activeJobs.length ===
+    0
+  ) {
+    return null;
+  }
+
+  activeJobs.sort(
+    (a, b) =>
+      (a.startedAt || a.createdAt) -
+      (b.startedAt || b.createdAt)
+  );
+
+  const job =
+    activeJobs[0];
+
+  markMusicJobCancelled(
+    job,
+    "skip"
+  );
+
+  return job;
 }
 
 function formatMusicBytes(
@@ -825,26 +1013,13 @@ function processMusicQueue() {
 // ============================================================
 // MUSIC JOB
 // ============================================================
-//
-// NEW FLOW:
-//
-// 1. SEND "SEARCHING YOUTUBE"
-// 2. SEARCH YOUTUBE
-// 3. SEND "PREPARING AUDIO"
-// 4. SEND "DOWNLOADING"
-// 5. DOWNLOAD
-// 6. VERIFY FILE
-// 7. SEND "NOW PLAYING" + ACTUAL AUDIO
-//
-// NO EDIT MESSAGE IS USED ANYWHERE.
-//
-// This means a Messenger edit failure can no longer prevent
-// the actual song from being delivered.
-// ============================================================
 
 async function processMusicJob(
   job
 ) {
+  job.startedAt =
+    Date.now();
+
   const {
     api,
     threadID,
@@ -861,20 +1036,18 @@ async function processMusicJob(
 
   try {
     if (
+      job.cancelled
+    ) {
+      return;
+    }
+
+    if (
       global.botDisabled === true ||
       global.botPaused === true
     ) {
-      job.cancelled = true;
-
-      sendMusicStatusMessage(
-        api,
-        buildMusicPanel({
-          title:
-            job.requestedSong,
-          state:
-            "cancelled",
-        }),
-        threadID
+      markMusicJobCancelled(
+        job,
+        "bot_paused"
       );
 
       return;
@@ -882,7 +1055,7 @@ async function processMusicJob(
 
     // ========================================================
     // STEP 1
-    // SEND SEARCHING STATUS
+    // SEARCHING
     // ========================================================
 
     job.status =
@@ -917,6 +1090,16 @@ async function processMusicJob(
         MUSIC_SEARCH_TIMEOUT_MS,
         "YouTube search timed out."
       );
+
+    if (
+      job.cancelled
+    ) {
+      console.log(
+        `[Music] Job ${job.id}: cancelled after YouTube search.`
+      );
+
+      return;
+    }
 
     if (
       !video ||
@@ -963,7 +1146,7 @@ async function processMusicJob(
 
     // ========================================================
     // STEP 3
-    // SEND PREPARING STATUS
+    // PREPARING
     // ========================================================
 
     job.status =
@@ -982,21 +1165,22 @@ async function processMusicJob(
     );
 
     if (
+      job.cancelled
+    ) {
+      console.log(
+        `[Music] Job ${job.id}: cancelled before processing.`
+      );
+
+      return;
+    }
+
+    if (
       global.botDisabled === true ||
       global.botPaused === true
     ) {
-      job.cancelled = true;
-
-      sendMusicStatusMessage(
-        api,
-        buildMusicPanel({
-          title,
-          author,
-          duration,
-          state:
-            "cancelled",
-        }),
-        threadID
+      markMusicJobCancelled(
+        job,
+        "bot_paused"
       );
 
       return;
@@ -1004,7 +1188,7 @@ async function processMusicJob(
 
     // ========================================================
     // STEP 4
-    // SEND DOWNLOADING STATUS
+    // DOWNLOADING
     // ========================================================
 
     job.status =
@@ -1027,21 +1211,22 @@ async function processMusicJob(
     );
 
     if (
+      job.cancelled
+    ) {
+      console.log(
+        `[Music] Job ${job.id}: cancelled before download.`
+      );
+
+      return;
+    }
+
+    if (
       global.botDisabled === true ||
       global.botPaused === true
     ) {
-      job.cancelled = true;
-
-      sendMusicStatusMessage(
-        api,
-        buildMusicPanel({
-          title,
-          author,
-          duration,
-          state:
-            "cancelled",
-        }),
-        threadID
+      markMusicJobCancelled(
+        job,
+        "bot_paused"
       );
 
       return;
@@ -1062,6 +1247,16 @@ async function processMusicJob(
       "YouTube audio download timed out."
     );
 
+    if (
+      job.cancelled
+    ) {
+      console.log(
+        `[Music] Job ${job.id}: cancelled after download.`
+      );
+
+      return;
+    }
+
     // ========================================================
     // STEP 6
     // VERIFY AUDIO
@@ -1071,6 +1266,16 @@ async function processMusicJob(
       await fsp.stat(
         temporaryFile
       );
+
+    if (
+      job.cancelled
+    ) {
+      console.log(
+        `[Music] Job ${job.id}: cancelled during file verification.`
+      );
+
+      return;
+    }
 
     if (
       !fileInfo.isFile()
@@ -1108,21 +1313,22 @@ async function processMusicJob(
     );
 
     if (
+      job.cancelled
+    ) {
+      console.log(
+        `[Music] Job ${job.id}: cancelled before audio send.`
+      );
+
+      return;
+    }
+
+    if (
       global.botDisabled === true ||
       global.botPaused === true
     ) {
-      job.cancelled = true;
-
-      sendMusicStatusMessage(
-        api,
-        buildMusicPanel({
-          title,
-          author,
-          duration,
-          state:
-            "cancelled",
-        }),
-        threadID
+      markMusicJobCancelled(
+        job,
+        "bot_paused"
       );
 
       return;
@@ -1149,17 +1355,34 @@ async function processMusicJob(
       `[Music] Job ${job.id}: sending actual audio to ${threadID}.`
     );
 
+    if (
+      job.cancelled
+    ) {
+      return;
+    }
+
     await withTimeout(
       () =>
         sendMusicAudio(
           api,
           temporaryFile,
           playerMessage,
-          threadID
+          threadID,
+          job
         ),
       MUSIC_SEND_TIMEOUT_MS,
       "Sending the audio to Messenger timed out."
     );
+
+    if (
+      job.cancelled
+    ) {
+      console.log(
+        `[Music] Job ${job.id}: cancelled during audio send.`
+      );
+
+      return;
+    }
 
     console.log(
       `[Music] Job ${job.id}: successfully sent "${title}" to ${threadID}.`
@@ -1195,11 +1418,6 @@ async function processMusicJob(
         );
     }
 
-    // ========================================================
-    // FAILURE
-    // SEND A NEW FAILURE MESSAGE
-    // ========================================================
-
     const failedPanel =
       buildMusicPanel({
         title:
@@ -1225,6 +1443,19 @@ async function processMusicJob(
       threadID
     );
   } finally {
+    if (
+      job.audioStream &&
+      typeof job.audioStream.destroy ===
+        "function"
+    ) {
+      try {
+        job.audioStream.destroy();
+      } catch {}
+    }
+
+    job.audioStream =
+      null;
+
     await fsp
       .unlink(
         temporaryFile
@@ -1294,11 +1525,20 @@ function enqueueMusic(
     createdAt:
       Date.now(),
 
+    startedAt:
+      null,
+
     temporaryFile:
+      null,
+
+    audioStream:
       null,
 
     cancelled:
       false,
+
+    cancelReason:
+      null,
   };
 
   queue.push(job);
@@ -1318,7 +1558,7 @@ function enqueueMusic(
 }
 
 // ============================================================
-// ADD MUSIC QUEUE AFTER PAUSE RESUMES
+// RESUME MUSIC
 // ============================================================
 
 function resumeMusicProcessing() {
@@ -2009,8 +2249,6 @@ async function handleMessage(
 
   // ==========================================================
   // PAUSE / RESUME / BOT CONTROL
-  // These MUST be checked before normal AI/training so that
-  // pause actually pauses normal message processing.
   // ==========================================================
 
   const pauseMatch =
@@ -2724,6 +2962,14 @@ async function handleMessage(
         "  Search YouTube + send audio.",
         "♡ !music status",
         "  Show the GC music queue.",
+        "♡ !music stop",
+        "  Stop all music in this GC.",
+        "♡ !music cancel",
+        "  Alias for !music stop.",
+        "♡ !music clear",
+        "  Clear waiting songs only.",
+        "♡ !music skip",
+        "  Skip the current music request.",
         "♡ Maximum 2 songs per GC.",
         "",
         "୨୧ BOT CONTROL",
@@ -2779,7 +3025,7 @@ async function handleMessage(
   }
 
   // ==========================================================
-  // MUSIC
+  // MUSIC PLAY
   // ==========================================================
 
   if (
@@ -2805,20 +3051,213 @@ async function handleMessage(
   }
 
   // ==========================================================
-  // MUSIC STATUS
+  // MUSIC CONTROL
   // ==========================================================
 
-  if (
-    /^!music\s+status$/i.test(
-      originalText
-    )
-  ) {
-    sendMusicStatus(
-      api,
-      threadID
+  const musicControlMatch =
+    originalText.match(
+      /^!music(?:\s+(status|stop|cancel|clear|skip))?$/i
     );
 
-    return;
+  if (musicControlMatch) {
+    const musicAction =
+      (
+        musicControlMatch[1] ||
+        "status"
+      ).toLowerCase();
+
+    // --------------------------------------------------------
+    // STATUS
+    // --------------------------------------------------------
+
+    if (
+      musicAction ===
+      "status"
+    ) {
+      sendMusicStatus(
+        api,
+        threadID
+      );
+
+      return;
+    }
+
+    // --------------------------------------------------------
+    // STOP / CANCEL
+    // --------------------------------------------------------
+
+    if (
+      musicAction === "stop" ||
+      musicAction === "cancel"
+    ) {
+      const result =
+        cancelAllMusicForThread(
+          threadID,
+          musicAction
+        );
+
+      if (
+        result.cancelledCount ===
+        0
+      ) {
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
+            "",
+            "♡ NOTHING TO CANCEL",
+            "",
+            "This GC has no active or queued music.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      sendMusicStatusMessage(
+        api,
+        [
+          "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
+          "",
+          "🔴 MUSIC STOPPED",
+          "",
+          `୨୧ cancelled: ${result.cancelledCount}`,
+          "୨୧ active + pending requests cleared",
+          "",
+          "♡ no cancelled song will be sent.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      setImmediate(
+        processMusicQueue
+      );
+
+      return;
+    }
+
+    // --------------------------------------------------------
+    // CLEAR QUEUE
+    // --------------------------------------------------------
+
+    if (
+      musicAction ===
+      "clear"
+    ) {
+      const result =
+        clearQueuedMusicForThread(
+          threadID
+        );
+
+      if (
+        result.clearedCount ===
+        0
+      ) {
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  MUSIC QUEUE  🎀 ──────╮",
+            "",
+            "♡ NO WAITING SONGS",
+            "",
+            "There are no pending songs to clear.",
+            "",
+            "♡ The current song, if any, was left alone.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      sendMusicStatusMessage(
+        api,
+        [
+          "╭────── 🎀  MUSIC QUEUE  🎀 ──────╮",
+          "",
+          "🟢 QUEUE CLEARED",
+          "",
+          `୨୧ removed: ${result.clearedCount}`,
+          "",
+          "♡ the current active song was left alone.",
+          "♡ only waiting songs were removed.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      setImmediate(
+        processMusicQueue
+      );
+
+      return;
+    }
+
+    // --------------------------------------------------------
+    // SKIP CURRENT SONG
+    // --------------------------------------------------------
+
+    if (
+      musicAction ===
+      "skip"
+    ) {
+      const skippedJob =
+        skipCurrentMusicForThread(
+          threadID
+        );
+
+      if (!skippedJob) {
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
+            "",
+            "♡ NOTHING IS PLAYING",
+            "",
+            "There is no active music request to skip.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      sendMusicStatusMessage(
+        api,
+        [
+          "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
+          "",
+          "⏭️ MUSIC SKIPPED",
+          "",
+          `୨୧ ${(
+            skippedJob.title ||
+            skippedJob.requestedSong ||
+            "Current song"
+          ).slice(0, 100)}`,
+          "",
+          "♡ moving to the next request if available.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      setImmediate(
+        processMusicQueue
+      );
+
+      return;
+    }
   }
 
   // ==========================================================
@@ -4114,11 +4553,19 @@ async function gracefulShutdown(
     `[SYSTEM] Received ${signal}. Cleaning up ECLIPSE...`
   );
 
+  // Cancel every known music job, including active jobs.
   for (
-    const job of musicPendingJobs
+    const queue of
+      musicQueues.values()
   ) {
-    job.cancelled =
-      true;
+    for (
+      const job of queue
+    ) {
+      markMusicJobCancelled(
+        job,
+        "shutdown"
+      );
+    }
   }
 
   musicPendingJobs.length =
