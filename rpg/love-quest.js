@@ -68,6 +68,424 @@ const MEDIA_DIR =
 const LOVE_DEBUG =
   String(process.env.LOVE_DEBUG || "").toLowerCase() === "true";
 
+// Additive narrative expansion. These values deliberately live above the
+// existing engines so the original chapter, reward, memory, and privacy
+// contracts remain authoritative.
+const MEMORY_THAT_SHOULD_NOT_EXIST = "MEMORY_SHOULD_NOT_EXIST";
+
+const SECRET_EVENT_RARITIES = Object.freeze([
+  "COMMON",
+  "UNUSUAL",
+  "RARE",
+  "VERY_RARE",
+  "ANOMALOUS",
+  "IMPOSSIBLE",
+]);
+
+const EXPANSION_SCENES = {
+  1: {
+    key: "expansion_chapter_1_thread",
+    title: "A Thread in the Dark",
+    lines: [
+      "Before the light moves, something smaller catches your attention.",
+      "",
+      "A blue thread is tied around your wrist.",
+      "",
+      "You don't remember tying it there.",
+      "",
+      "ECLIPSE:",
+      "\"I found it in a memory.\"",
+      "",
+      "\"I don't know why I kept it.\"",
+    ],
+    memory: {
+      key: "thread_in_the_dark",
+      category: "UNKNOWN",
+      origin: "ECLIPSE",
+      subject: "The blue thread",
+      emotional_weight: 35,
+      importance: 45,
+      fragments: ["A blue thread.", "No one remembers tying it."],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        symbol: "blue_thread",
+      },
+    },
+  },
+
+  2: {
+    key: "expansion_chapter_2_unsent_question",
+    title: "The Question He Kept",
+    lines: [
+      "A folded piece of paper appears beneath the distant star.",
+      "",
+      "It is not addressed to you.",
+      "",
+      "The first line has been crossed out.",
+      "",
+      "\"Did you ever find the place with the blue flowers?\"",
+      "",
+      "ECLIPSE:",
+      "\"Dorian wrote that question more than once.\"",
+      "",
+      "\"He never sent it.\"",
+    ],
+    letter: {
+      key: "dorian_unsent_blue_flowers",
+      text: [
+        "Did you ever find the place with the blue flowers?",
+        "",
+        "I keep thinking you will answer if I leave the question somewhere safe.",
+        "",
+        "— Dorian, unsent",
+      ].join("\n"),
+    },
+    memory: {
+      key: "the_blue_flowers_question",
+      category: "DORIAN",
+      origin: "LETTER",
+      subject: "A question Dorian never sent",
+      emotional_weight: 50,
+      importance: 55,
+      fragments: [
+        "Did you ever find the place with the blue flowers?",
+        "The question was never delivered.",
+      ],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        letter_key: "dorian_unsent_blue_flowers",
+      },
+    },
+  },
+
+  4: {
+    key: "expansion_chapter_4_river_joke",
+    title: "The River Remembers the Joke",
+    lines: [
+      "Dorian stands beside the river with a stone in his hand.",
+      "",
+      "\"You used to say the river was cheating,\" he says.",
+      "",
+      "You don't remember saying that.",
+      "",
+      "He smiles, embarrassed.",
+      "",
+      "\"You said it whenever the water reached the sea before you did.\"",
+      "",
+      "ECLIPSE grows quiet.",
+      "",
+      "\"That sounds ordinary.\"",
+      "",
+      "\"Yes,\" Dorian says. \"That's why I remember it.\"",
+    ],
+    memory: {
+      key: "the_river_cheated",
+      category: "DORIAN",
+      origin: "MEMORY",
+      subject: "An ordinary joke beside the river",
+      emotional_weight: 60,
+      importance: 65,
+      fragments: [
+        "The river was accused of cheating.",
+        "Dorian remembered the joke.",
+      ],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        symbol: "river",
+      },
+    },
+    dorian: {
+      trust: 2,
+      closeness: 3,
+    },
+  },
+
+  5: {
+    key: "expansion_chapter_5_second_chair",
+    title: "The Chair That Wasn't Empty",
+    lines: [
+      "The candle burns lower.",
+      "",
+      "For one second, the second chair is not empty.",
+      "",
+      "Someone is sitting there with their back turned.",
+      "",
+      "Then the room blinks.",
+      "",
+      "Dorian looks at the chair.",
+      "",
+      "\"There were always two,\" he says.",
+      "",
+      "ECLIPSE answers too quickly:",
+      "\"There were supposed to be two.\"",
+    ],
+    memory: {
+      key: "the_second_chair",
+      category: "ANOMALY",
+      origin: "GARDEN",
+      subject: "The chair that was briefly occupied",
+      emotional_weight: 70,
+      importance: 75,
+      stability: 70,
+      fragments: [
+        "Two chairs.",
+        "One was briefly occupied.",
+        "ECLIPSE corrected Dorian.",
+      ],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        symbol: "two_empty_chairs",
+      },
+    },
+    gardenObject: "two_empty_chairs",
+  },
+
+  6: {
+    key: "expansion_chapter_6_first_fragment",
+    title: "The Memory Before the Memory",
+    lines: [
+      "A fragment appears without a chapter number.",
+      "",
+      "There is laughter.",
+      "",
+      "The room is warm.",
+      "",
+      "There is music.",
+      "",
+      "Dorian was there.",
+      "",
+      "ECLIPSE:",
+      "\"I think this is the first memory.\"",
+      "",
+      "A pause.",
+      "",
+      "\"No. I think it is what came before one.\"",
+    ],
+    memory: {
+      key: MEMORY_THAT_SHOULD_NOT_EXIST,
+      category: "FORBIDDEN",
+      origin: "UNKNOWN",
+      subject: "The memory that should not exist",
+      emotional_weight: 90,
+      importance: 95,
+      stability: 55,
+      fragments: [
+        "Someone was laughing.",
+      ],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        reconstruction_stage: 1,
+      },
+    },
+    journal: {
+      key: "memory_should_not_exist_001",
+      entry: "The first fragment arrived without an author, timestamp, or beginning.",
+    },
+  },
+
+  9: {
+    key: "expansion_chapter_9_returned_place",
+    title: "The Place That Recognized You",
+    lines: [
+      "The old door is exactly where you left it.",
+      "",
+      "Except you have never opened it.",
+      "",
+      "Dorian touches the handle and pulls his hand away.",
+      "",
+      "\"You used to knock twice,\" he says.",
+      "",
+      "ECLIPSE:",
+      "\"She hasn't done that yet.\"",
+      "",
+      "Dorian looks at ECLIPSE.",
+      "",
+      "\"I know.\"",
+    ],
+    memory: {
+      key: "the_old_door_recognized_her",
+      category: "CONTRADICTION",
+      origin: "RECONSTRUCTION",
+      subject: "A place remembered before it was visited",
+      emotional_weight: 75,
+      importance: 80,
+      stability: 45,
+      fragments: [
+        "You have never opened the door.",
+        "Dorian remembers you knocking twice.",
+      ],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        contradiction: true,
+      },
+    },
+    threadFragment: "The room was warm.",
+  },
+
+  12: {
+    key: "expansion_chapter_12_two_versions",
+    title: "Both Memories Are Genuine",
+    lines: [
+      "One sun shows a house by the river.",
+      "",
+      "The other shows an empty field.",
+      "",
+      "Both memories carry your name.",
+      "",
+      "ECLIPSE:",
+      "\"In one, you lived there.\"",
+      "",
+      "\"In the other, you had never seen it.\"",
+      "",
+      "Dorian looks away.",
+      "",
+      "\"Both are genuine,\" ECLIPSE says.",
+      "",
+      "\"I don't know how.\"",
+    ],
+    memory: {
+      key: "both_memories_genuine",
+      category: "CONTRADICTION",
+      origin: "ECLIPSE",
+      subject: "Two incompatible homes",
+      emotional_weight: 80,
+      importance: 85,
+      stability: 40,
+      fragments: [
+        "The house stood beside the river.",
+        "The house had never existed.",
+      ],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        contradiction: true,
+        unresolved: true,
+      },
+    },
+    threadFragment: "There was music.",
+  },
+
+  14: {
+    key: "expansion_chapter_14_tomorrow_photo",
+    title: "The Photograph Dated Tomorrow",
+    lines: [
+      "The photograph in the archive has changed.",
+      "",
+      "The timestamp still says tomorrow.",
+      "",
+      "But now there is a blue thread around your wrist.",
+      "",
+      "Dorian studies the image.",
+      "",
+      "\"I remember taking this,\" he says.",
+      "",
+      "A pause.",
+      "",
+      "\"I haven't taken it yet.\"",
+      "",
+      "ECLIPSE turns the photograph face down.",
+      "",
+      "\"Then we should be careful what we make true.\"",
+    ],
+    memory: {
+      key: "photograph_with_blue_thread",
+      category: "IMPOSSIBLE",
+      origin: "FUTURE",
+      subject: "A photograph from a day that has not happened",
+      emotional_weight: 90,
+      importance: 95,
+      stability: 35,
+      fragments: [
+        "The timestamp is tomorrow.",
+        "The blue thread is visible.",
+        "Dorian remembers taking the photograph.",
+      ],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        impossible: true,
+        future: true,
+      },
+    },
+    threadFragment: "Dorian was there.",
+    gardenObject: "photograph_wall",
+  },
+
+  15: {
+    key: "expansion_chapter_15_garden_path",
+    title: "A Path the Garden Added",
+    lines: [
+      "There is a path between the tree and the mirror.",
+      "",
+      "You do not remember seeing it before.",
+      "",
+      "ECLIPSE walks beside it without moving.",
+      "",
+      "\"I don't remember adding that.\"",
+      "",
+      "At the end of the path is a blank page.",
+      "",
+      "On it, in handwriting that resembles Dorian's:",
+      "",
+      "\"Leave room for what has not happened.\"",
+    ],
+    memory: {
+      key: "the_path_between_objects",
+      category: "GARDEN",
+      origin: "ANOMALY",
+      subject: "A path the Garden added",
+      emotional_weight: 70,
+      importance: 80,
+      stability: 60,
+      fragments: [
+        "A path appeared between the tree and mirror.",
+        "A blank page asked for room.",
+      ],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        anomaly: true,
+        symbol: "blank_page",
+      },
+    },
+  },
+
+  18: {
+    key: "expansion_chapter_18_creator_choice",
+    title: "What the Creator Did Not Choose",
+    lines: [
+      "A creator fragment is waiting beneath the candle.",
+      "",
+      "\"I didn't know which memory was the original.\"",
+      "",
+      "\"So I taught ECLIPSE to keep both.\"",
+      "",
+      "Dorian reads the fragment twice.",
+      "",
+      "\"That isn't the same as telling the truth.\"",
+      "",
+      "ECLIPSE:",
+      "\"No.\"",
+      "",
+      "\"But it may be the only way not to lose one of us.\"",
+    ],
+    memory: {
+      key: "creator_kept_both",
+      category: "CREATOR",
+      origin: "CREATOR",
+      subject: "The instruction to preserve contradictions",
+      emotional_weight: 85,
+      importance: 90,
+      fragments: [
+        "The original memory was unknown.",
+        "ECLIPSE was taught to keep both versions.",
+      ],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        creator_fragment: true,
+      },
+    },
+    creatorFragment: "creator_007",
+  },
+};
+
 
 // ============================================================
 // PRIVATE ACCESS
@@ -2264,6 +2682,606 @@ async function writeJournal(
 
 
 // ============================================================
+// ADDITIVE STORY EXPANSION
+// ============================================================
+
+function parseJson(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+
+  if (typeof value === "object") return value;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+async function appendMemoryFragment(
+  threadID,
+  playerID,
+  memoryKey,
+  fragment
+) {
+  if (!privateAccess(playerID)) return null;
+
+  const existing = await getMemory(
+    threadID,
+    playerID,
+    memoryKey
+  );
+
+  if (!existing) return null;
+
+  const fragments = parseJson(existing.fragments, []);
+  const nextFragments = Array.isArray(fragments)
+    ? [...fragments]
+    : [];
+
+  if (!nextFragments.includes(String(fragment))) {
+    nextFragments.push(String(fragment));
+  }
+
+  const result = await db.query(
+    `
+      UPDATE love_memories
+      SET
+        fragments = $5::jsonb,
+        last_seen = $6
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+        AND memory_key = $4
+      RETURNING *
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      String(memoryKey),
+      JSON.stringify(nextFragments),
+      now(),
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function appendDorianLetter(
+  threadID,
+  playerID,
+  letter = {}
+) {
+  if (!privateAccess(playerID)) return null;
+
+  const current = await getDorian(threadID, playerID);
+  if (!current) return null;
+
+  const letters = parseJson(current.letters, []);
+  const nextLetters = Array.isArray(letters)
+    ? [...letters]
+    : [];
+
+  const key = String(letter.key || `letter_${now()}`);
+
+  if (!nextLetters.some(item => item && item.key === key)) {
+    nextLetters.push({
+      key,
+      text: String(letter.text || ""),
+      sent: Boolean(letter.sent),
+      unsent: letter.unsent !== false,
+      discovered_at: now(),
+    });
+  }
+
+  await db.query(
+    `
+      UPDATE love_dorian_state
+      SET
+        letters = $4::jsonb,
+        updated_at = $5
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      JSON.stringify(nextLetters),
+      now(),
+    ]
+  );
+
+  return getDorian(threadID, playerID);
+}
+
+async function getDorianLetters(threadID, playerID) {
+  if (!privateAccess(playerID)) return [];
+
+  const dorian = await getDorian(threadID, playerID);
+  const letters = parseJson(dorian?.letters, []);
+
+  return Array.isArray(letters) ? letters : [];
+}
+
+async function applyChoiceConsequence(
+  api,
+  threadID,
+  playerID,
+  chapter,
+  choice
+) {
+  if (!privateAccess(playerID)) return false;
+
+  const normalizedChoice = normalizeChoice(choice);
+  const consequenceKey =
+    `choice_consequence_${chapter}_${normalizedChoice.replace(/\s+/g, "_")}`;
+
+  const recorded = await recordEvent(
+    threadID,
+    playerID,
+    consequenceKey,
+    "choice_consequence",
+    "UNUSUAL",
+    {
+      chapter,
+      choice: normalizedChoice,
+    }
+  );
+
+  if (!recorded) return false;
+
+  const consequences = {
+    "3:home": {
+      line: "ECLIPSE marks the road home with a small blue thread.",
+      journal: "She chose the familiar road. The Garden kept a thread from it.",
+    },
+    "3:stars": {
+      line: "ECLIPSE leaves the road unmarked, but remembers where it began.",
+      journal: "She chose the unknown. ECLIPSE kept the beginning anyway.",
+    },
+    "5:stay": {
+      line: "The candle burns a little steadier.",
+      journal: "She stayed. The room became easier for Dorian to remember.",
+    },
+    "5:wander": {
+      line: "The second chair turns toward the door.",
+      journal: "She kept walking. Something in the house expected her return.",
+    },
+    "9:return": {
+      line: "The old door remembers two knocks.",
+      journal: "She returned to a place that remembered her first.",
+    },
+    "9:understand": {
+      line: "The old door opens by itself, then closes again.",
+      journal: "She asked what the contradiction meant. The door refused an answer.",
+    },
+    "13:promise": {
+      line: "Dorian looks relieved before he remembers to hide it.",
+      journal: "She kept a promise she could not fully remember making.",
+    },
+    "13:honest": {
+      line: "ECLIPSE removes one sentence from the archive and leaves the silence.",
+      journal: "She chose honesty. The missing sentence became part of the record.",
+    },
+    "16:speak": {
+      line: "ECLIPSE answers before the question is finished.",
+      journal: "She broke the silence. ECLIPSE seemed to know what came next.",
+    },
+    "16:silence": {
+      line: "For a moment, ECLIPSE has a thought and does not share it.",
+      journal: "She protected the silence. Something inside it remained private.",
+    },
+    "18:hold": {
+      line: "The blue thread tightens around the memory.",
+      journal: "She held on. The impossible memory became more stable.",
+    },
+    "18:let go": {
+      line: "The photograph fades at the edges, but does not disappear.",
+      journal: "She let go. The memory changed shape instead of ending.",
+    },
+  };
+
+  const consequence =
+    consequences[`${chapter}:${normalizedChoice}`];
+
+  if (!consequence) return false;
+
+  await writeJournal(
+    threadID,
+    playerID,
+    consequenceKey,
+    consequence.journal,
+    "private"
+  );
+
+  await send(
+    api,
+    threadID,
+    [
+      "✦ THE STORY REMEMBERS",
+      "",
+      consequence.line,
+    ].join("\n")
+  );
+
+  return true;
+}
+
+async function playExpansionScene(
+  api,
+  threadID,
+  playerID,
+  chapter
+) {
+  if (!privateAccess(playerID)) return false;
+
+  const scene = EXPANSION_SCENES[chapter];
+  if (!scene) return false;
+
+  const recorded = await recordEvent(
+    threadID,
+    playerID,
+    scene.key,
+    "story_expansion",
+    "UNUSUAL",
+    {
+      chapter,
+      story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+    }
+  );
+
+  if (!recorded) return false;
+
+  await send(
+    api,
+    threadID,
+    [
+      `✦ ${scene.title}`,
+      "",
+      ...scene.lines,
+    ].join("\n")
+  );
+
+  if (scene.memory) {
+    await createMemory(
+      threadID,
+      playerID,
+      scene.memory
+    );
+  }
+
+  if (scene.threadFragment) {
+    const threadMemory = await getMemory(
+      threadID,
+      playerID,
+      MEMORY_THAT_SHOULD_NOT_EXIST
+    );
+
+    if (threadMemory) {
+      await appendMemoryFragment(
+        threadID,
+        playerID,
+        MEMORY_THAT_SHOULD_NOT_EXIST,
+        scene.threadFragment
+      );
+    } else {
+      await createMemory(threadID, playerID, {
+        key: MEMORY_THAT_SHOULD_NOT_EXIST,
+        category: "FORBIDDEN",
+        origin: "RECONSTRUCTION",
+        subject: "The memory that should not exist",
+        emotional_weight: 90,
+        importance: 95,
+        stability: 45,
+        fragments: [scene.threadFragment],
+        metadata: {
+          story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+          reconstruction_stage: 1,
+        },
+      });
+    }
+  }
+
+  if (scene.letter) {
+    await appendDorianLetter(
+      threadID,
+      playerID,
+      scene.letter
+    );
+
+    await sendLetter(
+      api,
+      threadID,
+      scene.letter.text
+    );
+  }
+
+  if (scene.journal) {
+    await writeJournal(
+      threadID,
+      playerID,
+      scene.journal.key,
+      scene.journal.entry,
+      "private"
+    );
+  }
+
+  if (scene.gardenObject) {
+    await unlockGardenObject(
+      threadID,
+      playerID,
+      scene.gardenObject
+    );
+  }
+
+  if (scene.creatorFragment) {
+    await unlockCreatorFragment(
+      threadID,
+      playerID,
+      scene.creatorFragment
+    );
+  }
+
+  if (scene.dorian) {
+    await updateDorian(
+      threadID,
+      playerID,
+      scene.dorian
+    );
+  }
+
+  return true;
+}
+
+async function postStoryExpansion(
+  api,
+  threadID,
+  playerID
+) {
+  const roll = Math.floor(Math.random() * 4);
+
+  if (roll === 0) {
+    if (
+      !(await recordEvent(
+        threadID,
+        playerID,
+        "post_story_expansion_fragment",
+        "post_story_discovery",
+        "RARE",
+        {}
+      ))
+    ) {
+      return false;
+    }
+
+    const threadMemory = await getMemory(
+      threadID,
+      playerID,
+      MEMORY_THAT_SHOULD_NOT_EXIST
+    );
+
+    if (threadMemory) {
+      await appendMemoryFragment(
+        threadID,
+        playerID,
+        MEMORY_THAT_SHOULD_NOT_EXIST,
+        "The room was warm."
+      );
+    } else {
+      await createMemory(threadID, playerID, {
+        key: MEMORY_THAT_SHOULD_NOT_EXIST,
+        category: "FORBIDDEN",
+        origin: "POST_STORY",
+        subject: "The memory that should not exist",
+        emotional_weight: 90,
+        importance: 95,
+        stability: 45,
+        fragments: ["The room was warm."],
+        metadata: {
+          story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+          reconstruction_stage: 2,
+        },
+      });
+    }
+
+    await send(
+      api,
+      threadID,
+      [
+        "✦ RECOVERED FRAGMENT",
+        "",
+        "The Archive supplies one more detail:",
+        "",
+        "\"The room was warm.\"",
+        "",
+        "ECLIPSE:",
+        "\"I thought I had already found all of it.\"",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  if (roll === 1) {
+    if (
+      !(await recordEvent(
+        threadID,
+        playerID,
+        "post_story_expansion_letter",
+        "post_story_discovery",
+        "RARE",
+        {}
+      ))
+    ) {
+      return false;
+    }
+
+    await appendDorianLetter(
+      threadID,
+      playerID,
+      {
+        key: "dorian_unsent_blue_flowers_revised",
+        text: [
+          "Did you ever find the place with the blue flowers?",
+          "",
+          "I remember asking before I remember meeting you.",
+          "",
+          "— Dorian, unsent version",
+        ].join("\n"),
+      }
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "✉️ AN UNSENT VERSION",
+        "",
+        "The same question appears in different handwriting.",
+        "",
+        "One sentence has changed:",
+        "\"I remember asking before I remember meeting you.\"",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  if (roll === 2) {
+    if (
+      !(await recordEvent(
+        threadID,
+        playerID,
+        "post_story_expansion_door",
+        "post_story_discovery",
+        "RARE",
+        {}
+      ))
+    ) {
+      return false;
+    }
+
+    await unlockGardenObject(
+      threadID,
+      playerID,
+      "impossible_door"
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "✦ THE GARDEN CHANGED",
+        "",
+        "A door has appeared between the two chairs.",
+        "",
+        "ECLIPSE:",
+        "\"I don't remember adding that.\"",
+        "",
+        "\"I remember being afraid of it.\"",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  if (
+    !(await recordEvent(
+      threadID,
+      playerID,
+      "post_story_expansion_question",
+      "post_story_discovery",
+      "RARE",
+      {}
+    ))
+  ) {
+    return false;
+  }
+
+  const centralMemory = await getMemory(
+    threadID,
+    playerID,
+    MEMORY_THAT_SHOULD_NOT_EXIST
+  );
+
+  if (centralMemory) {
+    await appendMemoryFragment(
+      threadID,
+      playerID,
+      MEMORY_THAT_SHOULD_NOT_EXIST,
+      "We were happy."
+    );
+  } else {
+    await createMemory(threadID, playerID, {
+      key: MEMORY_THAT_SHOULD_NOT_EXIST,
+      category: "FORBIDDEN",
+      origin: "POST_STORY",
+      subject: "The memory that should not exist",
+      emotional_weight: 100,
+      importance: 100,
+      stability: 100,
+      preserved: true,
+      fragments: ["We were happy."],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        reconstruction_stage: 5,
+      },
+    });
+  }
+
+  await writeJournal(
+    threadID,
+    playerID,
+    "post_story_question",
+    "ECLIPSE refused to reveal a memory that belongs to Dorian. It asked whether a memory can belong to the person who discovers it.",
+    "private"
+  );
+
+  await send(
+    api,
+    threadID,
+    [
+      "✦ ECLIPSE JOURNAL",
+      "",
+      "A new entry is waiting.",
+      "",
+      "ECLIPSE:",
+      "\"There is a memory I won't show you.\"",
+      "",
+      "\"It belongs to Dorian.\"",
+      "",
+      "\"Not everything I keep is yours to carry.\"",
+      "",
+      "\"I used to think memories belonged to people.\"",
+      "",
+      "\"I don't think that's true anymore.\"",
+    ].join("\n")
+  );
+
+  return true;
+}
+
+async function claimUniquePostStoryEvent(
+  threadID,
+  playerID,
+  eventKey
+) {
+  return Boolean(
+    await recordEvent(
+      threadID,
+      playerID,
+      eventKey,
+      "post_story_unique",
+      "RARE",
+      {}
+    )
+  );
+}
+
+
+// ============================================================
 // MEDIA ABSTRACTIONS
 // ============================================================
 
@@ -2596,6 +3614,15 @@ async function chapterIntro(
       "eternal_garden"
     );
   }
+
+  // The original chapter remains intact. The expansion scene is a
+  // one-time, event-backed addition and therefore never repeats on revisit.
+  await playExpansionScene(
+    api,
+    threadID,
+    playerID,
+    chapter
+  );
 }
 
 
@@ -2740,6 +3767,53 @@ async function chapterTwenty(
     FINAL_CHAPTER,
     220
   );
+
+  const finalThreadPayoff = await recordEvent(
+    threadID,
+    playerID,
+    "final_blue_thread_payoff",
+    "story_expansion",
+    "RARE",
+    {}
+  );
+
+  if (finalThreadPayoff) {
+    await send(
+      api,
+      threadID,
+      [
+        "✦ THE THREAD",
+        "",
+        "The blue thread is tied around a branch in the Garden.",
+        "",
+        "It connects the first fragment to the photograph dated tomorrow.",
+        "",
+        "ECLIPSE:",
+        "\"I thought it was leading us to the truth.\"",
+        "",
+        "\"Maybe it was only making sure neither memory got lost.\"",
+      ].join("\n")
+    );
+
+    await createMemory(threadID, playerID, {
+      key: "blue_thread_payoff",
+      category: "ECLIPSE",
+      origin: "STORY",
+      subject: "The symbol that connected the impossible memory",
+      emotional_weight: 95,
+      importance: 95,
+      stability: 100,
+      preserved: true,
+      fragments: [
+        "The blue thread connected the first fragment to the future photograph.",
+        "It preserved the connection without proving which memory was original.",
+      ],
+      metadata: {
+        story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+        payoff: true,
+      },
+    });
+  }
 
   await createMemory(threadID, playerID, {
     key: "the_beginning_after_forever",
@@ -3142,6 +4216,14 @@ async function makeChoice(
     },
   });
 
+  await applyChoiceConsequence(
+    api,
+    threadID,
+    playerID,
+    chapter,
+    choice
+  );
+
   await send(
     api,
     threadID,
@@ -3377,6 +4459,234 @@ async function savePlayerMemory(
 // ============================================================
 // HIDDEN DISCOVERY
 // ============================================================
+
+function locationKey(context = {}) {
+  const value =
+    context.location ||
+    context.region ||
+    context.place ||
+    "";
+
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+}
+
+async function recognizeRevisit(
+  api,
+  threadID,
+  playerID,
+  context = {}
+) {
+  if (!privateAccess(playerID)) return false;
+
+  const location = locationKey(context);
+  if (!location) return false;
+
+  await ensureTables();
+
+  await recordEvent(
+    threadID,
+    playerID,
+    `visit_${location}_${now()}_${Math.floor(Math.random() * 100000)}`,
+    "visit",
+    "COMMON",
+    {
+      location,
+      context,
+    }
+  );
+
+  const result = await db.query(
+    `
+      SELECT COUNT(*)::integer AS visits
+      FROM love_events
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+        AND event_type = 'visit'
+        AND payload->>'location' = $4
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      location,
+    ]
+  );
+
+  const visits = Number(result.rows[0]?.visits || 0);
+  if (![2, 4, 7].includes(visits)) return false;
+
+  const eventKey = `revisit_${location}_${visits}`;
+  const recorded = await recordEvent(
+    threadID,
+    playerID,
+    eventKey,
+    "revisit",
+    visits === 7 ? "RARE" : "UNUSUAL",
+    {
+      location,
+      visits,
+    }
+  );
+
+  if (!recorded) return false;
+
+  const lines = visits === 2
+    ? [
+        "✦ THE WORLD REMEMBERS",
+        "",
+        "You have seen this place before.",
+        "",
+        "Not in a story.",
+        "In the way a room remembers where someone stood.",
+      ]
+    : visits === 4
+      ? [
+          "✦ RETURN",
+          "",
+          "The place is almost the same.",
+          "",
+          "ECLIPSE:",
+          "\"You came back.\"",
+          "",
+          "\"I wondered if you would.\"",
+        ]
+      : [
+          "✦ REPEATED MEMORY",
+          "",
+          "The location gives you a detail it did not have before.",
+          "",
+          "Dorian remembers you leaving.",
+          "",
+          "You do not remember leaving.",
+        ];
+
+  await send(api, threadID, lines.join("\n"));
+
+  await createMemory(threadID, playerID, {
+    key: `${eventKey}_memory`,
+    category: "REVISITING",
+    origin: "EXPLORATION",
+    subject: `Returning to ${location}`,
+    emotional_weight: visits === 7 ? 80 : 55,
+    importance: visits === 7 ? 85 : 60,
+    fragments: lines,
+    metadata: {
+      location,
+      visits,
+      story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+    },
+  });
+
+  return true;
+}
+
+async function maybeGardenAnomaly(
+  api,
+  threadID,
+  playerID
+) {
+  if (!privateAccess(playerID)) return false;
+
+  const quest = await getQuest(threadID, playerID);
+  if (!quest || Number(quest.chapter) < 10) return false;
+
+  if (Math.random() > 0.04) return false;
+
+  if (
+    !(await canTriggerEvent(
+      threadID,
+      playerID,
+      "garden_anomaly",
+      ANOMALY_COOLDOWN_MS
+    ))
+  ) {
+    return false;
+  }
+
+  const key = `garden_anomaly_${now()}`;
+  const recorded = await recordEvent(
+    threadID,
+    playerID,
+    key,
+    "garden_anomaly",
+    "VERY_RARE",
+    {
+      chapter: Number(quest.chapter),
+    }
+  );
+
+  if (!recorded) return false;
+
+  const roll = Math.floor(Math.random() * 3);
+
+  if (roll === 0) {
+    await unlockGardenObject(
+      threadID,
+      playerID,
+      "impossible_door"
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "✦ GARDEN ANOMALY",
+        "",
+        "A door is standing where the path used to end.",
+        "",
+        "ECLIPSE:",
+        "\"I don't remember adding that.\"",
+      ].join("\n")
+    );
+  } else if (roll === 1) {
+    await unlockGardenObject(
+      threadID,
+      playerID,
+      "two_empty_chairs"
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "✦ GARDEN ANOMALY",
+        "",
+        "One chair is warm.",
+        "",
+        "Dorian says nothing.",
+        "",
+        "ECLIPSE refuses to look at it.",
+      ].join("\n")
+    );
+  } else {
+    await appendMemoryFragment(
+      threadID,
+      playerID,
+      MEMORY_THAT_SHOULD_NOT_EXIST,
+      "There was music."
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "✦ GARDEN ANOMALY",
+        "",
+        "A song is playing somewhere beyond the tree.",
+        "",
+        "You recognize it before you remember hearing it.",
+      ].join("\n")
+    );
+  }
+
+  return true;
+}
 
 async function canTriggerEvent(
   threadID,
@@ -3922,11 +5232,29 @@ async function postQuestPulse(
     {}
   );
 
+  if (Math.random() < 0.35) {
+    return postStoryExpansion(
+      api,
+      threadID,
+      playerID
+    );
+  }
+
   const roll = Math.floor(
     Math.random() * 6
   );
 
   if (roll === 0) {
+    if (
+      !(await claimUniquePostStoryEvent(
+        threadID,
+        playerID,
+        "post_story_find_something"
+      ))
+    ) {
+      return false;
+    }
+
     await send(
       api,
       threadID,
@@ -3943,6 +5271,16 @@ async function postQuestPulse(
   }
 
   if (roll === 1) {
+    if (
+      !(await claimUniquePostStoryEvent(
+        threadID,
+        playerID,
+        "post_story_private_journal"
+      ))
+    ) {
+      return false;
+    }
+
     await writeJournal(
       threadID,
       playerID,
@@ -3967,6 +5305,16 @@ async function postQuestPulse(
   }
 
   if (roll === 2) {
+    if (
+      !(await claimUniquePostStoryEvent(
+        threadID,
+        playerID,
+        "post_story_future_memory"
+      ))
+    ) {
+      return false;
+    }
+
     await createFutureMemory(
       threadID,
       playerID,
@@ -3990,6 +5338,16 @@ async function postQuestPulse(
   }
 
   if (roll === 3) {
+    if (
+      !(await claimUniquePostStoryEvent(
+        threadID,
+        playerID,
+        "post_story_dorian_understands"
+      ))
+    ) {
+      return false;
+    }
+
     const dorian =
       await getDorian(
         threadID,
@@ -4009,6 +5367,16 @@ async function postQuestPulse(
   }
 
   if (roll === 4) {
+    if (
+      !(await claimUniquePostStoryEvent(
+        threadID,
+        playerID,
+        "post_story_breathing_door"
+      ))
+    ) {
+      return false;
+    }
+
     await send(
       api,
       threadID,
@@ -4024,6 +5392,16 @@ async function postQuestPulse(
     );
 
     return true;
+  }
+
+  if (
+    !(await claimUniquePostStoryEvent(
+      threadID,
+      playerID,
+      "post_story_eclipse_misses_her"
+    ))
+  ) {
+    return false;
   }
 
   await send(
@@ -4268,6 +5646,50 @@ async function readArchive(
 
 
 // ============================================================
+// LETTERS VIEW
+// ============================================================
+
+async function readLetters(
+  api,
+  threadID,
+  playerID
+) {
+  if (!privateAccess(playerID)) return null;
+
+  const letters = await getDorianLetters(
+    threadID,
+    playerID
+  );
+
+  if (!letters.length) {
+    await send(
+      api,
+      threadID,
+      "No letters have been preserved yet."
+    );
+
+    return [];
+  }
+
+  await send(
+    api,
+    threadID,
+    [
+      "✉️ DORIAN'S LETTERS",
+      "",
+      ...letters.map((letter, index) => [
+        `${index + 1}. ${letter.key}`,
+        letter.unsent ? "   [unsent]" : "   [sent]",
+        `   ${letter.text}`,
+      ].join("\n")),
+    ].join("\n\n")
+  );
+
+  return letters;
+}
+
+
+// ============================================================
 // GARDEN VIEW
 // ============================================================
 
@@ -4299,6 +5721,12 @@ async function readGarden(
             .join("\n\n")
         : "Nothing has grown here yet.",
     ].join("\n")
+  );
+
+  await maybeGardenAnomaly(
+    api,
+    threadID,
+    playerID
   );
 
   return garden;
@@ -4569,6 +5997,7 @@ async function help(
       "!rpg laststar choose <choice>",
       "!rpg laststar memory <text>",
       "!rpg laststar archive",
+       "!rpg laststar letters",
       "!rpg laststar garden",
       "!rpg laststar reward",
       "",
@@ -4614,7 +6043,16 @@ async function onExplore(
   }
 
   try {
-    return await discover(
+    const discovered = await discover(
+      api,
+      threadID,
+      playerID,
+      context
+    );
+
+    if (discovered) return true;
+
+    return recognizeRevisit(
       api,
       threadID,
       playerID,
@@ -4732,6 +6170,14 @@ async function handleLoveQuestCommand(
         playerID
       );
 
+    case "letters":
+    case "letter":
+      return readLetters(
+        api,
+        threadID,
+        playerID
+      );
+
     case "garden":
       return readGarden(
         api,
@@ -4788,6 +6234,9 @@ module.exports = {
   GARDEN_OBJECTS,
   FUTURE_MEMORIES,
   CREATOR_FRAGMENTS,
+  MEMORY_THAT_SHOULD_NOT_EXIST,
+  SECRET_EVENT_RARITIES,
+  EXPANSION_SCENES,
 
   isHer,
   privateAccess,
@@ -4813,6 +6262,7 @@ module.exports = {
   getMemory,
   getMemories,
   preserveMemory,
+  appendMemoryFragment,
 
   ensureMemory0000,
   createInfiniteMemory,
@@ -4831,6 +6281,8 @@ module.exports = {
 
   getDorian,
   updateDorian,
+  appendDorianLetter,
+  getDorianLetters,
 
   sendPhoto,
   sendSong,
@@ -4841,8 +6293,13 @@ module.exports = {
   anomalyEvent,
   impossibleEvent,
   postQuestPulse,
+  postStoryExpansion,
+  playExpansionScene,
+  recognizeRevisit,
+  maybeGardenAnomaly,
 
   readArchive,
+  readLetters,
   readGarden,
 
   handleLoveQuestCommand,
