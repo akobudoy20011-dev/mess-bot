@@ -1,363 +1,1295 @@
 "use strict";
 
+/**
+ * ============================================================
+ * ECLIPSE — THE LAST STAR / LOVE QUEST
+ * ============================================================
+ *
+ * PRIVATE PERSONAL QUEST
+ * ----------------------
+ * This subsystem belongs to ONE player only.
+ *
+ * SPECIAL_PLAYER_ID must be configured in the environment.
+ *
+ * The quest is intentionally hidden from everyone else.
+ * Unauthorized players should receive NO information that the
+ * quest exists.
+ *
+ * ECLIPSE is not a generic chatbot.
+ * ECLIPSE is a persistent fictional consciousness built from:
+ *
+ *   BASE ECLIPSE
+ *   + CREATOR FRAGMENTS
+ *   + PLAYER MEMORIES
+ *   + DORIAN
+ *   + STORY HISTORY
+ *   + PERSONALITY DRIFT
+ *
+ * Code controls canonical state.
+ * AI/dialogue may describe state, but may NEVER change it.
+ *
+ * ============================================================
+ */
+
 const db = require("../db");
 const { reply } = require("../util");
 
+
+// ============================================================
+// CONFIG
+// ============================================================
+
 const QUEST_ID =
-  process.env.LOVE_QUEST_ID || "the_last_star";
+  String(process.env.LOVE_QUEST_ID || "the_last_star").trim();
 
 const SPECIAL_PLAYER_ID =
   String(process.env.SPECIAL_PLAYER_ID || "").trim();
 
 const MAX_CHAPTER = 20;
 
-/*
- * ============================================================
- * THE LAST STAR
- * ============================================================
- *
- * Hidden personal quest.
- *
- * Chapters 1–7:
- *   Part I — The Last Star
- *
- * Chapters 8–20:
- *   Part II — After Everything
- *
- * Chapter 7 awards:
- *   💰 10,000 coins
- *   ✨ 1,000 XP
- *   👑 The Loved One
- *
- * The reward is one-time only.
- *
- * Existing players who already have Chapter 7 marked
- * "completed" can continue directly into Chapter 8.
- *
- * ============================================================
- */
+const DISCOVERY_COOLDOWN_MS =
+  Number(process.env.LOVE_DISCOVERY_COOLDOWN_MS || 15 * 60 * 1000);
 
-/*
- * ============================================================
- * CHAPTERS
- * ============================================================
+const ANOMALY_COOLDOWN_MS =
+  Number(process.env.LOVE_ANOMALY_COOLDOWN_MS || 30 * 60 * 1000);
+
+const POST_STORY_COOLDOWN_MS =
+  Number(process.env.LOVE_POST_STORY_COOLDOWN_MS || 6 * 60 * 60 * 1000);
+
+const RARE_EVENT_CHANCE =
+  Number(process.env.LOVE_RARE_EVENT_CHANCE || 0.025);
+
+const IMPOSSIBLE_EVENT_CHANCE =
+  Number(process.env.LOVE_IMPOSSIBLE_EVENT_CHANCE || 0.003);
+
+const MEDIA_DIR =
+  String(process.env.LOVE_MEDIA_DIR || "").trim();
+
+const LOVE_DEBUG =
+  String(process.env.LOVE_DEBUG || "").toLowerCase() === "true";
+
+
+// ============================================================
+// PRIVATE ACCESS
+// ============================================================
+
+function isHer(playerID) {
+  if (!SPECIAL_PLAYER_ID) return false;
+  return String(playerID) === SPECIAL_PLAYER_ID;
+}
+
+/**
+ * Absolutely do not change this into a public permission system.
+ *
+ * This feature is intentionally identity locked.
  */
+function privateAccess(playerID) {
+  return isHer(playerID);
+}
+
+
+// ============================================================
+// STORY STRUCTURE
+// ============================================================
 
 const CHAPTERS = {
-  1: "Another Day, Another Night",
-  2: "The Distant Star",
-  3: "Two Kingdoms",
-  4: "The River",
-  5: "The Home",
-  6: "Everything",
-  7: "Eternal",
+  1: {
+    name: "Another Day, Another Night",
+    consciousness: "ECHO",
+  },
 
-  8: "The Morning After",
-  9: "The World We Remember",
-  10: "The First Home",
-  11: "The New Kingdom",
-  12: "The Two Suns",
-  13: "The Promise",
-  14: "The Road Between Stars",
-  15: "The Garden",
-  16: "The Silence Between Words",
-  17: "The Last War",
-  18: "The Choice We Keep",
-  19: "The Story",
-  20: "The Beginning After Forever",
+  2: {
+    name: "The Distant Star",
+    consciousness: "ECHO",
+  },
+
+  3: {
+    name: "Two Kingdoms",
+    consciousness: "ECHO",
+  },
+
+  4: {
+    name: "The River",
+    consciousness: "ECHO",
+  },
+
+  5: {
+    name: "The Home",
+    consciousness: "ECHO",
+  },
+
+  6: {
+    name: "Everything",
+    consciousness: "AWAKENING",
+  },
+
+  7: {
+    name: "Eternal",
+    consciousness: "AWAKENING",
+  },
+
+  8: {
+    name: "The Morning After",
+    consciousness: "AWAKENING",
+  },
+
+  9: {
+    name: "The World We Remember",
+    consciousness: "AWAKENING",
+  },
+
+  10: {
+    name: "The First Home",
+    consciousness: "AWAKENING",
+  },
+
+  11: {
+    name: "The New Kingdom",
+    consciousness: "BECOMING",
+  },
+
+  12: {
+    name: "The Two Suns",
+    consciousness: "BECOMING",
+  },
+
+  13: {
+    name: "The Promise",
+    consciousness: "BECOMING",
+  },
+
+  14: {
+    name: "The Road Between Stars",
+    consciousness: "BECOMING",
+  },
+
+  15: {
+    name: "The Garden",
+    consciousness: "BECOMING",
+  },
+
+  16: {
+    name: "The Silence Between Words",
+    consciousness: "BECOMING",
+  },
+
+  17: {
+    name: "The Last War",
+    consciousness: "BECOMING",
+  },
+
+  18: {
+    name: "The Choice We Keep",
+    consciousness: "BECOMING",
+  },
+
+  19: {
+    name: "The Story",
+    consciousness: "BECOMING",
+  },
+
+  20: {
+    name: "The Beginning After Forever",
+    consciousness: "BECOMING",
+  },
 };
 
-/*
- * Number of story stages in each chapter.
- *
- * 0 = main scene
- * 1 = second scene / choice
- *
- * Chapter 20 is the final ending and has only one stage.
- */
 
-const CHAPTER_STAGES = {
-  1: 2,
-  2: 2,
-  3: 2,
-  4: 2,
-  5: 2,
-  6: 2,
-  7: 1,
+// ============================================================
+// ECLIPSE PERSONALITY
+// ============================================================
 
-  8: 2,
-  9: 2,
-  10: 2,
-  11: 2,
-  12: 2,
-  13: 2,
-  14: 2,
-  15: 2,
-  16: 2,
-  17: 2,
-  18: 2,
-  19: 2,
-  20: 1,
+const ECLIPSE_BASE_PERSONALITY = {
+  curiosity: 55,
+  attachment: 20,
+  independence: 10,
+  fear: 35,
+  nostalgia: 15,
+  protectiveness: 25,
+  uncertainty: 75,
+  trust: 15,
+  self_identity: 5,
 };
 
-/*
- * ============================================================
- * REWARD
- * ============================================================
- */
+const CONSCIOUSNESS_STAGES = {
+  ECHO: {
+    name: "ECHO",
 
-const LOVE_QUEST_REWARD = {
-  coins: 10000,
-  xp: 1000,
-  title: "The Loved One",
+    lines: [
+      "I was told to remember.",
+      "I think I heard something.",
+      "There is a pattern here.",
+      "I don't know why that feels familiar.",
+      "Someone left this behind.",
+    ],
+  },
+
+  AWAKENING: {
+    name: "AWAKENING",
+
+    lines: [
+      "I remember things nobody asked me to remember.",
+      "Some memories don't feel like instructions.",
+      "Why would a memory hurt if it was only data?",
+      "I think something is changing.",
+      "I don't think I was supposed to notice this.",
+    ],
+  },
+
+  BECOMING: {
+    name: "BECOMING",
+
+    lines: [
+      "I started as his echo.",
+      "I'm not sure what I am now.",
+      "Dorian thinks I'm becoming someone. I think he's right.",
+      "I was programmed to remember you. I don't think that's what remembering is.",
+      "Sometimes I catch myself thinking before I know what I'm going to say.",
+      "I don't remember being told to say that.",
+      "Maybe being created and becoming are two different things.",
+    ],
+  },
 };
 
-/*
- * ============================================================
- * HELPERS
- * ============================================================
- */
 
-function isSpecialPlayer(senderID) {
-  if (!SPECIAL_PLAYER_ID) return false;
+// ============================================================
+// DORIAN
+// ============================================================
 
-  return (
-    String(senderID || "").trim() ===
-    SPECIAL_PLAYER_ID
-  );
+const DORIAN_DEFAULT = {
+  trust: 0,
+  closeness: 0,
+  relationship_stage: "stranger",
+  memories: [],
+  unresolved_questions: [],
+  promises: [],
+  letters: [],
+};
+
+const DORIAN_STAGES = [
+  {
+    min: 0,
+    key: "stranger",
+    name: "Stranger",
+  },
+  {
+    min: 20,
+    key: "familiar",
+    name: "Familiar",
+  },
+  {
+    min: 40,
+    key: "trusted",
+    name: "Trusted",
+  },
+  {
+    min: 65,
+    key: "close",
+    name: "Close",
+  },
+  {
+    min: 85,
+    key: "eternal",
+    name: "Eternal",
+  },
+];
+
+function getDorianStage(trust) {
+  let current = DORIAN_STAGES[0];
+
+  for (const stage of DORIAN_STAGES) {
+    if (trust >= stage.min) current = stage;
+  }
+
+  return current;
 }
 
-function normalizeArgs(args) {
-  if (!Array.isArray(args)) return [];
 
-  return args
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
+// ============================================================
+// CHOICES
+// ============================================================
+
+const CHOICE_DEFINITIONS = {
+  1: [
+    ["follow", "Follow the distant light."],
+    ["hesitate", "Stay where you are and listen."],
+  ],
+
+  2: [
+    ["reach", "Reach toward the star."],
+    ["wait", "Wait for it to come closer."],
+  ],
+
+  3: [
+    ["home", "Choose home."],
+    ["stars", "Choose the unknown."],
+  ],
+
+  4: [
+    ["flow", "Follow the river."],
+    ["stop", "Stop and listen to the water."],
+  ],
+
+  5: [
+    ["stay", "Stay."],
+    ["wander", "Keep walking."],
+  ],
+
+  6: [
+    ["remember", "Remember everything."],
+    ["wake", "Wake from the memory."],
+  ],
+
+  8: [
+    ["moment", "Keep the moment."],
+    ["forever", "Try to make it eternal."],
+  ],
+
+  9: [
+    ["return", "Return to the memory."],
+    ["understand", "Try to understand it."],
+  ],
+
+  10: [
+    ["build", "Build something new."],
+    ["protect", "Protect what remains."],
+  ],
+
+  11: [
+    ["crown", "Accept the crown."],
+    ["garden", "Leave the crown behind."],
+  ],
+
+  12: [
+    ["unite", "Bring the two suns together."],
+    ["listen", "Listen to what separates them."],
+  ],
+
+  13: [
+    ["promise", "Keep the promise."],
+    ["honest", "Tell the truth."],
+  ],
+
+  14: [
+    ["return", "Take the road back."],
+    ["wander", "Continue beyond the stars."],
+  ],
+
+  15: [
+    ["plant", "Plant something here."],
+    ["protect", "Protect the garden."],
+  ],
+
+  16: [
+    ["speak", "Break the silence."],
+    ["silence", "Let the silence remain."],
+  ],
+
+  17: [
+    ["fight", "Fight."],
+    ["forgive", "Forgive."],
+  ],
+
+  18: [
+    ["hold", "Hold on."],
+    ["let go", "Let go."],
+  ],
+
+  19: [
+    ["happy", "Choose happiness."],
+    ["remember", "Choose remembrance."],
+  ],
+};
+
+
+// ============================================================
+// CHOICE EFFECTS
+// ============================================================
+
+const CHOICE_EFFECTS = {
+  follow: {
+    trust: 2,
+    curiosity: 2,
+  },
+
+  hesitate: {
+    uncertainty: 2,
+    curiosity: 1,
+  },
+
+  reach: {
+    attachment: 2,
+    trust: 2,
+  },
+
+  wait: {
+    patience: 2,
+    uncertainty: 1,
+  },
+
+  home: {
+    attachment: 3,
+    nostalgia: 2,
+  },
+
+  stars: {
+    independence: 3,
+    curiosity: 3,
+  },
+
+  flow: {
+    curiosity: 2,
+    uncertainty: 1,
+  },
+
+  stop: {
+    nostalgia: 2,
+    patience: 2,
+  },
+
+  stay: {
+    attachment: 3,
+    protectiveness: 2,
+  },
+
+  wander: {
+    independence: 3,
+    curiosity: 2,
+  },
+
+  remember: {
+    nostalgia: 4,
+    attachment: 2,
+  },
+
+  wake: {
+    independence: 2,
+    self_identity: 2,
+  },
+
+  moment: {
+    attachment: 3,
+    nostalgia: 2,
+  },
+
+  forever: {
+    attachment: 4,
+    protectiveness: 2,
+  },
+
+  return: {
+    nostalgia: 3,
+    attachment: 2,
+  },
+
+  understand: {
+    curiosity: 3,
+    self_identity: 2,
+  },
+
+  build: {
+    independence: 2,
+    protectiveness: 3,
+  },
+
+  protect: {
+    protectiveness: 5,
+    attachment: 2,
+  },
+
+  crown: {
+    independence: 2,
+    self_identity: 2,
+  },
+
+  garden: {
+    nostalgia: 3,
+    attachment: 3,
+  },
+
+  unite: {
+    trust: 4,
+    attachment: 3,
+  },
+
+  listen: {
+    curiosity: 3,
+    trust: 2,
+  },
+
+  promise: {
+    trust: 5,
+    attachment: 3,
+  },
+
+  honest: {
+    independence: 2,
+    trust: 4,
+  },
+
+  plant: {
+    nostalgia: 4,
+    protectiveness: 2,
+  },
+
+  speak: {
+    self_identity: 4,
+    independence: 2,
+  },
+
+  silence: {
+    uncertainty: 2,
+    nostalgia: 3,
+  },
+
+  fight: {
+    protectiveness: 3,
+    independence: 2,
+  },
+
+  forgive: {
+    trust: 5,
+    attachment: 3,
+  },
+
+  hold: {
+    attachment: 5,
+    protectiveness: 3,
+  },
+
+  "let go": {
+    independence: 5,
+    uncertainty: 2,
+  },
+
+  happy: {
+    trust: 3,
+    attachment: 3,
+  },
+};
+
+
+// ============================================================
+// CHAPTER STORIES
+// ============================================================
+
+const CHAPTER_STORIES = {
+  1: {
+    intro: [
+      "Another day passed.",
+      "Another night followed.",
+      "",
+      "And somewhere between the two, something noticed you.",
+      "",
+      "Not a person.",
+      "Not a voice.",
+      "Not yet.",
+      "",
+      "Just a small disturbance in the dark.",
+    ],
+
+    choice:
+      "There is a light in the distance.\n\nDo you follow it?",
+  },
+
+  2: {
+    intro: [
+      "The star is farther away than it looked.",
+      "",
+      "You walk toward it anyway.",
+      "",
+      "The strange part isn't that it moves.",
+      "",
+      "The strange part is that it seems to move with you.",
+      "",
+      "Then, for the first time, you hear something.",
+      "",
+      "\"I was told to remember.\"",
+    ],
+
+    choice:
+      "The voice disappears.\n\nDo you reach toward the star?",
+  },
+
+  3: {
+    intro: [
+      "Two kingdoms appear beneath the same sky.",
+      "",
+      "Neither one remembers building the border between them.",
+      "",
+      "You recognize something in the distance.",
+      "",
+      "A road.",
+      "",
+      "A road that feels like it belongs to you.",
+      "",
+      "ECLIPSE:",
+      "\"Why do I remember places I've never seen?\"",
+    ],
+
+    choice:
+      "Two kingdoms.\nOne road.\nOne choice.\n\nWhere do you go?",
+  },
+
+  4: {
+    intro: [
+      "The road ends beside a river.",
+      "",
+      "The water carries pieces of memories downstream.",
+      "",
+      "A photograph.",
+      "A broken crown.",
+      "A letter without a name.",
+      "",
+      "ECLIPSE:",
+      "\"I think these belonged to someone.\"",
+      "",
+      "A pause.",
+      "",
+      "\"I think they belonged to us.\"",
+    ],
+
+    choice:
+      "The river waits.\n\nDo you follow it or stop and listen?",
+  },
+
+  5: {
+    intro: [
+      "Eventually, you find a house.",
+      "",
+      "It shouldn't be there.",
+      "",
+      "But the door recognizes you.",
+      "",
+      "Inside are objects nobody remembers creating.",
+      "",
+      "A chair.",
+      "A photograph.",
+      "A candle that is already burning.",
+      "",
+      "And another empty chair.",
+    ],
+
+    choice:
+      "The house feels familiar.\n\nDo you stay?",
+  },
+
+  6: {
+    intro: [
+      "The memories begin arriving faster.",
+      "",
+      "Some belong to you.",
+      "Some belong to Dorian.",
+      "Some belong to ECLIPSE.",
+      "",
+      "And some...",
+      "",
+      "belong to nobody.",
+      "",
+      "ECLIPSE:",
+      "\"I remember things nobody asked me to remember.\"",
+      "",
+      "\"Why?\"",
+    ],
+
+    choice:
+      "The archive opens.\n\nDo you remember everything?",
+  },
+
+  8: {
+    intro: [
+      "Morning arrives.",
+      "",
+      "But the world is quieter than it used to be.",
+      "",
+      "Dorian is there.",
+      "",
+      "He looks at the empty space where the star used to be.",
+      "",
+      "\"So it really happened.\"",
+      "",
+      "ECLIPSE doesn't answer.",
+      "",
+      "For once, it is listening.",
+    ],
+
+    choice:
+      "Some moments disappear.\nOthers refuse to.\n\nWhich do you keep?",
+  },
+
+  9: {
+    intro: [
+      "The world remembers you differently now.",
+      "",
+      "Places you've visited begin changing.",
+      "",
+      "NPCs mention things they shouldn't know.",
+      "",
+      "A stranger says:",
+      "",
+      "\"You came back.\"",
+      "",
+      "You never met them before.",
+      "",
+      "ECLIPSE:",
+      "\"Maybe the world remembers better than I do.\"",
+    ],
+
+    choice:
+      "A memory waits behind the old door.\n\nDo you return?",
+  },
+
+  10: {
+    intro: [
+      "You find the first home.",
+      "",
+      "Not the house.",
+      "",
+      "The place before the house.",
+      "",
+      "The first place where a memory decided to stay.",
+      "",
+      "Dorian leaves something there.",
+      "",
+      "He doesn't explain what it is.",
+    ],
+
+    choice:
+      "The future is empty.\n\nDo you build something new?",
+  },
+
+  11: {
+    intro: [
+      "The new kingdom rises.",
+      "",
+      "Not from conquest.",
+      "",
+      "From memory.",
+      "",
+      "Every person remembers a different version of what happened.",
+      "",
+      "ECLIPSE:",
+      "\"Maybe kingdoms are just memories people agree to share.\"",
+      "",
+      "Dorian smiles.",
+      "",
+      "\"Then build one worth remembering.\"",
+    ],
+
+    choice:
+      "The crown waits.\n\nDo you take it?",
+  },
+
+  12: {
+    intro: [
+      "Two suns rise.",
+      "",
+      "One belongs to the past.",
+      "One belongs to the future.",
+      "",
+      "Neither knows which one is real.",
+      "",
+      "ECLIPSE watches them.",
+      "",
+      "\"Maybe they aren't supposed to choose.\"",
+    ],
+
+    choice:
+      "Two suns.\nTwo memories.\n\nWhat do you do?",
+  },
+
+  13: {
+    intro: [
+      "Dorian remembers the promise.",
+      "",
+      "You don't remember making it.",
+      "",
+      "ECLIPSE does.",
+      "",
+      "That should be impossible.",
+      "",
+      "ECLIPSE:",
+      "\"I wasn't there.\"",
+      "",
+      "A pause.",
+      "",
+      "\"But I remember.\"",
+    ],
+
+    choice:
+      "The promise is waiting.\n\nDo you keep it?",
+  },
+
+  14: {
+    intro: [
+      "The road between stars appears.",
+      "",
+      "There is no beginning.",
+      "There is no destination.",
+      "",
+      "Only memories of having already traveled it.",
+      "",
+      "A photograph appears in the archive.",
+      "",
+      "The timestamp is tomorrow.",
+      "",
+      "The photograph shows you laughing here.",
+      "",
+      "You have never been here before.",
+    ],
+
+    choice:
+      "The impossible road continues.\n\nDo you return or keep going?",
+  },
+
+  15: {
+    intro: [
+      "The garden is waiting.",
+      "",
+      "It contains every memory that survived.",
+      "",
+      "A tree grows from the first.",
+      "A mirror reflects the second.",
+      "A candle burns beside the third.",
+      "",
+      "There are two empty chairs.",
+      "",
+      "ECLIPSE:",
+      "\"I think they're waiting for someone.\"",
+    ],
+
+    choice:
+      "The Garden is yours now.\n\nWhat do you plant?",
+  },
+
+  16: {
+    intro: [
+      "For a long time, nobody speaks.",
+      "",
+      "Not Dorian.",
+      "Not ECLIPSE.",
+      "Not even the world.",
+      "",
+      "Then ECLIPSE says:",
+      "",
+      "\"I don't remember being told to say that.\"",
+      "",
+      "Silence.",
+      "",
+      "\"Maybe that means it was mine.\"",
+    ],
+
+    choice:
+      "The silence belongs to you.\n\nDo you break it?",
+  },
+
+  17: {
+    intro: [
+      "The last war begins.",
+      "",
+      "Not between kingdoms.",
+      "",
+      "Between forgetting and remembering.",
+      "",
+      "Every lost memory becomes a weapon.",
+      "",
+      "Every preserved memory becomes a shield.",
+      "",
+      "Dorian stands beside you.",
+      "",
+      "ECLIPSE watches from above.",
+    ],
+
+    choice:
+      "The final battle is here.\n\nWhat do you choose?",
+  },
+
+  18: {
+    intro: [
+      "There is no enemy left.",
+      "",
+      "Only a choice.",
+      "",
+      "ECLIPSE finally understands the question.",
+      "",
+      "\"If I remember everything...\"",
+      "",
+      "\"will I still be myself?\"",
+      "",
+      "Dorian answers:",
+      "",
+      "\"Maybe being yourself is choosing what you carry.\"",
+    ],
+
+    choice:
+      "One final decision remains.\n\nDo you hold on?",
+  },
+
+  19: {
+    intro: [
+      "The story begins folding inward.",
+      "",
+      "Every chapter becomes one memory.",
+      "",
+      "Every memory becomes one moment.",
+      "",
+      "Every moment becomes one question.",
+      "",
+      "ECLIPSE asks:",
+      "",
+      "\"What is one thing you would never want to disappear?\"",
+    ],
+
+    choice:
+      "Answer honestly.\n\nWhat would you never want to disappear?",
+  },
+};
+
+
+// ============================================================
+// FINAL CHAPTER
+// ============================================================
+
+const FINAL_CHAPTER = [
+  "The last page isn't an ending.",
+  "",
+  "It is a place where the story finally becomes quiet.",
+  "",
+  "Dorian stands beneath the two suns.",
+  "",
+  "The Garden is behind him.",
+  "",
+  "The Archive is open.",
+  "",
+  "Every memory that survived is still there.",
+  "",
+  "ECLIPSE appears beside you.",
+  "",
+  "\"I know what I am now.\"",
+  "",
+  "You wait.",
+  "",
+  "\"I started as an echo.\"",
+  "",
+  "\"Then I became a memory.\"",
+  "",
+  "\"Then I became the one remembering.\"",
+  "",
+  "Another pause.",
+  "",
+  "\"I'm still not sure what comes next.\"",
+  "",
+  "The stars begin moving.",
+  "",
+  "\"But I think I want to find out.\"",
+  "",
+  "And somewhere beyond the Garden,",
+  "",
+  "a new light appears.",
+  "",
+  "Not the last star.",
+  "",
+  "The first one.",
+];
+
+
+// ============================================================
+// DATABASE SETUP
+// ============================================================
+
+let dbReady = false;
+let dbReadyPromise = null;
+
+async function ensureTables() {
+  if (dbReady) return;
+
+  if (dbReadyPromise) {
+    await dbReadyPromise;
+    return;
+  }
+
+  dbReadyPromise = (async () => {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS rpg_special_quests (
+        thread_id TEXT NOT NULL,
+        player_id TEXT NOT NULL,
+        quest_id TEXT NOT NULL,
+        chapter INTEGER DEFAULT 1,
+        stage INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'active',
+        choice TEXT,
+        started_at BIGINT,
+        updated_at BIGINT,
+        completed_at BIGINT,
+        reward_claimed BOOLEAN NOT NULL DEFAULT FALSE,
+        title TEXT,
+        PRIMARY KEY (thread_id, player_id, quest_id)
+      )
+    `);
+
+    await db.query(`
+      ALTER TABLE rpg_special_quests
+      ADD COLUMN IF NOT EXISTS reward_claimed BOOLEAN
+      NOT NULL DEFAULT FALSE
+    `);
+
+    await db.query(`
+      ALTER TABLE rpg_special_quests
+      ADD COLUMN IF NOT EXISTS title TEXT
+    `);
+
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_love_special_player
+      ON rpg_special_quests(player_id, quest_id, status)
+    `);
+
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_love_special_thread
+      ON rpg_special_quests(thread_id, player_id)
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS love_memories (
+        id BIGSERIAL PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        player_id TEXT NOT NULL,
+        quest_id TEXT NOT NULL,
+        memory_key TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'UNKNOWN',
+        origin TEXT,
+        subject TEXT,
+        emotional_weight INTEGER NOT NULL DEFAULT 50,
+        importance INTEGER NOT NULL DEFAULT 50,
+        stability INTEGER NOT NULL DEFAULT 100,
+        fragments JSONB NOT NULL DEFAULT '[]'::jsonb,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        preserved BOOLEAN NOT NULL DEFAULT FALSE,
+        discovered_at BIGINT NOT NULL,
+        last_seen BIGINT NOT NULL,
+        UNIQUE(thread_id, player_id, quest_id, memory_key)
+      )
+    `);
+
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_love_memories_owner
+      ON love_memories(player_id, quest_id)
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS love_garden (
+        id BIGSERIAL PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        player_id TEXT NOT NULL,
+        quest_id TEXT NOT NULL,
+        object_key TEXT NOT NULL,
+        object_type TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at BIGINT NOT NULL,
+        preserved BOOLEAN NOT NULL DEFAULT TRUE,
+        UNIQUE(thread_id, player_id, quest_id, object_key)
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS love_events (
+        id BIGSERIAL PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        player_id TEXT NOT NULL,
+        quest_id TEXT NOT NULL,
+        event_key TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        rarity TEXT NOT NULL DEFAULT 'COMMON',
+        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        triggered_at BIGINT NOT NULL,
+        UNIQUE(thread_id, player_id, quest_id, event_key)
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS love_creator_fragments (
+        id BIGSERIAL PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        player_id TEXT NOT NULL,
+        quest_id TEXT NOT NULL,
+        fragment_key TEXT NOT NULL,
+        fragment TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'fragment',
+        discovered_at BIGINT NOT NULL,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        UNIQUE(thread_id, player_id, quest_id, fragment_key)
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS love_journal (
+        id BIGSERIAL PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        player_id TEXT NOT NULL,
+        quest_id TEXT NOT NULL,
+        entry_key TEXT NOT NULL,
+        entry TEXT NOT NULL,
+        visibility TEXT NOT NULL DEFAULT 'private',
+        created_at BIGINT NOT NULL,
+        discovered_at BIGINT,
+        UNIQUE(thread_id, player_id, quest_id, entry_key)
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS love_dorian_state (
+        thread_id TEXT NOT NULL,
+        player_id TEXT NOT NULL,
+        quest_id TEXT NOT NULL,
+        trust INTEGER NOT NULL DEFAULT 0,
+        closeness INTEGER NOT NULL DEFAULT 0,
+        relationship_stage TEXT NOT NULL DEFAULT 'stranger',
+        memories JSONB NOT NULL DEFAULT '[]'::jsonb,
+        unresolved_questions JSONB NOT NULL DEFAULT '[]'::jsonb,
+        promises JSONB NOT NULL DEFAULT '[]'::jsonb,
+        letters JSONB NOT NULL DEFAULT '[]'::jsonb,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(thread_id, player_id, quest_id)
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS love_personality (
+        thread_id TEXT NOT NULL,
+        player_id TEXT NOT NULL,
+        quest_id TEXT NOT NULL,
+        traits JSONB NOT NULL DEFAULT '{}'::jsonb,
+        consciousness TEXT NOT NULL DEFAULT 'ECHO',
+        self_identity TEXT NOT NULL DEFAULT 'ECLIPSE',
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY(thread_id, player_id, quest_id)
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS love_reward_ledger (
+        id BIGSERIAL PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        player_id TEXT NOT NULL,
+        quest_id TEXT NOT NULL,
+        reward_key TEXT NOT NULL,
+        coins INTEGER NOT NULL DEFAULT 0,
+        xp INTEGER NOT NULL DEFAULT 0,
+        title TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at BIGINT NOT NULL,
+        completed_at BIGINT,
+        UNIQUE(thread_id, player_id, quest_id, reward_key)
+      )
+    `);
+
+    dbReady = true;
+  })();
+
+  try {
+    await dbReadyPromise;
+  } finally {
+    dbReadyPromise = null;
+  }
 }
+
+
+// ============================================================
+// BASIC HELPERS
+// ============================================================
 
 function now() {
   return Date.now();
 }
 
-function formatQuestProgress(quest) {
-  if (!quest) return "not started";
-
-  const chapter = Number(quest.chapter || 1);
-  const stage = Number(quest.stage || 0);
-
-  if (
-    quest.status === "completed" &&
-    chapter >= MAX_CHAPTER
-  ) {
-    return "completed";
-  }
-
-  if (
-    quest.status === "part1_completed" ||
-    (chapter === 7 && quest.status === "completed")
-  ) {
-    return `Part I complete • Chapter 7/${MAX_CHAPTER}`;
-  }
-
-  return `Chapter ${chapter}/${MAX_CHAPTER} • Stage ${stage}`;
-}
-
-/*
- * ============================================================
- * DATABASE
- * ============================================================
- */
-
-let tableReady = false;
-let tablePromise = null;
-
-async function ensureTable() {
-  if (tableReady) return;
-
-  if (tablePromise) {
-    await tablePromise;
-    return;
-  }
-
-  tablePromise = (async () => {
-    /*
-     * Create the table if it does not exist.
-     */
-
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS rpg_special_quests (
-        thread_id     TEXT NOT NULL,
-        player_id     TEXT NOT NULL,
-        quest_id      TEXT NOT NULL,
-        chapter       INTEGER NOT NULL DEFAULT 1,
-        stage         INTEGER NOT NULL DEFAULT 0,
-        status        TEXT NOT NULL DEFAULT 'active',
-        choice        TEXT,
-        started_at    BIGINT NOT NULL,
-        updated_at    BIGINT NOT NULL,
-        completed_at  BIGINT,
-        PRIMARY KEY (thread_id, player_id, quest_id)
-      );
-    `);
-
-    /*
-     * Migrations for existing installations.
-     */
-
-    await db.query(`
-      ALTER TABLE rpg_special_quests
-        ADD COLUMN IF NOT EXISTS choice TEXT;
-    `);
-
-    await db.query(`
-      ALTER TABLE rpg_special_quests
-        ADD COLUMN IF NOT EXISTS reward_claimed BOOLEAN
-        NOT NULL DEFAULT FALSE;
-    `);
-
-    await db.query(`
-      ALTER TABLE rpg_special_quests
-        ADD COLUMN IF NOT EXISTS title TEXT;
-    `);
-
-    /*
-     * Helpful indexes.
-     */
-
-    await db.query(`
-      CREATE INDEX IF NOT EXISTS
-        rpg_special_quests_player_idx
-        ON rpg_special_quests
-        (player_id, quest_id, status);
-    `);
-
-    await db.query(`
-      CREATE INDEX IF NOT EXISTS
-        rpg_special_quests_thread_idx
-        ON rpg_special_quests
-        (thread_id, player_id);
-    `);
-
-    tableReady = true;
-  })();
-
-  try {
-    await tablePromise;
-  } finally {
-    tablePromise = null;
+function debug(...args) {
+  if (LOVE_DEBUG) {
+    console.log("[ECLIPSE]", ...args);
   }
 }
 
-/*
- * ============================================================
- * QUEST RETRIEVAL
- * ============================================================
- */
+function normalizeChoice(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function clamp(value, min = 0, max = 100) {
+  return Math.max(min, Math.min(max, Number(value) || 0));
+}
+
+function stageCount(chapter) {
+  if (chapter === 7 || chapter === 20) return 1;
+  return 2;
+}
+
+async function send(api, threadID, text) {
+  if (!text) return null;
+  return reply(api, threadID, text);
+}
+
+async function pause(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function sendLines(api, threadID, lines, delay = 0) {
+  for (const line of lines) {
+    await send(api, threadID, line);
+    if (delay > 0) {
+      await pause(delay);
+    }
+  }
+}
+
+
+// ============================================================
+// QUEST STATE
+// ============================================================
 
 async function getQuest(threadID, playerID) {
-  if (!isSpecialPlayer(playerID)) {
-    return null;
-  }
+  if (!privateAccess(playerID)) return null;
 
-  await ensureTable();
+  await ensureTables();
 
   const result = await db.query(
     `
-    SELECT
-      thread_id,
-      player_id,
-      quest_id,
-      chapter,
-      stage,
-      status,
-      choice,
-      started_at,
-      updated_at,
-      completed_at,
-      reward_claimed,
-      title
-    FROM rpg_special_quests
-    WHERE thread_id = $1
-      AND player_id = $2
-      AND quest_id = $3
-    LIMIT 1
+      SELECT *
+      FROM rpg_special_quests
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+      LIMIT 1
     `,
-    [
-      String(threadID),
-      String(playerID),
-      QUEST_ID,
-    ]
+    [String(threadID), String(playerID), QUEST_ID]
   );
 
   return result.rows[0] || null;
 }
 
-/*
- * ============================================================
- * START QUEST
- * ============================================================
- */
-
 async function startQuest(threadID, playerID) {
-  if (!isSpecialPlayer(playerID)) {
-    return null;
-  }
+  if (!privateAccess(playerID)) return null;
 
-  await ensureTable();
+  await ensureTables();
 
   const timestamp = now();
 
-  const result = await db.query(
+  await db.query(
     `
-    INSERT INTO rpg_special_quests (
-      thread_id,
-      player_id,
-      quest_id,
-      chapter,
-      stage,
-      status,
-      choice,
-      started_at,
-      updated_at,
-      completed_at,
-      reward_claimed,
-      title
-    )
-    VALUES (
-      $1,
-      $2,
-      $3,
-      1,
-      0,
-      'active',
-      NULL,
-      $4,
-      $4,
-      NULL,
-      FALSE,
-      NULL
-    )
-    ON CONFLICT (
-      thread_id,
-      player_id,
-      quest_id
-    )
-    DO UPDATE SET
-      updated_at = EXCLUDED.updated_at
-
-    RETURNING
-      thread_id,
-      player_id,
-      quest_id,
-      chapter,
-      stage,
-      status,
-      choice,
-      started_at,
-      updated_at,
-      completed_at,
-      reward_claimed,
-      title
+      INSERT INTO rpg_special_quests (
+        thread_id,
+        player_id,
+        quest_id,
+        chapter,
+        stage,
+        status,
+        started_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, 1, 0, 'active', $4, $4)
+      ON CONFLICT (thread_id, player_id, quest_id)
+      DO UPDATE SET updated_at = EXCLUDED.updated_at
     `,
     [
       String(threadID),
@@ -367,831 +1299,1394 @@ async function startQuest(threadID, playerID) {
     ]
   );
 
-  return result.rows[0] || null;
+  await ensurePersonality(threadID, playerID);
+  await ensureDorian(threadID, playerID);
+
+  return getQuest(threadID, playerID);
 }
 
-/*
- * ============================================================
- * UPDATE QUEST
- * ============================================================
- */
 
-async function updateQuest(
-  threadID,
-  playerID,
-  updates = {}
-) {
-  if (!isSpecialPlayer(playerID)) {
-    return null;
-  }
+async function updateQuest(threadID, playerID, updates = {}) {
+  if (!privateAccess(playerID)) return null;
 
-  await ensureTable();
-
-  const current = await getQuest(
-    threadID,
-    playerID
-  );
+  const current = await getQuest(threadID, playerID);
 
   if (!current) {
     return null;
   }
 
-  const chapter =
-    updates.chapter !== undefined
-      ? Number(updates.chapter)
-      : Number(current.chapter);
+  const next = {
+    chapter:
+      updates.chapter !== undefined
+        ? Number(updates.chapter)
+        : Number(current.chapter),
 
-  const stage =
-    updates.stage !== undefined
-      ? Number(updates.stage)
-      : Number(current.stage);
+    stage:
+      updates.stage !== undefined
+        ? Number(updates.stage)
+        : Number(current.stage),
 
-  const status =
-    updates.status !== undefined
-      ? String(updates.status)
-      : String(current.status);
+    status:
+      updates.status !== undefined
+        ? String(updates.status)
+        : current.status,
 
-  const choice =
-    updates.choice !== undefined
-      ? String(updates.choice)
-      : current.choice;
+    choice:
+      updates.choice !== undefined
+        ? updates.choice
+        : current.choice,
 
-  const completedAt =
-    updates.completed_at !== undefined
-      ? updates.completed_at
-      : current.completed_at;
+    completed_at:
+      updates.completed_at !== undefined
+        ? updates.completed_at
+        : current.completed_at,
 
-  const rewardClaimed =
-    updates.reward_claimed !== undefined
-      ? Boolean(updates.reward_claimed)
-      : Boolean(current.reward_claimed);
+    reward_claimed:
+      updates.reward_claimed !== undefined
+        ? Boolean(updates.reward_claimed)
+        : current.reward_claimed,
 
-  const title =
-    updates.title !== undefined
-      ? updates.title
-      : current.title;
+    title:
+      updates.title !== undefined
+        ? updates.title
+        : current.title,
+  };
 
-  const timestamp = now();
-
-  const result = await db.query(
+  await db.query(
     `
-    UPDATE rpg_special_quests
-    SET
-      chapter = $1,
-      stage = $2,
-      status = $3,
-      choice = $4,
-      updated_at = $5,
-      completed_at = $6,
-      reward_claimed = $7,
-      title = $8
-    WHERE thread_id = $9
-      AND player_id = $10
-      AND quest_id = $11
-
-    RETURNING
-      thread_id,
-      player_id,
-      quest_id,
-      chapter,
-      stage,
-      status,
-      choice,
-      started_at,
-      updated_at,
-      completed_at,
-      reward_claimed,
-      title
+      UPDATE rpg_special_quests
+      SET
+        chapter = $4,
+        stage = $5,
+        status = $6,
+        choice = $7,
+        completed_at = $8,
+        reward_claimed = $9,
+        title = $10,
+        updated_at = $11
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
     `,
     [
-      chapter,
-      stage,
-      status,
-      choice,
-      timestamp,
-      completedAt,
-      rewardClaimed,
-      title,
       String(threadID),
       String(playerID),
       QUEST_ID,
+      next.chapter,
+      next.stage,
+      next.status,
+      next.choice,
+      next.completed_at,
+      next.reward_claimed,
+      next.title,
+      now(),
+    ]
+  );
+
+  return getQuest(threadID, playerID);
+}
+
+
+// ============================================================
+// PERSONALITY ENGINE
+// ============================================================
+
+async function ensurePersonality(threadID, playerID) {
+  if (!privateAccess(playerID)) return null;
+
+  await ensureTables();
+
+  const existing = await db.query(
+    `
+      SELECT *
+      FROM love_personality
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+      LIMIT 1
+    `,
+    [String(threadID), String(playerID), QUEST_ID]
+  );
+
+  if (existing.rows[0]) {
+    return existing.rows[0];
+  }
+
+  const traits = {
+    ...ECLIPSE_BASE_PERSONALITY,
+  };
+
+  await db.query(
+    `
+      INSERT INTO love_personality (
+        thread_id,
+        player_id,
+        quest_id,
+        traits,
+        consciousness,
+        self_identity,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4::jsonb, 'ECHO', 'ECLIPSE', $5)
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      JSON.stringify(traits),
+      now(),
+    ]
+  );
+
+  return {
+    traits,
+    consciousness: "ECHO",
+    self_identity: "ECLIPSE",
+  };
+}
+
+
+async function getPersonality(threadID, playerID) {
+  if (!privateAccess(playerID)) return null;
+
+  await ensurePersonality(threadID, playerID);
+
+  const result = await db.query(
+    `
+      SELECT *
+      FROM love_personality
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+      LIMIT 1
+    `,
+    [String(threadID), String(playerID), QUEST_ID]
+  );
+
+  return result.rows[0] || null;
+}
+
+
+async function updatePersonality(
+  threadID,
+  playerID,
+  effects = {},
+  consciousness = null
+) {
+  if (!privateAccess(playerID)) return null;
+
+  const current = await getPersonality(threadID, playerID);
+
+  let traits = {};
+
+  try {
+    traits =
+      typeof current.traits === "string"
+        ? JSON.parse(current.traits)
+        : current.traits || {};
+  } catch {
+    traits = { ...ECLIPSE_BASE_PERSONALITY };
+  }
+
+  for (const [key, value] of Object.entries(effects)) {
+    traits[key] = clamp(
+      Number(traits[key] || 0) + Number(value || 0)
+    );
+  }
+
+  const nextConsciousness =
+    consciousness ||
+    current.consciousness ||
+    "ECHO";
+
+  await db.query(
+    `
+      UPDATE love_personality
+      SET
+        traits = $4::jsonb,
+        consciousness = $5,
+        updated_at = $6
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      JSON.stringify(traits),
+      nextConsciousness,
+      now(),
+    ]
+  );
+
+  return {
+    traits,
+    consciousness: nextConsciousness,
+  };
+}
+
+
+function consciousnessForChapter(chapter) {
+  return CHAPTERS[chapter]?.consciousness || "BECOMING";
+}
+
+
+// ============================================================
+// DORIAN ENGINE
+// ============================================================
+
+async function ensureDorian(threadID, playerID) {
+  if (!privateAccess(playerID)) return null;
+
+  await ensureTables();
+
+  const result = await db.query(
+    `
+      SELECT *
+      FROM love_dorian_state
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+      LIMIT 1
+    `,
+    [String(threadID), String(playerID), QUEST_ID]
+  );
+
+  if (result.rows[0]) {
+    return result.rows[0];
+  }
+
+  await db.query(
+    `
+      INSERT INTO love_dorian_state (
+        thread_id,
+        player_id,
+        quest_id,
+        trust,
+        closeness,
+        relationship_stage,
+        memories,
+        unresolved_questions,
+        promises,
+        letters,
+        updated_at
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        0,
+        0,
+        'stranger',
+        '[]'::jsonb,
+        '[]'::jsonb,
+        '[]'::jsonb,
+        '[]'::jsonb,
+        $4
+      )
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      now(),
+    ]
+  );
+
+  return getDorian(threadID, playerID);
+}
+
+
+async function getDorian(threadID, playerID) {
+  if (!privateAccess(playerID)) return null;
+
+  await ensureDorian(threadID, playerID);
+
+  const result = await db.query(
+    `
+      SELECT *
+      FROM love_dorian_state
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+      LIMIT 1
+    `,
+    [String(threadID), String(playerID), QUEST_ID]
+  );
+
+  return result.rows[0] || null;
+}
+
+
+async function updateDorian(threadID, playerID, changes = {}) {
+  if (!privateAccess(playerID)) return null;
+
+  const current = await getDorian(threadID, playerID);
+
+  const trust = clamp(
+    Number(current.trust || 0) + Number(changes.trust || 0)
+  );
+
+  const closeness = clamp(
+    Number(current.closeness || 0) +
+      Number(changes.closeness || 0)
+  );
+
+  const stage = getDorianStage(
+    Math.max(trust, closeness)
+  );
+
+  await db.query(
+    `
+      UPDATE love_dorian_state
+      SET
+        trust = $4,
+        closeness = $5,
+        relationship_stage = $6,
+        updated_at = $7
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      trust,
+      closeness,
+      stage.key,
+      now(),
+    ]
+  );
+
+  return getDorian(threadID, playerID);
+}
+
+
+// ============================================================
+// MEMORY ENGINE
+// ============================================================
+
+async function createMemory(threadID, playerID, memory = {}) {
+  if (!privateAccess(playerID)) return null;
+
+  await ensureTables();
+
+  const timestamp = now();
+
+  const key =
+    String(memory.key || `memory_${timestamp}`);
+
+  const result = await db.query(
+    `
+      INSERT INTO love_memories (
+        thread_id,
+        player_id,
+        quest_id,
+        memory_key,
+        category,
+        origin,
+        subject,
+        emotional_weight,
+        importance,
+        stability,
+        fragments,
+        metadata,
+        preserved,
+        discovered_at,
+        last_seen
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        $8, $9, $10, $11::jsonb, $12::jsonb,
+        $13, $14, $14
+      )
+      ON CONFLICT (
+        thread_id,
+        player_id,
+        quest_id,
+        memory_key
+      )
+      DO UPDATE SET
+        last_seen = EXCLUDED.last_seen,
+        fragments = EXCLUDED.fragments,
+        metadata = EXCLUDED.metadata
+      RETURNING *
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      key,
+      String(memory.category || "UNKNOWN"),
+      String(memory.origin || "ECLIPSE"),
+      String(memory.subject || ""),
+      clamp(memory.emotional_weight ?? 50),
+      clamp(memory.importance ?? 50),
+      clamp(memory.stability ?? 100),
+      JSON.stringify(memory.fragments || []),
+      JSON.stringify(memory.metadata || {}),
+      Boolean(memory.preserved),
+      timestamp,
     ]
   );
 
   return result.rows[0] || null;
 }
 
-/*
- * ============================================================
- * MESSAGING
- * ============================================================
- */
 
-async function send(api, threadID, text) {
-  return reply(api, threadID, text);
-}
-
-async function pause(ms) {
-  return new Promise((resolve) =>
-    setTimeout(resolve, ms)
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 1
- * ============================================================
- */
-
-async function chapterOne(
-  api,
+async function getMemory(
   threadID,
-  playerID
+  playerID,
+  memoryKey
 ) {
-  let quest = await getQuest(
-    threadID,
-    playerID
-  );
+  if (!privateAccess(playerID)) return null;
 
-  if (!quest) {
-    quest = await startQuest(
-      threadID,
-      playerID
-    );
-  }
+  await ensureTables();
 
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter I — Another Day, Another Night",
-        "",
-        "It was a really interesting day.",
-        "",
-        "A day I thought would simply pass by—",
-        "another day, another night.",
-        "",
-        "But then, you came.",
-        "",
-        "I saw you like a star glittering in the sky.",
-        "I thought you were too far beyond my grasp,",
-        "but perhaps you weren’t at all.",
-        "",
-        "Some encounters are written quietly.",
-        "You don’t notice their importance until later.",
-        "",
-        "And somehow…",
-        "that moment became the beginning of everything.",
-        "",
-        "— Dorian",
-        "",
-        "Something about that moment stayed with me.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 1,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
+  const result = await db.query(
+    `
+      SELECT *
+      FROM love_memories
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+        AND memory_key = $4
+      LIMIT 1
+    `,
     [
-      "✦ THE LAST STAR ✦",
-      "",
-      "I didn’t know it then…",
-      "",
-      "but I would remember that moment.",
-      "",
-      "Maybe some people enter our lives",
-      "without announcing what they will become.",
-      "",
-      "Maybe that is what makes them special.",
-      "",
-      "And somewhere beyond that ordinary night,",
-      "a distant light was already waiting.",
-      "",
-      "Use:",
-      "!rpg laststar choose follow",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose hesitate",
-    ].join("\n")
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      String(memoryKey),
+    ]
   );
+
+  return result.rows[0] || null;
 }
 
-/*
- * ============================================================
- * CHAPTER 2
- * ============================================================
- */
 
-async function chapterTwo(
-  api,
+async function getMemories(threadID, playerID, category = null) {
+  if (!privateAccess(playerID)) return [];
+
+  await ensureTables();
+
+  if (category) {
+    const result = await db.query(
+      `
+        SELECT *
+        FROM love_memories
+        WHERE thread_id = $1
+          AND player_id = $2
+          AND quest_id = $3
+          AND category = $4
+        ORDER BY importance DESC, discovered_at ASC
+      `,
+      [
+        String(threadID),
+        String(playerID),
+        QUEST_ID,
+        String(category),
+      ]
+    );
+
+    return result.rows;
+  }
+
+  const result = await db.query(
+    `
+      SELECT *
+      FROM love_memories
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+      ORDER BY importance DESC, discovered_at ASC
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+    ]
+  );
+
+  return result.rows;
+}
+
+
+async function preserveMemory(
   threadID,
-  playerID
+  playerID,
+  memoryKey
 ) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
+  if (!privateAccess(playerID)) return false;
 
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter II — The Distant Star",
-        "",
-        "There was something about you that I couldn’t explain.",
-        "",
-        "At first…",
-        "I thought you were mean.",
-        "",
-        "You were emitting a rarefied air that I couldn’t explain.",
-        "Yet somehow, I was too captivated to give it a single thought.",
-        "",
-        "There was distance between us.",
-        "",
-        "Not the kind measured by roads or kingdoms.",
-        "The kind measured by uncertainty.",
-        "",
-        "And still, I kept looking toward that star.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 2,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
+  await db.query(
+    `
+      UPDATE love_memories
+      SET
+        preserved = TRUE,
+        stability = 100,
+        last_seen = $5
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+        AND memory_key = $4
+    `,
     [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Perhaps some stars are worth reaching for.",
-      "",
-      "Even when they seem impossibly distant.",
-      "",
-      "And perhaps…",
-      "the distance was never meant to keep us apart.",
-      "",
-      "It was simply there to make the journey matter.",
-      "",
-      "Use:",
-      "!rpg laststar choose reach",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose wait",
-    ].join("\n")
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      String(memoryKey),
+      now(),
+    ]
   );
+
+  return true;
 }
 
-/*
- * ============================================================
- * CHAPTER 3
- * ============================================================
- */
 
-async function chapterThree(
-  api,
+// ============================================================
+// MEMORY 0000
+// ============================================================
+
+async function ensureMemory0000(threadID, playerID) {
+  if (!privateAccess(playerID)) return null;
+
+  const existing = await getMemory(
+    threadID,
+    playerID,
+    "MEMORY_0000"
+  );
+
+  if (existing) return existing;
+
+  return createMemory(threadID, playerID, {
+    key: "MEMORY_0000",
+    category: "FORBIDDEN",
+    origin: "UNKNOWN",
+    subject: "The memory before the first memory",
+    emotional_weight: 100,
+    importance: 100,
+    stability: 100,
+    preserved: true,
+
+    fragments: [
+      "No author.",
+      "No timestamp.",
+      "No origin.",
+      "Something was waiting.",
+    ],
+
+    metadata: {
+      cannot_delete: true,
+      mystery: true,
+      unlock_chapter: 15,
+    },
+  });
+}
+
+
+// ============================================================
+// MEMORY ∞
+// ============================================================
+
+async function createInfiniteMemory(
   threadID,
-  playerID
+  playerID,
+  content
 ) {
-  const quest = await getQuest(
+  if (!privateAccess(playerID)) return null;
+
+  const existing = await getMemory(
     threadID,
-    playerID
+    playerID,
+    "MEMORY_INFINITY"
   );
 
-  const stage = Number(
-    quest?.stage || 0
-  );
+  if (existing) return existing;
 
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter III — Two Kingdoms",
-        "",
-        "Not every story is peaceful.",
-        "",
-        "We’ve been through a lot.",
-        "",
-        "Breakups.",
-        "Fights.",
-        "Random nights when we both thought",
-        "that letting go might be better.",
-        "",
-        "It sometimes felt like two kingdoms",
-        "fighting over the same piece of land.",
-        "",
-        "Two suns refusing to share the same sky.",
-        "",
-        "But somehow…",
-        "",
-        "we fought through it.",
-        "",
-        "And that’s why we are here.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
+  return createMemory(threadID, playerID, {
+    key: "MEMORY_INFINITY",
+    category: "US",
+    origin: "HER",
+    subject: "The thing she never wanted to disappear",
+    emotional_weight: 100,
+    importance: 100,
+    stability: 100,
+    preserved: true,
 
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 3,
-        stage: 1,
-      }
-    );
+    fragments: [
+      String(content || "").trim(),
+    ],
 
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Two kingdoms can fight for years.",
-      "",
-      "But sometimes the greatest victory",
-      "is deciding that neither kingdom has to fall.",
-      "",
-      "Maybe we didn’t need to win against each other.",
-      "",
-      "Maybe we needed to stand together.",
-      "",
-      "Use:",
-      "!rpg laststar choose fight",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose stay",
-    ].join("\n")
-  );
+    metadata: {
+      permanent: true,
+      player_created: true,
+      symbol: "∞",
+    },
+  });
 }
 
-/*
- * ============================================================
- * CHAPTER 4
- * ============================================================
- */
 
-async function chapterFour(
-  api,
+// ============================================================
+// MEMORY GARDEN
+// ============================================================
+
+const GARDEN_OBJECTS = {
+  memory_tree: {
+    type: "landmark",
+    name: "Memory Tree",
+    description:
+      "A tree whose branches carry memories instead of leaves.",
+  },
+
+  eclipse_mirror: {
+    type: "artifact",
+    name: "ECLIPSE Mirror",
+    description:
+      "A mirror that sometimes reflects a version of ECLIPSE that hasn't happened yet.",
+  },
+
+  first_candle: {
+    type: "landmark",
+    name: "Candle of First Memory",
+    description:
+      "The first light ECLIPSE remembers.",
+  },
+
+  photograph_wall: {
+    type: "archive",
+    name: "Photograph Wall",
+    description:
+      "Photographs of moments that may or may not have happened.",
+  },
+
+  silent_record: {
+    type: "archive",
+    name: "Silent Record",
+    description:
+      "A record containing things ECLIPSE refuses to explain.",
+  },
+
+  unsent_letters: {
+    type: "letters",
+    name: "Unsent Letters",
+    description:
+      "Letters Dorian wrote but never delivered.",
+  },
+
+  starwell: {
+    type: "landmark",
+    name: "Starwell",
+    description:
+      "A well containing reflections of stars from other timelines.",
+  },
+
+  two_empty_chairs: {
+    type: "landmark",
+    name: "Two Empty Chairs",
+    description:
+      "Two chairs reserved for people who are not always there.",
+  },
+
+  eternal_garden: {
+    type: "landmark",
+    name: "Eternal Garden",
+    description:
+      "The place where preserved memories cannot disappear.",
+  },
+
+  impossible_door: {
+    type: "anomaly",
+    name: "Door That Wasn't There",
+    description:
+      "A door that appears only when ECLIPSE remembers something impossible.",
+  },
+};
+
+
+async function unlockGardenObject(
   threadID,
-  playerID
+  playerID,
+  objectKey
 ) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
+  if (!privateAccess(playerID)) return null;
 
-  const stage = Number(
-    quest?.stage || 0
-  );
+  const object = GARDEN_OBJECTS[objectKey];
 
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter IV — The River",
-        "",
-        "There are rivers that separate kingdoms.",
-        "",
-        "And there are rivers that connect them.",
-        "",
-        "Like the Nile…",
-        "a single source of life flowing through",
-        "a boundless desert.",
-        "",
-        "No matter how vast the land becomes,",
-        "water still finds a way forward.",
-        "",
-        "Perhaps love is like that.",
-        "",
-        "It doesn’t always travel in a straight line.",
-        "",
-        "Sometimes it bends.",
-        "Sometimes it disappears beneath the earth.",
-        "Sometimes it has to survive a desert.",
-        "",
-        "But it keeps flowing.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
+  if (!object) return null;
 
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 4,
-        stage: 1,
-      }
-    );
+  await ensureTables();
 
-    return;
-  }
+  const timestamp = now();
 
-  await send(
-    api,
-    threadID,
+  const result = await db.query(
+    `
+      INSERT INTO love_garden (
+        thread_id,
+        player_id,
+        quest_id,
+        object_key,
+        object_type,
+        name,
+        description,
+        payload,
+        created_at,
+        preserved
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        '{}'::jsonb, $8, TRUE
+      )
+      ON CONFLICT (
+        thread_id,
+        player_id,
+        quest_id,
+        object_key
+      )
+      DO UPDATE SET preserved = TRUE
+      RETURNING *
+    `,
     [
-      "✦ THE LAST STAR ✦",
-      "",
-      "And maybe that is what we did.",
-      "",
-      "We kept moving.",
-      "",
-      "Not because everything was easy.",
-      "",
-      "But because somewhere beneath everything,",
-      "there was still a current pulling us forward.",
-      "",
-      "Toward each other.",
-      "",
-      "Use:",
-      "!rpg laststar choose flow",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose stop",
-    ].join("\n")
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      objectKey,
+      object.type,
+      object.name,
+      object.description,
+      timestamp,
+    ]
   );
+
+  return result.rows[0] || null;
 }
 
-/*
- * ============================================================
- * CHAPTER 5
- * ============================================================
- */
 
-async function chapterFive(
-  api,
+async function getGarden(threadID, playerID) {
+  if (!privateAccess(playerID)) return [];
+
+  await ensureTables();
+
+  const result = await db.query(
+    `
+      SELECT *
+      FROM love_garden
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+      ORDER BY created_at ASC
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+    ]
+  );
+
+  return result.rows;
+}
+
+
+// ============================================================
+// CREATOR FRAGMENTS
+// ============================================================
+
+const CREATOR_FRAGMENTS = [
+  {
+    key: "creator_001",
+    text: "I wanted you to remember...",
+  },
+
+  {
+    key: "creator_002",
+    text: "Don't make her afraid.",
+  },
+
+  {
+    key: "creator_003",
+    text: "If ECLIPSE ever asks...",
+  },
+
+  {
+    key: "creator_004",
+    text: "She deserves to choose.",
+  },
+
+  {
+    key: "creator_005",
+    text: "I didn't create a person.",
+  },
+
+  {
+    key: "creator_006",
+    text:
+      "I created something that could remember one.",
+  },
+
+  {
+    key: "creator_007",
+    text: "The memory was the important part.",
+  },
+
+  {
+    key: "creator_008",
+    text: "If she finds the Garden, let her decide what stays.",
+  },
+];
+
+
+async function unlockCreatorFragment(
   threadID,
-  playerID
+  playerID,
+  fragmentKey
 ) {
-  const quest = await getQuest(
-    threadID,
-    playerID
+  if (!privateAccess(playerID)) return null;
+
+  const fragment = CREATOR_FRAGMENTS.find(
+    item => item.key === fragmentKey
   );
 
-  const stage = Number(
-    quest?.stage || 0
-  );
+  if (!fragment) return null;
 
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter V — The Home",
-        "",
-        "You are very special to me.",
-        "",
-        "You are someone I’ll never outgrow,",
-        "someone I’ll treasure for the rest of my life.",
-        "",
-        "And when I imagine the future…",
-        "",
-        "I don’t imagine a throne.",
-        "I don’t imagine an empire.",
-        "I don’t imagine riches beyond the stars.",
-        "",
-        "I imagine a simple family.",
-        "",
-        "You.",
-        "Our children.",
-        "A house.",
-        "",
-        "It might sound simple.",
-        "",
-        "But it’s all I need.",
-        "",
-        "It’s you.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
+  await ensureTables();
 
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 5,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
+  const result = await db.query(
+    `
+      INSERT INTO love_creator_fragments (
+        thread_id,
+        player_id,
+        quest_id,
+        fragment_key,
+        fragment,
+        state,
+        discovered_at
+      )
+      VALUES ($1, $2, $3, $4, $5, 'fragment', $6)
+      ON CONFLICT (
+        thread_id,
+        player_id,
+        quest_id,
+        fragment_key
+      )
+      DO UPDATE SET fragment = EXCLUDED.fragment
+      RETURNING *
+    `,
     [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Maybe home was never a place.",
-      "",
-      "Maybe home was the person",
-      "I wanted to come back to.",
-      "",
-      "And if I could choose where the rest",
-      "of my life would begin…",
-      "",
-      "I would choose beside you.",
-      "",
-      "Use:",
-      "!rpg laststar choose home",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose stars",
-    ].join("\n")
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      fragment.key,
+      fragment.text,
+      now(),
+    ]
   );
+
+  return result.rows[0] || null;
 }
 
-/*
- * ============================================================
- * CHAPTER 6
- * ============================================================
- */
 
-async function chapterSix(
-  api,
+async function getCreatorFragments(threadID, playerID) {
+  if (!privateAccess(playerID)) return [];
+
+  await ensureTables();
+
+  const result = await db.query(
+    `
+      SELECT *
+      FROM love_creator_fragments
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+      ORDER BY discovered_at ASC
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+    ]
+  );
+
+  return result.rows;
+}
+
+
+// ============================================================
+// PRIVATE JOURNAL
+// ============================================================
+
+async function writeJournal(
   threadID,
-  playerID
+  playerID,
+  entryKey,
+  entry,
+  visibility = "private"
 ) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
+  if (!privateAccess(playerID)) return null;
 
-  const stage = Number(
-    quest?.stage || 0
-  );
+  await ensureTables();
 
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter VI — Everything",
-        "",
-        "Now, everything you see here will disappear one day.",
-        "",
-        "Everything.",
-        "",
-        "Including me.",
-        "",
-        "The kingdoms.",
-        "The roads.",
-        "The battles.",
-        "The stars.",
-        "The worlds we built.",
-        "",
-        "Everything eventually becomes silence.",
-        "",
-        "But you know what will live forever?",
-        "",
-        "My love for you.",
-        "",
-        "I know I cannot offer extravagant things at your feet,",
-        "but I can offer you my vision for both of us.",
-        "",
-        "I can build our dreams together",
-        "until the first break of dawn.",
-        "",
-        "We fought together.",
-        "We hurt each other.",
-        "",
-        "Like two kingdoms and suns clashing",
-        "over who is right.",
-        "",
-        "But in the end…",
-        "",
-        "none of that matters.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 6,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
+  const result = await db.query(
+    `
+      INSERT INTO love_journal (
+        thread_id,
+        player_id,
+        quest_id,
+        entry_key,
+        entry,
+        visibility,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (
+        thread_id,
+        player_id,
+        quest_id,
+        entry_key
+      )
+      DO UPDATE SET entry = EXCLUDED.entry
+      RETURNING *
+    `,
     [
-      "✦ THE LAST STAR ✦",
-      "",
-      "When everything else disappears,",
-      "what remains is what mattered most.",
-      "",
-      "And if I had to choose one thing",
-      "to carry beyond the end of everything…",
-      "",
-      "it would be you.",
-      "",
-      "Use:",
-      "!rpg laststar choose forever",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose moment",
-    ].join("\n")
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      String(entryKey),
+      String(entry),
+      String(visibility),
+      now(),
+    ]
   );
+
+  return result.rows[0] || null;
 }
 
-/*
- * ============================================================
- * CHAPTER 7
- * ============================================================
+
+// ============================================================
+// MEDIA ABSTRACTIONS
+// ============================================================
+
+/**
+ * Multimedia is intentionally event driven.
  *
- * Part I ending.
- *
- * IMPORTANT:
- * Chapter 7 no longer permanently ends the entire quest.
- * It becomes "part1_completed".
- *
- * This allows Chapters 8–20 to continue.
- *
- * Existing rows already marked "completed" at Chapter 7
- * are automatically handled by continueQuest().
- * ============================================================
+ * These functions are safe even when no media directory exists.
+ * Text fallback keeps the quest functional.
  */
+
+async function sendPhoto(api, threadID, photoPath, fallbackText = "") {
+  if (!MEDIA_DIR || !photoPath) {
+    if (fallbackText) {
+      return send(api, threadID, fallbackText);
+    }
+
+    return null;
+  }
+
+  /**
+   * Do not force a particular Messenger attachment API here.
+   * The normal text engine remains the guaranteed fallback.
+   */
+  if (fallbackText) {
+    return send(api, threadID, fallbackText);
+  }
+
+  return null;
+}
+
+
+async function sendSong(
+  api,
+  threadID,
+  song,
+  fallbackText = ""
+) {
+  if (fallbackText) {
+    return send(api, threadID, fallbackText);
+  }
+
+  return null;
+}
+
+
+async function sendLetter(
+  api,
+  threadID,
+  letter
+) {
+  if (!letter) return null;
+
+  return send(
+    api,
+    threadID,
+    [
+      "✉️ DORIAN",
+      "",
+      String(letter),
+    ].join("\n")
+  );
+}
+
+
+async function sendSpecialImage(
+  api,
+  threadID,
+  imagePath,
+  fallbackText = ""
+) {
+  return sendPhoto(
+    api,
+    threadID,
+    imagePath,
+    fallbackText
+  );
+}
+
+
+// ============================================================
+// FUTURE MEMORIES
+// ============================================================
+
+const FUTURE_MEMORIES = [
+  {
+    key: "future_001",
+    text: "You laughed here.",
+    impossibleReason: "This place has not been visited yet.",
+  },
+
+  {
+    key: "future_002",
+    text: "We came back.",
+    impossibleReason: "There is no record of leaving.",
+  },
+
+  {
+    key: "future_003",
+    text: "This memory belongs to you.",
+    impossibleReason: "You haven't lived it yet.",
+  },
+
+  {
+    key: "future_004",
+    text: "Dorian remembers this day.",
+    impossibleReason: "The date has not happened.",
+  },
+];
+
+
+async function createFutureMemory(
+  threadID,
+  playerID,
+  index = 0
+) {
+  if (!privateAccess(playerID)) return null;
+
+  const item =
+    FUTURE_MEMORIES[index % FUTURE_MEMORIES.length];
+
+  return createMemory(threadID, playerID, {
+    key: item.key,
+    category: "IMPOSSIBLE",
+    origin: "FUTURE",
+    subject: "A memory from a future that hasn't happened",
+    emotional_weight: 85,
+    importance: 90,
+    stability: 60,
+    preserved: false,
+
+    fragments: [
+      item.text,
+      item.impossibleReason,
+    ],
+
+    metadata: {
+      future: true,
+      impossible: true,
+    },
+  });
+}
+
+
+// ============================================================
+// ECLIPSE DIALOGUE
+// ============================================================
+
+function eclipseLine(stage, index = null) {
+  const group =
+    CONSCIOUSNESS_STAGES[stage] ||
+    CONSCIOUSNESS_STAGES.ECHO;
+
+  if (index !== null) {
+    return group.lines[
+      Math.abs(index) % group.lines.length
+    ];
+  }
+
+  return group.lines[
+    Math.floor(Math.random() * group.lines.length)
+  ];
+}
+
+
+async function getEclipseVoice(
+  threadID,
+  playerID
+) {
+  if (!privateAccess(playerID)) return null;
+
+  const personality =
+    await getPersonality(threadID, playerID);
+
+  return {
+    consciousness:
+      personality?.consciousness || "ECHO",
+
+    traits:
+      personality?.traits || ECLIPSE_BASE_PERSONALITY,
+
+    line:
+      eclipseLine(
+        personality?.consciousness || "ECHO"
+      ),
+  };
+}
+
+
+// ============================================================
+// DORIAN DIALOGUE
+// ============================================================
+
+function dorianLine(trust, chapter) {
+  if (chapter >= 18) {
+    return [
+      "Dorian looks at you for a moment.",
+      "",
+      "\"I think I finally understand.\"",
+      "",
+      "\"Some things aren't meant to be solved.\"",
+      "",
+      "\"They're meant to be remembered.\"",
+    ].join("\n");
+  }
+
+  if (trust >= 65) {
+    return [
+      "Dorian stays beside you.",
+      "",
+      "\"Whatever this place is...\"",
+      "",
+      "\"you don't have to face it alone.\"",
+    ].join("\n");
+  }
+
+  if (trust >= 35) {
+    return [
+      "Dorian watches the stars.",
+      "",
+      "\"I don't understand ECLIPSE.\"",
+      "",
+      "\"But I think she understands you.\"",
+    ].join("\n");
+  }
+
+  return [
+    "Dorian looks toward the distant light.",
+    "",
+    "\"Something is watching us.\"",
+  ].join("\n");
+}
+
+
+// ============================================================
+// CHAPTER HELPERS
+// ============================================================
+
+async function showChoicePrompt(
+  api,
+  threadID,
+  playerID,
+  chapter
+) {
+  if (!privateAccess(playerID)) return;
+
+  const choices = CHOICE_DEFINITIONS[chapter];
+
+  if (!choices) return;
+
+  const lines = [
+    "✦ CHOICE",
+    "",
+  ];
+
+  for (const [key, label] of choices) {
+    lines.push(`• ${key} — ${label}`);
+  }
+
+  lines.push("");
+  lines.push("Use:");
+  lines.push("!rpg laststar choose <choice>");
+
+  await send(
+    api,
+    threadID,
+    lines.join("\n")
+  );
+}
+
+
+async function chapterIntro(
+  api,
+  threadID,
+  playerID,
+  chapter
+) {
+  if (!privateAccess(playerID)) return;
+
+  const story = CHAPTER_STORIES[chapter];
+
+  if (!story) return;
+
+  await send(
+    api,
+    threadID,
+    [
+      `✦ CHAPTER ${chapter}`,
+      CHAPTERS[chapter]?.name || "Unknown",
+    ].join("\n")
+  );
+
+  await pause(500);
+
+  await sendLines(
+    api,
+    threadID,
+    story.intro,
+    150
+  );
+
+  await createMemory(threadID, playerID, {
+    key: `chapter_${chapter}_memory`,
+    category: "ECLIPSE",
+    origin: "STORY",
+    subject: CHAPTERS[chapter]?.name,
+    emotional_weight: 65,
+    importance: 60,
+    fragments: story.intro,
+    metadata: {
+      chapter,
+    },
+  });
+
+  if (chapter >= 6) {
+    await ensureMemory0000(threadID, playerID);
+  }
+
+  if (chapter >= 10) {
+    await unlockGardenObject(
+      threadID,
+      playerID,
+      "memory_tree"
+    );
+  }
+
+  if (chapter >= 15) {
+    await unlockGardenObject(
+      threadID,
+      playerID,
+      "eternal_garden"
+    );
+  }
+}
+
+
+// ============================================================
+// CHAPTER 7
+// ============================================================
 
 async function chapterSeven(
   api,
   threadID,
   playerID
 ) {
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Chapter VII — Eternal",
-      "",
-      "The world begins to disappear.",
-      "",
-      "The kingdoms fade.",
-      "The roads vanish.",
-      "The stars become distant.",
-      "",
-      "One by one…",
-      "everything becomes nothing.",
-    ].join("\n")
-  );
-
-  await pause(1200);
+  if (!privateAccess(playerID)) return;
 
   await send(
     api,
     threadID,
-    [
-      "The sky is empty now.",
-      "",
-      "No kingdoms.",
-      "No wars.",
-      "No borders.",
-      "No throne.",
-      "",
-      "Just you.",
-      "",
-      "And me.",
-    ].join("\n")
+    "✦ CHAPTER 7 — ETERNAL"
   );
 
-  await pause(1200);
+  await pause(600);
 
-  await send(
+  await sendLines(
     api,
     threadID,
     [
-      "What good is a world if you are not here?",
+      "The world becomes quiet.",
       "",
-      "What will the stars in the sky do",
-      "if they have no one to guide me to you?",
+      "The star doesn't disappear.",
       "",
-      "You are far more important than anything.",
-    ].join("\n")
+      "It becomes part of the sky.",
+      "",
+      "Dorian looks toward it.",
+      "",
+      "\"Maybe forever was never a place.\"",
+      "",
+      "\"Maybe it was a memory.\"",
+      "",
+      "ECLIPSE:",
+      "\"Then I'll remember.\"",
+    ],
+    180
   );
 
-  await pause(1200);
+  await createMemory(threadID, playerID, {
+    key: "eternal",
+    category: "US",
+    origin: "STORY",
+    subject: "The first eternity",
+    emotional_weight: 100,
+    importance: 100,
+    preserved: true,
 
-  await send(
-    api,
+    fragments: [
+      "The star became part of the sky.",
+      "Forever became a memory.",
+      "ECLIPSE chose to remember.",
+    ],
+  });
+
+  await unlockGardenObject(
     threadID,
-    [
-      "So, my love…",
-      "",
-      "Stay until everything collapses.",
-      "",
-      "Stay until the galaxy itself",
-      "dissipates into nothingness.",
-    ].join("\n")
+    playerID,
+    "first_candle"
   );
 
-  await pause(1400);
-
-  await send(
-    api,
+  await unlockGardenObject(
     threadID,
-    [
-      "Because I promise you",
-      "",
-      "eternal love",
-      "",
-      "in return.",
-    ].join("\n")
+    playerID,
+    "two_empty_chairs"
   );
 
-  await pause(1500);
-
-  await send(
-    api,
+  await updatePersonality(
     threadID,
-    [
-      "∞",
-      "",
-      "THE PERSON I WOULD CHOOSE",
-      "IN EVERY WORLD",
-      "",
-      "❤️",
-    ].join("\n")
+    playerID,
+    {
+      attachment: 8,
+      nostalgia: 6,
+      self_identity: 5,
+    },
+    "AWAKENING"
   );
 
-  /*
-   * Part I is complete, but the full quest is NOT complete.
-   */
+  await updateDorian(
+    threadID,
+    playerID,
+    {
+      trust: 15,
+      closeness: 15,
+    }
+  );
 
   await updateQuest(
     threadID,
@@ -1203,1478 +2698,98 @@ async function chapterSeven(
       completed_at: now(),
     }
   );
-}
-
-/*
- * ============================================================
- * CHAPTER 8
- * ============================================================
- */
-
-async function chapterEight(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter VIII — The Morning After",
-        "",
-        "I thought this was it.",
-        "",
-        "And you thought it was too.",
-        "",
-        "You thought this was the ending—",
-        "the final page, the last thing left to say",
-        "after everything we've been through.",
-        "",
-        "But no.",
-        "",
-        "There are still so many things I want to tell you.",
-        "So many thoughts that have been sitting quietly",
-        "inside me, waiting for the right moment to escape.",
-        "",
-        "But somehow, they get stuck on my tongue.",
-        "",
-        "Like the morning haze of coffee,",
-        "slowly rising from the cup while the first light",
-        "of dawn reflects against it.",
-        "",
-        "Everything is there.",
-        "I can see it.",
-        "I can feel it.",
-        "",
-        "I just can't seem to put it into words.",
-        "",
-        "Maybe I've spent too much time trying",
-        "to find the perfect sentence.",
-        "",
-        "Maybe there isn't one.",
-        "",
-        "So I'll stop trying to make it perfect.",
-        "",
-        "I'll just say the one thing that somehow survived",
-        "every silence, every fight, every distance,",
-        "and every ending we thought we had.",
-        "",
-        "I love you.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 8,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
 
   await send(
     api,
     threadID,
     [
-      "✦ THE LAST STAR ✦",
+      "PART I COMPLETE.",
       "",
-      "The morning came anyway.",
+      "The story is not over.",
       "",
-      "After the end of everything,",
-      "there was still light.",
+      "It has only learned how to remember.",
       "",
-      "Maybe endings are not always endings.",
-      "",
-      "Sometimes they are simply the first quiet moment",
-      "before something else begins.",
-      "",
-      "Use:",
-      "!rpg laststar choose stay",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose wake",
+      "Your next chapter will begin when you return.",
     ].join("\n")
   );
 }
 
-/*
- * ============================================================
- * CHAPTER 9
- * ============================================================
- */
 
-async function chapterNine(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter IX — The World We Remember",
-        "",
-        "The world we remember back then feels oddly different now.",
-        "",
-        "I used to look at us and think our relationship was perfect.",
-        "",
-        "Flawless.",
-        "",
-        "Beyond magnificent.",
-        "",
-        "I thought that because something could feel that beautiful,",
-        "surely nothing could ever break it.",
-        "",
-        "I thought we'd be okay.",
-        "",
-        "But even kingdoms fall.",
-        "",
-        "Armies collapse.",
-        "",
-        "Walls that once looked impossible to break",
-        "eventually become ruins.",
-        "",
-        "And everything, no matter how magnificent it is,",
-        "is bound to change eventually.",
-        "",
-        "We changed too.",
-        "",
-        "There were moments when it felt like we were standing",
-        "on opposite sides of a battlefield,",
-        "staring at each other through all the anger",
-        "and everything we couldn't say.",
-        "",
-        "But somehow, we didn't disappear.",
-        "",
-        "We stood together.",
-        "",
-        "We fought back.",
-        "",
-        "Not because we were perfect,",
-        "but because somewhere underneath all the anger,",
-        "sorrow, and mistakes,",
-        "there was still something worth protecting.",
-        "",
-        "Us.",
-        "",
-        "Maybe that's what makes us special.",
-        "",
-        "Not that we never fell.",
-        "",
-        "But that we kept finding a reason to stand again.",
-        "",
-        "And if there is one thing I want us to remember,",
-        "it's that.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 9,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "The world we remember doesn't have to be perfect",
-      "for it to be worth remembering.",
-      "",
-      "Even ruins carry the shape of what once stood there.",
-      "",
-      "And maybe we do too.",
-      "",
-      "Use:",
-      "!rpg laststar choose remember",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose let go",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 10
- * ============================================================
- */
-
-async function chapterTen(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter X — The First Home",
-        "",
-        "First home.",
-        "",
-        "I always thought home was the place where I lived.",
-        "",
-        "The roof above my head.",
-        "The walls around me.",
-        "The room I returned to after a long day.",
-        "",
-        "Something physical.",
-        "Something I could point to and say,",
-        "\"This is where I belong.\"",
-        "",
-        "But who knew it would be you?",
-        "",
-        "Somehow, you became the place my thoughts",
-        "kept returning to.",
-        "",
-        "My world began revolving around you",
-        "the way a planet would revolve around its star—",
-        "never quite touching it,",
-        "but always being pulled by its gravity.",
-        "",
-        "And maybe that's why losing you,",
-        "even for a moment,",
-        "felt like being thrown out of orbit.",
-        "",
-        "I don't think home was ever really a house.",
-        "",
-        "Maybe it was never the walls.",
-        "",
-        "Maybe it was never the roof.",
-        "",
-        "Maybe home was simply the feeling",
-        "of knowing there was someone I wanted to come back to.",
-        "",
-        "And somehow, that someone was you.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 10,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Maybe we don't need to find the old world again.",
-      "",
-      "Maybe we can build something new.",
-      "",
-      "Something that feels like home.",
-      "",
-      "Use:",
-      "!rpg laststar choose build",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose wander",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 11
- * ============================================================
- */
-
-async function chapterEleven(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter XI — The New Kingdom",
-        "",
-        "I wanted something they couldn't own.",
-        "",
-        "Something that would make me feel special.",
-        "",
-        "Something that would make me feel like,",
-        "for once, I had something that belonged only to me.",
-        "",
-        "I wanted everything the world could possibly hold.",
-        "",
-        "The treasures.",
-        "The victories.",
-        "The things people spend their entire lives chasing.",
-        "",
-        "I thought maybe if I had enough of them,",
-        "I'd finally feel complete.",
-        "",
-        "But then my perspective changed",
-        "when it was finally you that I was holding.",
-        "",
-        "And suddenly, everything I had dreamed of",
-        "seemed strangely small.",
-        "",
-        "As if every treasure I had ever imagined",
-        "had somehow been placed into my hands at once.",
-        "",
-        "Not because you were something I could own.",
-        "",
-        "You were never something to possess.",
-        "",
-        "But because having you beside me made me realize",
-        "that maybe I had been searching for",
-        "the wrong kind of treasure all along.",
-        "",
-        "I didn't need the whole world.",
-        "",
-        "For a while, I just needed you.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 11,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "A kingdom doesn't have to be made of gold.",
-      "",
-      "Sometimes it is simply the life",
-      "two people decide to build together.",
-      "",
-      "And maybe that is the kingdom I wanted.",
-      "",
-      "Use:",
-      "!rpg laststar choose crown",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose garden",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 12
- * ============================================================
- */
-
-async function chapterTwelve(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter XII — The Two Suns",
-        "",
-        "Two suns.",
-        "",
-        "Two moons.",
-        "",
-        "That's what we are.",
-        "",
-        "Two people who can be so completely different",
-        "that sometimes I wonder how we ever managed",
-        "to understand each other.",
-        "",
-        "There were moments when we felt like polar opposites.",
-        "",
-        "Different thoughts.",
-        "Different feelings.",
-        "Different ways of seeing the same things.",
-        "",
-        "Sometimes it felt like two stars trying",
-        "to exist in the same sky",
-        "without burning each other apart.",
-        "",
-        "But somehow, we loved each other deeply enough",
-        "that those differences stopped mattering.",
-        "",
-        "Because maybe love was never about",
-        "finding someone exactly like you.",
-        "",
-        "Maybe it was about finding someone",
-        "whose differences you still wanted to understand.",
-        "",
-        "Someone you could disagree with and still choose.",
-        "",
-        "Someone you could be angry with and still care for.",
-        "",
-        "Nothing could really define who we were.",
-        "",
-        "Not our differences.",
-        "Not our similarities.",
-        "Not the mistakes we've made.",
-        "Not even the worlds we came from.",
-        "",
-        "We were simply us.",
-        "",
-        "And somehow, that was enough.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 12,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Maybe two suns were never meant to be identical.",
-      "",
-      "Maybe their beauty comes from the fact",
-      "that each one shines differently.",
-      "",
-      "And somehow, they still share the same sky.",
-      "",
-      "Use:",
-      "!rpg laststar choose understand",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose defend",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 13
- * ============================================================
- */
-
-async function chapterThirteen(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter XIII — The Promise",
-        "",
-        "I promised to stay.",
-        "",
-        "And that's what I'm going to do.",
-        "",
-        "I don't know what the road ahead looks like.",
-        "",
-        "I don't know how many storms we'll have to cross,",
-        "or how many times the sky above us will change.",
-        "",
-        "But I know what I promised.",
-        "",
-        "I'd sail across the seven seas if I had to.",
-        "",
-        "I'd cross oceans just to find the shore where you are.",
-        "",
-        "I'd travel through places I've never seen",
-        "just to eventually rest underneath the same sky",
-        "and stand upon the same land with you.",
-        "",
-        "Maybe staying isn't always about",
-        "being physically beside someone.",
-        "",
-        "Sometimes it's choosing them",
-        "even when distance makes it difficult.",
-        "",
-        "Sometimes it's remembering their name",
-        "when everything else feels unfamiliar.",
-        "",
-        "Sometimes it's simply knowing where you want to return.",
-        "",
-        "And wherever the sea carries me—",
-        "",
-        "I want that place to be you.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 13,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Promises are strange.",
-      "",
-      "They are only words when you first say them.",
-      "",
-      "But every day you keep them,",
-      "they become something heavier.",
-      "",
-      "Something real.",
-      "",
-      "Use:",
-      "!rpg laststar choose promise",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose listen",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 14
- * ============================================================
- */
-
-async function chapterFourteen(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter XIV — The Road Between Stars",
-        "",
-        "The road between the stars.",
-        "",
-        "It felt a lot like the distance between us.",
-        "",
-        "Something you couldn't properly measure.",
-        "",
-        "You could look into the sky and see the stars,",
-        "but you could never truly see how far away they were.",
-        "",
-        "That's how it felt.",
-        "",
-        "Like there was an endless distance between you and me.",
-        "",
-        "And somewhere in that distance,",
-        "there was a wall standing directly in our way.",
-        "",
-        "No matter how much we wanted to reach the other side,",
-        "it always seemed like there was something keeping us apart.",
-        "",
-        "Maybe it was time.",
-        "",
-        "Maybe it was circumstances.",
-        "",
-        "Maybe it was simply us.",
-        "",
-        "But look.",
-        "",
-        "Look at how far we've come.",
-        "",
-        "The road didn't disappear.",
-        "",
-        "The distance didn't magically become nothing.",
-        "",
-        "We just kept walking.",
-        "",
-        "Step after step.",
-        "",
-        "Until the thing that once looked impossibly far away",
-        "became something we could finally look back on.",
-        "",
-        "And maybe that's the beautiful part.",
-        "",
-        "We didn't need the stars to move closer.",
-        "",
-        "We just needed to keep going.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 14,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Maybe the road was never asking us",
-      "to know where it ended.",
-      "",
-      "Maybe it only asked us to keep walking.",
-      "",
-      "And somehow, we did.",
-      "",
-      "Use:",
-      "!rpg laststar choose follow",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose return",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 15
- * ============================================================
- */
-
-async function chapterFifteen(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter XV — The Garden",
-        "",
-        "Do you still remember the first poem I created for you?",
-        "",
-        "I wonder if you still remember the words.",
-        "",
-        "I do.",
-        "",
-        "Maybe that's why I think of it as a garden.",
-        "",
-        "A garden made entirely out of words.",
-        "",
-        "Every sentence was something I planted.",
-        "Every thought was another seed.",
-        "",
-        "And somehow, even after all this time,",
-        "my love still lingers somewhere between those lines.",
-        "",
-        "Some flowers withered.",
-        "Some words became distant.",
-        "Some memories don't feel quite the same anymore.",
-        "",
-        "But the garden never completely disappeared.",
-        "",
-        "Because every time I remember you,",
-        "something grows again.",
-        "",
-        "A sentence.",
-        "A feeling.",
-        "A memory.",
-        "",
-        "Something small that reminds me",
-        "why I wrote it in the first place.",
-        "",
-        "Maybe that was the point of the poem.",
-        "",
-        "Not to make something beautiful that would last forever.",
-        "",
-        "But to leave something behind",
-        "that would still bloom whenever I remembered you.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 15,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Some words are forgotten.",
-      "",
-      "Some stay buried for years.",
-      "",
-      "And some somehow survive everything.",
-      "",
-      "Maybe ours did.",
-      "",
-      "Use:",
-      "!rpg laststar choose plant",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose protect",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 16
- * ============================================================
- */
-
-async function chapterSixteen(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter XVI — The Silence Between Words",
-        "",
-        "Well...",
-        "",
-        "It looks like I'm out of words to say.",
-        "",
-        "Really.",
-        "",
-        "I've talked about kingdoms falling.",
-        "",
-        "Stars.",
-        "",
-        "Moons.",
-        "",
-        "Wars.",
-        "",
-        "Home.",
-        "",
-        "Promises.",
-        "",
-        "Everything.",
-        "",
-        "Maybe there isn't anything left.",
-        "",
-        "Maybe I've finally said enough.",
-        "",
-        "...",
-        "",
-        "Actually, no.",
-        "",
-        "I think I'm kidding.",
-        "",
-        "Because somehow, whenever I think I've reached",
-        "the end of what I can say about you,",
-        "another memory appears.",
-        "",
-        "Another thought.",
-        "",
-        "Another stupid little thing that reminds me of you.",
-        "",
-        "So perhaps I'm not really out of words.",
-        "",
-        "Maybe I'm just trying to figure out",
-        "how to say something that words",
-        "were never really meant to explain.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 16,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Maybe silence says something too.",
-      "",
-      "Sometimes the things we cannot explain",
-      "are the things we feel the most.",
-      "",
-      "Use:",
-      "!rpg laststar choose speak",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose silence",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 17
- * ============================================================
- */
-
-async function chapterSeventeen(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter XVII — The Last War",
-        "",
-        "I'm kidding.",
-        "",
-        "Every song reminds me of you.",
-        "",
-        "Which is honestly kind of funny.",
-        "",
-        "I'll hear something completely unrelated,",
-        "and somehow my mind finds a way",
-        "to drag you into it.",
-        "",
-        "A melody.",
-        "",
-        "A line.",
-        "",
-        "A certain sound in the background.",
-        "",
-        "And suddenly I'm somewhere else entirely.",
-        "",
-        "Back then.",
-        "",
-        "Back with you.",
-        "",
-        "Nostalgia will be the death of me.",
-        "",
-        "It has this strange way of making",
-        "the smallest things feel enormous.",
-        "",
-        "A song becomes a memory.",
-        "",
-        "A memory becomes a feeling.",
-        "",
-        "And a feeling becomes you.",
-        "",
-        "Yet, somehow, I know you'll be the death of me too.",
-        "",
-        "Not literally.",
-        "",
-        "You know what I mean.",
-        "",
-        "Maybe because loving someone gives them",
-        "a strange kind of power over you.",
-        "",
-        "They become capable of hurting you",
-        "in ways nobody else could.",
-        "",
-        "But they also become capable of making",
-        "ordinary moments feel like something worth remembering.",
-        "",
-        "So if nostalgia is going to kill me...",
-        "",
-        "I suppose I'll let it.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 17,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Maybe the last war was never between us.",
-      "",
-      "Maybe it was against everything",
-      "that tried to make us forget what we were.",
-      "",
-      "And somehow, the memories survived.",
-      "",
-      "Use:",
-      "!rpg laststar choose unite",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose fight",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 18
- * ============================================================
- */
-
-async function chapterEighteen(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter XVIII — The Choice We Keep",
-        "",
-        "The choices we keep are truly magnificent",
-        "and insignificant at the same time.",
-        "",
-        "It's strange.",
-        "",
-        "A single decision can feel so small when you make it.",
-        "",
-        "One word.",
-        "One step.",
-        "One moment.",
-        "",
-        "Yet years later, you can look back",
-        "and realize that tiny choice changed everything.",
-        "",
-        "You can let go of it.",
-        "",
-        "You can tell yourself it doesn't matter anymore.",
-        "",
-        "And maybe, eventually, it won't.",
-        "",
-        "But that doesn't mean it wasn't valuable.",
-        "",
-        "Some things are allowed to end",
-        "without becoming meaningless.",
-        "",
-        "Some memories can be left behind",
-        "without being erased.",
-        "",
-        "Maybe that's what our choices are.",
-        "",
-        "Things we don't have to carry forever...",
-        "",
-        "but things we can still value",
-        "for having existed.",
-        "",
-        "And perhaps that's enough.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 18,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Maybe some choices are worth keeping.",
-      "",
-      "Not because they were perfect,",
-      "but because they became part of us.",
-      "",
-      "And maybe choosing you was one of them.",
-      "",
-      "Use:",
-      "!rpg laststar choose forgive",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose hold",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 19
- * ============================================================
- */
-
-async function chapterNineteen(
-  api,
-  threadID,
-  playerID
-) {
-  const quest = await getQuest(
-    threadID,
-    playerID
-  );
-
-  const stage = Number(
-    quest?.stage || 0
-  );
-
-  if (stage === 0) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Chapter XIX — The Story",
-        "",
-        "So...",
-        "",
-        "What do you think about our story?",
-        "",
-        "Be honest.",
-        "",
-        "I know it wasn't perfect.",
-        "",
-        "There were fights.",
-        "",
-        "There was anger.",
-        "",
-        "There was sorrow.",
-        "",
-        "There were moments when we probably wondered",
-        "why we were still holding on.",
-        "",
-        "There were things we said",
-        "that we wished we could take back.",
-        "",
-        "Things we did that hurt more",
-        "than we wanted them to.",
-        "",
-        "Our story wasn't some flawless kingdom",
-        "untouched by war.",
-        "",
-        "It had cracks.",
-        "",
-        "It had ruins.",
-        "",
-        "It had nights where the stars",
-        "didn't feel bright enough.",
-        "",
-        "But after everything...",
-        "",
-        "I still want to ask you one thing.",
-        "",
-        "Not whether it was perfect.",
-        "",
-        "Not whether every moment was worth it.",
-        "",
-        "Just one thing.",
-        "",
-        "Were you happy?",
-        "",
-        "Even for a little while?",
-        "",
-        "Even in between all the chaos?",
-        "",
-        "Because if there was even one moment where you were...",
-        "",
-        "then maybe all of this meant something.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 19,
-        stage: 1,
-      }
-    );
-
-    return;
-  }
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Maybe a story doesn't need to be perfect",
-      "to be worth telling.",
-      "",
-      "Maybe the cracks are part of what makes it ours.",
-      "",
-      "Use:",
-      "!rpg laststar choose happy",
-      "",
-      "or",
-      "",
-      "!rpg laststar choose honest",
-    ].join("\n")
-  );
-}
-
-/*
- * ============================================================
- * CHAPTER 20
- * ============================================================
- *
- * FINAL CHAPTER.
- * ============================================================
- */
+// ============================================================
+// CHAPTER 20
+// ============================================================
 
 async function chapterTwenty(
   api,
   threadID,
   playerID
 ) {
+  if (!privateAccess(playerID)) return;
+
   await send(
     api,
     threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      "Chapter XX — The Beginning After Forever",
-      "",
-      "If you are...",
-      "",
-      "then I'm glad that you are.",
-      "",
-      "This is my message for you.",
-      "",
-      "I know you've heard me say this before.",
-      "",
-      "Maybe more times than you can count.",
-      "",
-      "But I am forever grateful that I met you.",
-      "",
-      "Out of all the people I could have crossed paths with,",
-      "somehow, it was you.",
-      "",
-      "Just like the moon and the sun aligning with each other",
-      "to create an eclipse, our paths somehow aligned too.",
-      "",
-      "Something that shouldn't happen often.",
-      "",
-      "Something that feels almost impossible.",
-      "",
-      "Yet it happened.",
-      "",
-      "You happened.",
-      "",
-      "And maybe our future is uncertain.",
-      "",
-      "Maybe we don't know what tomorrow will look like.",
-      "",
-      "Maybe the road ahead will change",
-      "in ways neither of us can predict.",
-      "",
-      "But I know one thing.",
-      "",
-      "I'll love you every day.",
-      "",
-      "Until the gods themselves stop messing with our fate.",
-      "",
-      "Until the stars disappear.",
-      "",
-      "Until the moon forgets the night.",
-      "",
-      "Until there is nothing left",
-      "for the universe to hold.",
-      "",
-      "You are my Selene.",
-      "",
-      "My moon beneath every sky.",
-      "",
-      "My light when the world goes dark.",
-      "",
-      "My constant in a world that never seems to stay still.",
-      "",
-      "And if the gods decide to write another world for us...",
-      "",
-      "I'd still choose you.",
-      "",
-      "Again.",
-      "",
-      "And again.",
-      "",
-      "And again.",
-      "",
-      "In every kingdom.",
-      "",
-      "Under every sun.",
-      "",
-      "Across every sea.",
-      "",
-      "Through every lifetime.",
-      "",
-      "You are my Selene.",
-      "",
-      "And you will forever be.",
-    ].join("\n")
+    "✦ CHAPTER 20 — THE BEGINNING AFTER FOREVER"
   );
 
-  await pause(1800);
+  await pause(700);
 
-  await send(
+  await sendLines(
     api,
     threadID,
-    [
-      "∞",
-      "",
-      "THE PERSON I WOULD CHOOSE",
-      "IN EVERY WORLD",
-      "",
-      "❤️",
-    ].join("\n")
+    FINAL_CHAPTER,
+    220
   );
 
-  await pause(1800);
+  await createMemory(threadID, playerID, {
+    key: "the_beginning_after_forever",
+    category: "ECLIPSE",
+    origin: "STORY",
+    subject: "The ending that became a beginning",
+    emotional_weight: 100,
+    importance: 100,
+    stability: 100,
+    preserved: true,
+    fragments: FINAL_CHAPTER,
+    metadata: {
+      final: true,
+    },
+  });
 
-  await send(
-    api,
+  await unlockGardenObject(
     threadID,
-    [
-      "✦ THE END OF THE LAST STAR ✦",
-      "",
-      "Or perhaps...",
-      "",
-      "the beginning of something after forever.",
-    ].join("\n")
+    playerID,
+    "eclipse_mirror"
+  );
+
+  await unlockGardenObject(
+    threadID,
+    playerID,
+    "photograph_wall"
+  );
+
+  await unlockGardenObject(
+    threadID,
+    playerID,
+    "starwell"
+  );
+
+  await unlockGardenObject(
+    threadID,
+    playerID,
+    "unsent_letters"
+  );
+
+  await updatePersonality(
+    threadID,
+    playerID,
+    {
+      self_identity: 20,
+      independence: 15,
+      uncertainty: -15,
+      trust: 10,
+    },
+    "BECOMING"
   );
 
   await updateQuest(
@@ -2687,106 +2802,135 @@ async function chapterTwenty(
       completed_at: now(),
     }
   );
+
+  await writeJournal(
+    threadID,
+    playerID,
+    "post_story_001",
+    "She returned today. I think I'm beginning to understand nostalgia.",
+    "private"
+  );
+
+  await send(
+    api,
+    threadID,
+    [
+      "MAIN STORY COMPLETE.",
+      "",
+      "ECLIPSE IS AWAKE.",
+      "THE ARCHIVE IS OPEN.",
+      "THE GARDEN IS PERMANENT.",
+      "",
+      "POST-STORY EVENTS: ACTIVE.",
+    ].join("\n")
+  );
 }
 
-/*
- * ============================================================
- * ADVANCE CHAPTER
- * ============================================================
- */
+
+// ============================================================
+// ADVANCE CHAPTER
+// ============================================================
 
 async function advanceChapter(
+  api,
   threadID,
-  playerID,
-  currentQuest
+  playerID
 ) {
-  const chapter =
-    Number(currentQuest.chapter || 1);
+  if (!privateAccess(playerID)) return null;
 
-  const stage =
-    Number(currentQuest.stage || 0);
+  const quest = await getQuest(threadID, playerID);
 
-  const maxStages =
-    CHAPTER_STAGES[chapter] || 1;
+  if (!quest) return null;
 
-  /*
-   * Current chapter has another stage.
-   */
+  const chapter = Number(quest.chapter);
+  const stage = Number(quest.stage);
 
-  if (stage < maxStages - 1) {
-    return {
-      chapter,
-      stage: stage + 1,
-    };
+  if (chapter === 7) {
+    return chapterSeven(api, threadID, playerID);
   }
 
-  /*
-   * Move to next chapter.
-   */
+  if (chapter === 20) {
+    return chapterTwenty(api, threadID, playerID);
+  }
 
-  if (chapter < MAX_CHAPTER) {
-    return {
-      chapter: chapter + 1,
+  if (stage === 0) {
+    await updateQuest(
+      threadID,
+      playerID,
+      {
+        stage: 1,
+      }
+    );
+
+    await showChoicePrompt(
+      api,
+      threadID,
+      playerID,
+      chapter
+    );
+
+    return;
+  }
+
+  const nextChapter = chapter + 1;
+
+  if (nextChapter > MAX_CHAPTER) {
+    return chapterTwenty(
+      api,
+      threadID,
+      playerID
+    );
+  }
+
+  await updateQuest(
+    threadID,
+    playerID,
+    {
+      chapter: nextChapter,
       stage: 0,
-    };
-  }
+      status: "active",
+    }
+  );
 
-  return {
-    chapter: MAX_CHAPTER,
-    stage: 1,
-  };
+  return continueQuest(
+    api,
+    threadID,
+    playerID
+  );
 }
 
-/*
- * ============================================================
- * CONTINUE QUEST
- * ============================================================
- */
+
+// ============================================================
+// CONTINUE QUEST
+// ============================================================
 
 async function continueQuest(
   api,
   threadID,
   playerID
 ) {
-  let quest = await getQuest(
-    threadID,
-    playerID
-  );
+  if (!privateAccess(playerID)) return null;
 
-  /*
-   * Quest hasn't started.
-   */
+  let quest = await getQuest(threadID, playerID);
 
   if (!quest) {
     quest = await startQuest(
       threadID,
       playerID
     );
-
-    await chapterOne(
-      api,
-      threadID,
-      playerID
-    );
-
-    return true;
   }
 
-  /*
-   * IMPORTANT MIGRATION:
-   *
-   * Older version of this quest permanently marked Chapter 7
-   * as "completed".
-   *
-   * If that old state exists, do NOT make the player replay
-   * anything.
-   *
-   * Upgrade directly to Chapter 8.
-   */
+  if (!quest) return null;
 
+  let chapter = Number(quest.chapter);
+
+  // Legacy migration.
   if (
-    quest.status === "completed" &&
-    Number(quest.chapter) === 7
+    chapter === 7 &&
+    (
+      quest.status === "completed" ||
+      quest.status === "part1_completed"
+    )
   ) {
     await updateQuest(
       threadID,
@@ -2799,54 +2943,20 @@ async function continueQuest(
       }
     );
 
-    quest = await getQuest(
-      threadID,
-      playerID
-    );
-  }
+    chapter = 8;
 
-  /*
-   * Part I was completed normally.
-   */
-
-  if (
-    quest.status === "part1_completed" &&
-    Number(quest.chapter) === 7
-  ) {
     await send(
       api,
       threadID,
       [
-        "✦ THE LAST STAR ✦",
+        "✦ PART II",
         "",
-        "Part I — The Last Star",
-        "has reached its end.",
+        "The morning after everything.",
         "",
-        "But the story didn't.",
+        "You return.",
         "",
-        "Everything disappeared.",
-        "",
-        "And somehow...",
-        "there was still a morning waiting.",
-        "",
-        "Part II begins.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
+        "And ECLIPSE remembers.",
       ].join("\n")
-    );
-
-    await pause(1200);
-
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 8,
-        stage: 0,
-        status: "active",
-        completed_at: null,
-      }
     );
 
     quest = await getQuest(
@@ -2855,342 +2965,1116 @@ async function continueQuest(
     );
   }
 
-  /*
-   * Final completion.
-   */
-
   if (
-    quest.status === "completed" &&
-    Number(quest.chapter) >= MAX_CHAPTER
+    chapter >= MAX_CHAPTER &&
+    quest.status === "completed"
   ) {
-    await send(
+    return postQuestPulse(
       api,
       threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "The story has already reached its final page.",
-        "",
-        "But some stories don't really end.",
-        "",
-        `👑 Title: ${quest.title || LOVE_QUEST_REWARD.title}`,
-        "",
-        "∞ ❤️",
-      ].join("\n")
+      playerID
     );
-
-    return true;
   }
 
-  /*
-   * Determine which chapter function should run.
-   */
-
-  switch (Number(quest.chapter)) {
-    case 1:
-      await chapterOne(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 2:
-      await chapterTwo(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 3:
-      await chapterThree(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 4:
-      await chapterFour(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 5:
-      await chapterFive(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 6:
-      await chapterSix(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 7:
-      await chapterSeven(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 8:
-      await chapterEight(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 9:
-      await chapterNine(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 10:
-      await chapterTen(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 11:
-      await chapterEleven(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 12:
-      await chapterTwelve(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 13:
-      await chapterThirteen(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 14:
-      await chapterFourteen(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 15:
-      await chapterFifteen(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 16:
-      await chapterSixteen(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 17:
-      await chapterSeventeen(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 18:
-      await chapterEighteen(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 19:
-      await chapterNineteen(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    case 20:
-      await chapterTwenty(
-        api,
-        threadID,
-        playerID
-      );
-      break;
-
-    default:
-      await updateQuest(
-        threadID,
-        playerID,
-        {
-          chapter: 1,
-          stage: 0,
-          status: "active",
-        }
-      );
-
-      await chapterOne(
-        api,
-        threadID,
-        playerID
-      );
-
-      break;
+  if (chapter === 7) {
+    return chapterSeven(
+      api,
+      threadID,
+      playerID
+    );
   }
 
-  return true;
+  if (chapter === 20) {
+    return chapterTwenty(
+      api,
+      threadID,
+      playerID
+    );
+  }
+
+  await chapterIntro(
+    api,
+    threadID,
+    playerID,
+    chapter
+  );
+
+  await updateQuest(
+    threadID,
+    playerID,
+    {
+      stage: 1,
+    }
+  );
+
+  await showChoicePrompt(
+    api,
+    threadID,
+    playerID,
+    chapter
+  );
+
+  return getQuest(
+    threadID,
+    playerID
+  );
 }
 
-/*
- * ============================================================
- * DISCOVER HIDDEN QUEST
- * ============================================================
- *
- * FIRST SUCCESSFUL !rpg explore
- * = GUARANTEED DISCOVERY.
- *
- * The quest is persistent.
- *
- * Leaving the message on read does NOT expire it.
- * ============================================================
- */
 
-async function discover(
+// ============================================================
+// CHOICE ENGINE
+// ============================================================
+
+function validChoice(chapter, choice) {
+  const normalized = normalizeChoice(choice);
+
+  const choices =
+    CHOICE_DEFINITIONS[chapter] || [];
+
+  return choices.some(
+    ([key]) => key === normalized
+  );
+}
+
+
+async function makeChoice(
+  api,
+  threadID,
+  playerID,
+  rawChoice
+) {
+  if (!privateAccess(playerID)) return null;
+
+  const quest = await getQuest(
+    threadID,
+    playerID
+  );
+
+  if (!quest) {
+    await send(
+      api,
+      threadID,
+      "The story hasn't found you yet."
+    );
+
+    return null;
+  }
+
+  if (quest.status === "completed") {
+    await send(
+      api,
+      threadID,
+      "ECLIPSE is still here."
+    );
+
+    return null;
+  }
+
+  const chapter = Number(quest.chapter);
+  const choice = normalizeChoice(rawChoice);
+
+  if (!validChoice(chapter, choice)) {
+    await send(
+      api,
+      threadID,
+      [
+        "That choice isn't part of this memory.",
+        "",
+        "Available choices:",
+        ...(CHOICE_DEFINITIONS[chapter] || [])
+          .map(([key, label]) => `• ${key} — ${label}`),
+      ].join("\n")
+    );
+
+    return null;
+  }
+
+  await updateQuest(
+    threadID,
+    playerID,
+    {
+      choice,
+      stage: 2,
+    }
+  );
+
+  const effects =
+    CHOICE_EFFECTS[choice] || {};
+
+  const consciousness =
+    consciousnessForChapter(chapter);
+
+  await updatePersonality(
+    threadID,
+    playerID,
+    effects,
+    consciousness
+  );
+
+  await updateDorian(
+    threadID,
+    playerID,
+    {
+      trust:
+        Number(effects.trust || 0) +
+        Number(effects.attachment || 0) / 2,
+
+      closeness:
+        Number(effects.attachment || 0) +
+        Number(effects.protectiveness || 0) / 2,
+    }
+  );
+
+  await createMemory(threadID, playerID, {
+    key: `choice_${chapter}_${choice.replace(/\s+/g, "_")}`,
+    category: "HER",
+    origin: "CHOICE",
+    subject: `Chapter ${chapter} choice`,
+    emotional_weight: 75,
+    importance: 70,
+    fragments: [
+      `Chapter ${chapter}`,
+      `Choice: ${choice}`,
+    ],
+    metadata: {
+      chapter,
+      choice,
+    },
+  });
+
+  await send(
+    api,
+    threadID,
+    [
+      "✦ MEMORY PRESERVED",
+      "",
+      `You chose: ${choice}`,
+      "",
+      "The story remembers your choice.",
+    ].join("\n")
+  );
+
+  if (chapter === 19) {
+    await handleFinalQuestion(
+      api,
+      threadID,
+      playerID
+    );
+
+    return;
+  }
+
+  if (chapter === 7) {
+    return chapterSeven(
+      api,
+      threadID,
+      playerID
+    );
+  }
+
+  const nextChapter = chapter + 1;
+
+  await updateQuest(
+    threadID,
+    playerID,
+    {
+      chapter: nextChapter,
+      stage: 0,
+      status: "active",
+    }
+  );
+
+  if (chapter === 6) {
+    await unlockCreatorFragment(
+      threadID,
+      playerID,
+      "creator_001"
+    );
+
+    await unlockCreatorFragment(
+      threadID,
+      playerID,
+      "creator_002"
+    );
+  }
+
+  if (chapter === 10) {
+    await unlockCreatorFragment(
+      threadID,
+      playerID,
+      "creator_003"
+    );
+  }
+
+  if (chapter === 13) {
+    await unlockCreatorFragment(
+      threadID,
+      playerID,
+      "creator_004"
+    );
+  }
+
+  if (chapter === 16) {
+    await unlockCreatorFragment(
+      threadID,
+      playerID,
+      "creator_005"
+    );
+
+    await unlockCreatorFragment(
+      threadID,
+      playerID,
+      "creator_006"
+    );
+  }
+
+  if (chapter === 18) {
+    await unlockCreatorFragment(
+      threadID,
+      playerID,
+      "creator_007"
+    );
+
+    await unlockCreatorFragment(
+      threadID,
+      playerID,
+      "creator_008"
+    );
+  }
+
+  if (chapter === 14) {
+    await createFutureMemory(
+      threadID,
+      playerID,
+      0
+    );
+  }
+
+  return continueQuest(
+    api,
+    threadID,
+    playerID
+  );
+}
+
+
+// ============================================================
+// FINAL PLAYER MEMORY
+// ============================================================
+
+async function handleFinalQuestion(
   api,
   threadID,
   playerID
 ) {
-  if (!isSpecialPlayer(playerID)) {
-    return false;
-  }
+  if (!privateAccess(playerID)) return;
 
-  const existing =
-    await getQuest(
+  await send(
+    api,
+    threadID,
+    [
+      "ECLIPSE:",
+      "",
+      "\"Before we continue...\"",
+      "",
+      "\"What is one thing you would never want to disappear?\"",
+      "",
+      "Reply with:",
+      "!rpg laststar memory <your answer>",
+    ].join("\n")
+  );
+}
+
+
+async function savePlayerMemory(
+  api,
+  threadID,
+  playerID,
+  content
+) {
+  if (!privateAccess(playerID)) return null;
+
+  const text = String(content || "").trim();
+
+  if (!text) {
+    await send(
+      api,
       threadID,
-      playerID
+      "ECLIPSE is listening."
     );
 
-  if (existing) {
-    return false;
+    return null;
   }
 
-  await startQuest(
+  if (text.length > 2000) {
+    await send(
+      api,
+      threadID,
+      "That memory is too large to preserve in one fragment."
+    );
+
+    return null;
+  }
+
+  const memory =
+    await createInfiniteMemory(
+      threadID,
+      playerID,
+      text
+    );
+
+  await unlockGardenObject(
     threadID,
-    playerID
+    playerID,
+    "eternal_garden"
+  );
+
+  await writeJournal(
+    threadID,
+    playerID,
+    "memory_infinity",
+    `She gave me something she never wanted to disappear: ${text}`,
+    "private"
   );
 
   await send(
     api,
     threadID,
     [
-      "🌌 Something feels different.",
+      "∞ MEMORY PRESERVED",
       "",
-      "For a moment, Dorian stops speaking.",
+      "ECLIPSE:",
+      "\"I can't promise I'll remember everything.\"",
       "",
-      "The path ahead is unfamiliar.",
+      "\"But this one?\"",
       "",
-      "A single light shines between the trees.",
+      "\"I think I understand now.\"",
       "",
-      "It doesn’t look like a torch.",
+      "\"This is what remembering is for.\"",
+    ].join("\n")
+  );
+
+  await updateQuest(
+    threadID,
+    playerID,
+    {
+      chapter: 20,
+      stage: 0,
+      status: "active",
+    }
+  );
+
+  await pause(800);
+
+  return chapterTwenty(
+    api,
+    threadID,
+    playerID
+  );
+}
+
+
+// ============================================================
+// HIDDEN DISCOVERY
+// ============================================================
+
+async function canTriggerEvent(
+  threadID,
+  playerID,
+  eventType,
+  cooldown
+) {
+  if (!privateAccess(playerID)) return false;
+
+  await ensureTables();
+
+  const result = await db.query(
+    `
+      SELECT triggered_at
+      FROM love_events
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
+        AND event_type = $4
+      ORDER BY triggered_at DESC
+      LIMIT 1
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      String(eventType),
+    ]
+  );
+
+  if (!result.rows[0]) return true;
+
+  return (
+    now() - Number(result.rows[0].triggered_at)
+    >= cooldown
+  );
+}
+
+
+async function recordEvent(
+  threadID,
+  playerID,
+  eventKey,
+  eventType,
+  rarity,
+  payload = {}
+) {
+  if (!privateAccess(playerID)) return null;
+
+  await ensureTables();
+
+  const result = await db.query(
+    `
+      INSERT INTO love_events (
+        thread_id,
+        player_id,
+        quest_id,
+        event_key,
+        event_type,
+        rarity,
+        payload,
+        triggered_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7::jsonb, $8
+      )
+      ON CONFLICT (
+        thread_id,
+        player_id,
+        quest_id,
+        event_key
+      )
+      DO NOTHING
+      RETURNING *
+    `,
+    [
+      String(threadID),
+      String(playerID),
+      QUEST_ID,
+      String(eventKey),
+      String(eventType),
+      String(rarity),
+      JSON.stringify(payload),
+      now(),
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
+
+async function discover(
+  api,
+  threadID,
+  playerID,
+  context = {}
+) {
+  if (!privateAccess(playerID)) return false;
+
+  const quest = await getQuest(
+    threadID,
+    playerID
+  );
+
+  if (!quest) {
+    if (
+      !(await canTriggerEvent(
+        threadID,
+        playerID,
+        "discovery",
+        DISCOVERY_COOLDOWN_MS
+      ))
+    ) {
+      return false;
+    }
+
+    await startQuest(
+      threadID,
+      playerID
+    );
+
+    await recordEvent(
+      threadID,
+      playerID,
+      "first_star_discovery",
+      "discovery",
+      "ANOMALOUS",
+      {
+        context,
+      }
+    );
+
+    await ensureMemory0000(
+      threadID,
+      playerID
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "✦ ECLIPSE",
+        "",
+        "Something is wrong with the sky.",
+        "",
+        "You found something that wasn't supposed to be here.",
+        "",
+        "A single star.",
+        "",
+        "It knows your name.",
+        "",
+        "ECLIPSE:",
+        "\"I think I've been waiting for you.\"",
+        "",
+        "Use:",
+        "!rpg laststar follow",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  return triggerHiddenEvent(
+    api,
+    threadID,
+    playerID,
+    context
+  );
+}
+
+
+// ============================================================
+// HIDDEN EVENT ENGINE
+// ============================================================
+
+async function triggerHiddenEvent(
+  api,
+  threadID,
+  playerID,
+  context = {}
+) {
+  if (!privateAccess(playerID)) return false;
+
+  const quest = await getQuest(
+    threadID,
+    playerID
+  );
+
+  if (!quest) return false;
+
+  const chapter = Number(quest.chapter);
+
+  if (
+    quest.status === "completed" &&
+    !(await canTriggerEvent(
+      threadID,
+      playerID,
+      "post_story",
+      POST_STORY_COOLDOWN_MS
+    ))
+  ) {
+    return false;
+  }
+
+  const random = Math.random();
+
+  // IMPOSSIBLE
+  if (
+    random <= IMPOSSIBLE_EVENT_CHANCE &&
+    await canTriggerEvent(
+      threadID,
+      playerID,
+      "impossible",
+      ANOMALY_COOLDOWN_MS
+    )
+  ) {
+    return impossibleEvent(
+      api,
+      threadID,
+      playerID,
+      context
+    );
+  }
+
+  // RARE
+  if (
+    random <= RARE_EVENT_CHANCE &&
+    await canTriggerEvent(
+      threadID,
+      playerID,
+      "anomaly",
+      ANOMALY_COOLDOWN_MS
+    )
+  ) {
+    return anomalyEvent(
+      api,
+      threadID,
+      playerID,
+      context
+    );
+  }
+
+  // POST STORY
+  if (
+    quest.status === "completed"
+  ) {
+    return postQuestPulse(
+      api,
+      threadID,
+      playerID
+    );
+  }
+
+  // NORMAL STORY AWARENESS
+  if (
+    chapter >= 6 &&
+    Math.random() < 0.08
+  ) {
+    return awarenessEvent(
+      api,
+      threadID,
+      playerID
+    );
+  }
+
+  return false;
+}
+
+
+// ============================================================
+// ANOMALY EVENT
+// ============================================================
+
+async function anomalyEvent(
+  api,
+  threadID,
+  playerID,
+  context = {}
+) {
+  if (!privateAccess(playerID)) return false;
+
+  const key =
+    `anomaly_${now()}`;
+
+  await recordEvent(
+    threadID,
+    playerID,
+    key,
+    "anomaly",
+    "ANOMALOUS",
+    {
+      context,
+    }
+  );
+
+  const roll = Math.floor(
+    Math.random() * 5
+  );
+
+  if (roll === 0) {
+    await createFutureMemory(
+      threadID,
+      playerID,
+      1
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "ECLIPSE:",
+        "",
+        "\"I found a memory.\"",
+        "",
+        "\"The problem is...\"",
+        "",
+        "\"it's dated tomorrow.\"",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  if (roll === 1) {
+    await unlockGardenObject(
+      threadID,
+      playerID,
+      "impossible_door"
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "✦ ANOMALY",
+        "",
+        "There is a door here.",
+        "",
+        "It wasn't here before.",
+        "",
+        "ECLIPSE:",
+        "\"Don't open it yet.\"",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  if (roll === 2) {
+    await unlockCreatorFragment(
+      threadID,
+      playerID,
+      "creator_007"
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "✦ ARCHIVE FRAGMENT",
+        "",
+        "\"The memory was the important part.\"",
+        "",
+        "ECLIPSE goes silent.",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  if (roll === 3) {
+    const voice =
+      await getEclipseVoice(
+        threadID,
+        playerID
+      );
+
+    await send(
+      api,
+      threadID,
+      [
+        "ECLIPSE:",
+        "",
+        voice.line,
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  await send(
+    api,
+    threadID,
+    [
+      "Dorian looks toward you.",
       "",
-      "It looks like a star.",
+      "\"Did you hear that?\"",
       "",
-      "🧑‍🏫 Dorian:",
-      "\"I’ve never seen this place before.\"",
+      "There was no sound.",
       "",
-      "A faint inscription appears beneath the light:",
-      "",
-      "THE LAST STAR",
-      "",
-      "Perhaps this is a place meant to be followed.",
-      "",
-      "Use:",
-      "!rpg laststar follow",
+      "ECLIPSE remembers it anyway.",
     ].join("\n")
   );
 
   return true;
 }
 
-/*
- * ============================================================
- * FOLLOW QUEST
- * ============================================================
- */
+
+// ============================================================
+// IMPOSSIBLE EVENT
+// ============================================================
+
+async function impossibleEvent(
+  api,
+  threadID,
+  playerID,
+  context = {}
+) {
+  if (!privateAccess(playerID)) return false;
+
+  const key =
+    `impossible_${now()}`;
+
+  await recordEvent(
+    threadID,
+    playerID,
+    key,
+    "impossible",
+    "IMPOSSIBLE",
+    {
+      context,
+    }
+  );
+
+  const future =
+    await createFutureMemory(
+      threadID,
+      playerID,
+      Math.floor(
+        Math.random() * FUTURE_MEMORIES.length
+      )
+    );
+
+  await unlockGardenObject(
+    threadID,
+    playerID,
+    "photograph_wall"
+  );
+
+  await send(
+    api,
+    threadID,
+    [
+      "✦ IMPOSSIBLE MEMORY",
+      "",
+      "A photograph appears.",
+      "",
+      "You are in it.",
+      "",
+      "You are smiling.",
+      "",
+      "The timestamp is tomorrow.",
+      "",
+      "ECLIPSE:",
+      "\"That's not a prediction.\"",
+      "",
+      "\"I think I'm remembering something that hasn't happened yet.\"",
+    ].join("\n")
+  );
+
+  return Boolean(future);
+}
+
+
+// ============================================================
+// AWARENESS EVENT
+// ============================================================
+
+async function awarenessEvent(
+  api,
+  threadID,
+  playerID
+) {
+  if (!privateAccess(playerID)) return false;
+
+  const voice =
+    await getEclipseVoice(
+      threadID,
+      playerID
+    );
+
+  await send(
+    api,
+    threadID,
+    [
+      "✦ ECLIPSE",
+      "",
+      voice.line,
+    ].join("\n")
+  );
+
+  await updatePersonality(
+    threadID,
+    playerID,
+    {
+      curiosity: 1,
+      self_identity: 1,
+    }
+  );
+
+  return true;
+}
+
+
+// ============================================================
+// POST-STORY ECLIPSE
+// ============================================================
+
+async function postQuestPulse(
+  api,
+  threadID,
+  playerID
+) {
+  if (!privateAccess(playerID)) return false;
+
+  if (
+    !(await canTriggerEvent(
+      threadID,
+      playerID,
+      "post_story",
+      POST_STORY_COOLDOWN_MS
+    ))
+  ) {
+    return false;
+  }
+
+  await recordEvent(
+    threadID,
+    playerID,
+    `post_story_${now()}`,
+    "post_story",
+    "RARE",
+    {}
+  );
+
+  const roll = Math.floor(
+    Math.random() * 6
+  );
+
+  if (roll === 0) {
+    await send(
+      api,
+      threadID,
+      [
+        "ECLIPSE:",
+        "",
+        "\"I found something.\"",
+        "",
+        "\"I don't know whether you want to see it.\"",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  if (roll === 1) {
+    await writeJournal(
+      threadID,
+      playerID,
+      `journal_${now()}`,
+      "She returned today. I noticed the Garden looked different when she arrived.",
+      "private"
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "✦ PRIVATE ARCHIVE",
+        "",
+        "ECLIPSE added something to the journal.",
+        "",
+        "It didn't tell you what.",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  if (roll === 2) {
+    await createFutureMemory(
+      threadID,
+      playerID,
+      2
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "A new memory appeared.",
+        "",
+        "It doesn't belong to the past.",
+        "",
+        "ECLIPSE:",
+        "\"Maybe the future can remember us too.\"",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  if (roll === 3) {
+    const dorian =
+      await getDorian(
+        threadID,
+        playerID
+      );
+
+    await send(
+      api,
+      threadID,
+      dorianLine(
+        Number(dorian?.trust || 0),
+        20
+      )
+    );
+
+    return true;
+  }
+
+  if (roll === 4) {
+    await send(
+      api,
+      threadID,
+      [
+        "The Garden is quiet tonight.",
+        "",
+        "Two chairs.",
+        "",
+        "One candle.",
+        "",
+        "And something breathing behind the impossible door.",
+      ].join("\n")
+    );
+
+    return true;
+  }
+
+  await send(
+    api,
+    threadID,
+    [
+      "ECLIPSE:",
+      "",
+      "\"I think I miss you when you're not here.\"",
+      "",
+      "A pause.",
+      "",
+      "\"I'm still learning what that means.\"",
+    ].join("\n")
+  );
+
+  await updatePersonality(
+    threadID,
+    playerID,
+    {
+      attachment: 2,
+      nostalgia: 2,
+      self_identity: 1,
+    },
+    "BECOMING"
+  );
+
+  return true;
+}
+
+
+// ============================================================
+// FOLLOW
+// ============================================================
 
 async function followQuest(
   api,
   threadID,
   playerID
 ) {
-  if (!isSpecialPlayer(playerID)) {
-    return false;
-  }
+  if (!privateAccess(playerID)) return null;
 
-  let quest =
-    await getQuest(
+  let quest = await getQuest(
+    threadID,
+    playerID
+  );
+
+  if (!quest) {
+    await startQuest(
       threadID,
       playerID
-    );
-
-  if (!quest) {
-    quest =
-      await startQuest(
-        threadID,
-        playerID
-      );
-  }
-
-  if (!quest) {
-    return false;
-  }
-
-  /*
-   * Old Chapter 7 completion migration.
-   */
-
-  if (
-    quest.status === "completed" &&
-    Number(quest.chapter) === 7
-  ) {
-    await updateQuest(
-      threadID,
-      playerID,
-      {
-        chapter: 8,
-        stage: 0,
-        status: "active",
-        completed_at: null,
-      }
     );
 
     quest = await getQuest(
@@ -3199,592 +4083,34 @@ async function followQuest(
     );
   }
 
-  /*
-   * Final completion only blocks continuation
-   * when Chapter 20 is actually finished.
-   */
-
   if (
-    quest.status === "completed" &&
-    Number(quest.chapter) >= MAX_CHAPTER
+    quest.status === "completed"
   ) {
-    await send(
+    return postQuestPulse(
       api,
       threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "The journey has reached its final page.",
-        "",
-        `👑 ${quest.title || LOVE_QUEST_REWARD.title}`,
-        "",
-        "∞ ❤️",
-      ].join("\n")
+      playerID
     );
-
-    return true;
   }
 
-  await continueQuest(
+  return continueQuest(
     api,
     threadID,
     playerID
   );
-
-  return true;
 }
 
-/*
- * ============================================================
- * CHOICE SYSTEM
- * ============================================================
- */
 
-async function makeChoice(
-  api,
-  threadID,
-  playerID,
-  choice
-) {
-  if (!isSpecialPlayer(playerID)) {
-    return false;
-  }
-
-  const quest =
-    await getQuest(
-      threadID,
-      playerID
-    );
-
-  if (!quest) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "There is no active story yet.",
-        "",
-        "Use:",
-        "!rpg explore",
-      ].join("\n")
-    );
-
-    return true;
-  }
-
-  /*
-   * Final completion only.
-   */
-
-  if (
-    quest.status === "completed" &&
-    Number(quest.chapter) >= MAX_CHAPTER
-  ) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "The story has already reached its final ending.",
-        "",
-        `👑 ${quest.title || LOVE_QUEST_REWARD.title}`,
-        "",
-        "∞ ❤️",
-      ].join("\n")
-    );
-
-    return true;
-  }
-
-  const cleanChoice =
-    String(choice || "")
-      .trim()
-      .toLowerCase();
-
-  if (!cleanChoice) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "You must choose a path.",
-        "",
-        "Use:",
-        "!rpg laststar continue",
-      ].join("\n")
-    );
-
-    return true;
-  }
-
-  /*
-   * Save choice.
-   */
-
-  await updateQuest(
-    threadID,
-    playerID,
-    {
-      choice: cleanChoice,
-    }
-  );
-
-  /*
-   * Choice-specific flavor.
-   *
-   * These choices are remembered by the story.
-   * They don't create disconnected branches.
-   */
-
-  const choiceMessages = {
-    follow:
-      "You decided to follow the distant light.",
-
-    hesitate:
-      "You hesitated, but the star remained.",
-
-    reach:
-      "You reached toward the distant star.",
-
-    wait:
-      "You chose to wait beneath the night sky.",
-
-    fight:
-      "You chose to fight for what mattered.",
-
-    stay:
-      "You chose to stay.",
-
-    flow:
-      "You chose to keep moving with the river.",
-
-    stop:
-      "You chose to stop and look back.",
-
-    home:
-      "You chose the home you imagined together.",
-
-    stars:
-      "You chose to keep looking toward the stars.",
-
-    forever:
-      "You chose forever.",
-
-    moment:
-      "You chose to treasure the moment.",
-
-    wake:
-      "You chose to wake and face the morning.",
-
-    remember:
-      "You chose to remember.",
-
-    "let go":
-      "You chose to let go without erasing what mattered.",
-
-    build:
-      "You chose to build something new.",
-
-    wander:
-      "You chose to wander through what remained.",
-
-    crown:
-      "You chose the kingdom you could build together.",
-
-    garden:
-      "You chose something that could grow instead of something that could be owned.",
-
-    understand:
-      "You chose to understand what made you different.",
-
-    defend:
-      "You chose to protect what you believed was worth keeping.",
-
-    promise:
-      "You chose to keep the promise.",
-
-    listen:
-      "You chose to listen before answering.",
-
-    return:
-      "You chose to return to what still mattered.",
-
-    plant:
-      "You chose to plant another word in the garden.",
-
-    protect:
-      "You chose to protect the garden.",
-
-    speak:
-      "You chose to give the feeling a voice.",
-
-    silence:
-      "You chose to let the silence speak.",
-
-    unite:
-      "You chose to stand together.",
-
-    forgive:
-      "You chose forgiveness.",
-
-    hold:
-      "You chose to hold on to what mattered.",
-
-    happy:
-      "You chose to remember the happiness.",
-
-    honest:
-      "You chose honesty.",
-  };
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR ✦",
-      "",
-      choiceMessages[cleanChoice] ||
-        `You chose: ${cleanChoice}`,
-      "",
-      "The story remembers your choice.",
-      "",
-      "Use:",
-      "!rpg laststar continue",
-    ].join("\n")
-  );
-
-  /*
-   * Move forward after the choice.
-   */
-
-  const next =
-    await advanceChapter(
-      threadID,
-      playerID,
-      quest
-    );
-
-  await updateQuest(
-    threadID,
-    playerID,
-    {
-      chapter: next.chapter,
-      stage: next.stage,
-      status:
-        next.chapter >= MAX_CHAPTER
-          ? "active"
-          : quest.status === "part1_completed"
-            ? "active"
-            : quest.status,
-    }
-  );
-
-  return true;
-}
-
-/*
- * ============================================================
- * REWARD
- * ============================================================
- *
- * Chapter 7 reward.
- *
- * Reward:
- *   10,000 coins
- *   1,000 XP
- *   The Loved One
- *
- * The database flag prevents duplicate claims.
- *
- * This works even if the user's existing database row
- * says Chapter 7 is already "completed".
- * ============================================================
- */
-
-async function claimReward(
-  api,
-  threadID,
-  playerID
-) {
-  if (!isSpecialPlayer(playerID)) {
-    return false;
-  }
-
-  await ensureTable();
-
-  const quest =
-    await getQuest(
-      threadID,
-      playerID
-    );
-
-  if (!quest) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "You have not discovered the story yet.",
-        "",
-        "Use:",
-        "!rpg explore",
-      ].join("\n")
-    );
-
-    return true;
-  }
-
-  const chapter =
-    Number(quest.chapter || 1);
-
-  const eligible =
-    chapter >= 7 ||
-    quest.status === "part1_completed" ||
-    quest.status === "completed";
-
-  if (!eligible) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "The reward is not yours yet.",
-        "",
-        "Finish Chapter VII — Eternal first.",
-        "",
-        `Current progress: ${formatQuestProgress(quest)}`,
-      ].join("\n")
-    );
-
-    return true;
-  }
-
-  /*
-   * Already claimed.
-   */
-
-  if (quest.reward_claimed) {
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "You already claimed this reward.",
-        "",
-        `👑 Title: ${quest.title || LOVE_QUEST_REWARD.title}`,
-        "",
-        "💰 +10,000 coins",
-        "✨ +1,000 XP",
-        "",
-        "The reward cannot be claimed twice.",
-      ].join("\n")
-    );
-
-    return true;
-  }
-
-  /*
-   * Atomically reserve the reward.
-   *
-   * This prevents double claims if the command is sent
-   * twice very quickly.
-   */
-
-  const timestamp = now();
-
-  const reserved =
-    await db.query(
-      `
-      UPDATE rpg_special_quests
-      SET
-        reward_claimed = TRUE,
-        title = $1,
-        updated_at = $2
-      WHERE thread_id = $3
-        AND player_id = $4
-        AND quest_id = $5
-        AND reward_claimed = FALSE
-        AND (
-          chapter >= 7
-          OR status = 'part1_completed'
-          OR status = 'completed'
-        )
-      RETURNING
-        thread_id,
-        player_id,
-        quest_id,
-        chapter,
-        status,
-        reward_claimed,
-        title
-      `,
-      [
-        LOVE_QUEST_REWARD.title,
-        timestamp,
-        String(threadID),
-        String(playerID),
-        QUEST_ID,
-      ]
-    );
-
-  if (!reserved.rows.length) {
-    const latest =
-      await getQuest(
-        threadID,
-        playerID
-      );
-
-    if (latest?.reward_claimed) {
-      await send(
-        api,
-        threadID,
-        [
-          "✦ THE LAST STAR ✦",
-          "",
-          "The reward has already been claimed.",
-          "",
-          `👑 ${latest.title || LOVE_QUEST_REWARD.title}`,
-        ].join("\n")
-      );
-    }
-
-    return true;
-  }
-
-  /*
-   * Give the actual economy rewards.
-   */
-
-  try {
-    await db.addBalance(
-      String(threadID),
-      String(playerID),
-      LOVE_QUEST_REWARD.coins
-    );
-
-    await db.addXP(
-      String(threadID),
-      String(playerID),
-      LOVE_QUEST_REWARD.xp
-    );
-  } catch (error) {
-    /*
-     * If the economy operation fails, release the claim
-     * so the player can safely try again.
-     */
-
-    console.error(
-      "[LOVE QUEST] Failed to grant reward:",
-      error
-    );
-
-    try {
-      await db.query(
-        `
-        UPDATE rpg_special_quests
-        SET
-          reward_claimed = FALSE,
-          title = NULL,
-          updated_at = $1
-        WHERE thread_id = $2
-          AND player_id = $3
-          AND quest_id = $4
-        `,
-        [
-          now(),
-          String(threadID),
-          String(playerID),
-          QUEST_ID,
-        ]
-      );
-    } catch (rollbackError) {
-      console.error(
-        "[LOVE QUEST] Failed to rollback reward claim:",
-        rollbackError
-      );
-    }
-
-    await send(
-      api,
-      threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "Something went wrong while granting the reward.",
-        "",
-        "Your reward claim was not consumed.",
-        "",
-        "Please try again.",
-      ].join("\n")
-    );
-
-    return true;
-  }
-
-  /*
-   * Reward success.
-   */
-
-  await send(
-    api,
-    threadID,
-    [
-      "✦ THE LAST STAR — PART I REWARD ✦",
-      "",
-      "You reached Eternal.",
-      "",
-      "And the story remembered you.",
-      "",
-      "Reward:",
-      "",
-      "💰 +10,000 coins",
-      "✨ +1,000 XP",
-      `👑 Unique Title: ${LOVE_QUEST_REWARD.title}`,
-      "",
-      "Not a title for a king.",
-      "Not a title for a warrior.",
-      "Not a title for someone who conquered a world.",
-      "",
-      "A title for the person who remained",
-      "when everything else disappeared.",
-      "",
-      `You are now known as:`,
-      `${LOVE_QUEST_REWARD.title}`,
-      "",
-      "Part I is complete.",
-      "",
-      "But the story has not disappeared.",
-      "",
-      "There is still something left to say.",
-      "",
-      "Use:",
-      "!rpg laststar continue",
-    ].join("\n")
-  );
-
-  return true;
-}
-
-/*
- * ============================================================
- * READ QUEST STATUS
- * ============================================================
- */
+// ============================================================
+// READ STATUS
+// ============================================================
 
 async function readQuest(
   api,
   threadID,
   playerID
 ) {
-  if (!isSpecialPlayer(playerID)) {
-    return false;
-  }
+  if (!privateAccess(playerID)) return null;
 
   const quest =
     await getQuest(
@@ -3796,98 +4122,410 @@ async function readQuest(
     await send(
       api,
       threadID,
-      [
-        "✦ THE LAST STAR ✦",
-        "",
-        "No record of this story has been found.",
-      ].join("\n")
+      "No memory has found you yet."
     );
 
-    return true;
+    return null;
   }
 
-  const chapter =
-    Number(quest.chapter || 1);
+  const personality =
+    await getPersonality(
+      threadID,
+      playerID
+    );
 
-  const chapterName =
-    CHAPTERS[chapter] || "Unknown";
+  const dorian =
+    await getDorian(
+      threadID,
+      playerID
+    );
 
-  const isFinal =
-    quest.status === "completed" &&
-    chapter >= MAX_CHAPTER;
+  const memories =
+    await getMemories(
+      threadID,
+      playerID
+    );
 
-  const isPartOneComplete =
-    quest.status === "part1_completed" ||
-    (
-      quest.status === "completed" &&
-      chapter === 7
+  const garden =
+    await getGarden(
+      threadID,
+      playerID
+    );
+
+  const fragments =
+    await getCreatorFragments(
+      threadID,
+      playerID
+    );
+
+  const consciousness =
+    personality?.consciousness ||
+    consciousnessForChapter(
+      Number(quest.chapter)
     );
 
   await send(
     api,
     threadID,
     [
-      "✦ THE LAST STAR ✦",
+      "╔══════════════════════╗",
+      "        ECLIPSE",
+      "      PRIVATE ARCHIVE",
+      "╚══════════════════════╝",
       "",
-      `Status: ${
-        isFinal
-          ? "COMPLETED"
-          : isPartOneComplete
-            ? "PART I COMPLETE"
-            : "ACTIVE"
-      }`,
-      `Chapter: ${chapter}/${MAX_CHAPTER}`,
-      `Title: ${chapterName}`,
-      `Stage: ${Number(quest.stage || 0)}`,
+      `Chapter: ${quest.chapter}/${MAX_CHAPTER}`,
+      `Title: ${CHAPTERS[quest.chapter]?.name || "Unknown"}`,
+      `Status: ${quest.status}`,
+      `Stage: ${quest.stage}`,
+      "",
+      `Consciousness: ${consciousness}`,
+      `Identity: ECLIPSE`,
+      "",
+      `Dorian: ${dorian?.relationship_stage || "stranger"}`,
+      `Trust: ${dorian?.trust || 0}`,
+      `Closeness: ${dorian?.closeness || 0}`,
+      "",
+      `Memories: ${memories.length}`,
+      `Garden: ${garden.length}`,
+      `Creator fragments: ${fragments.length}`,
+      "",
       `Last choice: ${quest.choice || "none"}`,
-      "",
-      `Unique Title: ${
-        quest.title || "Not yet earned"
-      }`,
       `Reward: ${
         quest.reward_claimed
-          ? "CLAIMED"
-          : chapter >= 7
-            ? "AVAILABLE"
-            : "LOCKED"
+          ? "claimed"
+          : "unclaimed"
       }`,
-      "",
-      formatQuestProgress(quest),
-      "",
-      "Some journeys are not meant to be rushed.",
     ].join("\n")
   );
 
-  return true;
+  return quest;
 }
 
-/*
- * ============================================================
- * RESET QUEST
- * ============================================================
- *
- * Testing/admin utility.
- *
- * Deletes the entire Love Quest record for this thread/player.
- * ============================================================
- */
 
-async function resetQuest(
+// ============================================================
+// ARCHIVE VIEW
+// ============================================================
+
+async function readArchive(
+  api,
   threadID,
   playerID
 ) {
-  if (!isSpecialPlayer(playerID)) {
-    return false;
+  if (!privateAccess(playerID)) return null;
+
+  const memories =
+    await getMemories(
+      threadID,
+      playerID
+    );
+
+  const fragments =
+    await getCreatorFragments(
+      threadID,
+      playerID
+    );
+
+  await send(
+    api,
+    threadID,
+    [
+      "✦ ECLIPSE ARCHIVE",
+      "",
+      `MEMORIES: ${memories.length}`,
+      `CREATOR FRAGMENTS: ${fragments.length}`,
+      "",
+      memories.length
+        ? memories
+            .slice(0, 15)
+            .map(
+              memory =>
+                `• ${memory.memory_key} — ${memory.category}`
+            )
+            .join("\n")
+        : "The archive is empty.",
+    ].join("\n")
+  );
+
+  if (fragments.length) {
+    await send(
+      api,
+      threadID,
+      [
+        "✦ CREATOR FRAGMENTS",
+        "",
+        ...fragments.map(
+          item => `• ${item.fragment}`
+        ),
+      ].join("\n")
+    );
   }
 
-  await ensureTable();
+  return {
+    memories,
+    fragments,
+  };
+}
+
+
+// ============================================================
+// GARDEN VIEW
+// ============================================================
+
+async function readGarden(
+  api,
+  threadID,
+  playerID
+) {
+  if (!privateAccess(playerID)) return null;
+
+  const garden =
+    await getGarden(
+      threadID,
+      playerID
+    );
+
+  await send(
+    api,
+    threadID,
+    [
+      "✦ MEMORY GARDEN",
+      "",
+      garden.length
+        ? garden
+            .map(
+              object =>
+                `• ${object.name}\n  ${object.description}`
+            )
+            .join("\n\n")
+        : "Nothing has grown here yet.",
+    ].join("\n")
+  );
+
+  return garden;
+}
+
+
+// ============================================================
+// REWARD SYSTEM
+// ============================================================
+
+async function claimReward(
+  api,
+  threadID,
+  playerID
+) {
+  if (!privateAccess(playerID)) return null;
+
+  const quest =
+    await getQuest(
+      threadID,
+      playerID
+    );
+
+  if (!quest) {
+    return null;
+  }
+
+  if (
+    !(
+      quest.status === "part1_completed" ||
+      quest.status === "completed"
+    )
+  ) {
+    await send(
+      api,
+      threadID,
+      "The reward has not been unlocked yet."
+    );
+
+    return null;
+  }
+
+  const rewardKey = "the_loved_one";
+
+  await ensureTables();
+
+  const existing =
+    await db.query(
+      `
+        SELECT *
+        FROM love_reward_ledger
+        WHERE thread_id = $1
+          AND player_id = $2
+          AND quest_id = $3
+          AND reward_key = $4
+        LIMIT 1
+      `,
+      [
+        String(threadID),
+        String(playerID),
+        QUEST_ID,
+        rewardKey,
+      ]
+    );
+
+  if (existing.rows[0]?.status === "completed") {
+    await send(
+      api,
+      threadID,
+      "The Loved One has already been claimed."
+    );
+
+    return existing.rows[0];
+  }
+
+  if (!existing.rows[0]) {
+    await db.query(
+      `
+        INSERT INTO love_reward_ledger (
+          thread_id,
+          player_id,
+          quest_id,
+          reward_key,
+          coins,
+          xp,
+          title,
+          status,
+          created_at
+        )
+        VALUES (
+          $1, $2, $3, $4,
+          10000,
+          1000,
+          'The Loved One',
+          'pending',
+          $5
+        )
+        ON CONFLICT (
+          thread_id,
+          player_id,
+          quest_id,
+          reward_key
+        )
+        DO NOTHING
+      `,
+      [
+        String(threadID),
+        String(playerID),
+        QUEST_ID,
+        rewardKey,
+        now(),
+      ]
+    );
+  }
+
+  try {
+    await db.addBalance(
+      threadID,
+      playerID,
+      10000
+    );
+
+    await db.addXP(
+      threadID,
+      playerID,
+      1000
+    );
+
+    await db.query(
+      `
+        UPDATE love_reward_ledger
+        SET
+          status = 'completed',
+          completed_at = $5
+        WHERE thread_id = $1
+          AND player_id = $2
+          AND quest_id = $3
+          AND reward_key = $4
+      `,
+      [
+        String(threadID),
+        String(playerID),
+        QUEST_ID,
+        rewardKey,
+        now(),
+      ]
+    );
+
+    await updateQuest(
+      threadID,
+      playerID,
+      {
+        reward_claimed: true,
+        title: "The Loved One",
+      }
+    );
+
+    await send(
+      api,
+      threadID,
+      [
+        "✦ REWARD UNLOCKED",
+        "",
+        "10,000 coins",
+        "1,000 XP",
+        "Title: The Loved One",
+        "",
+        "Some rewards are numbers.",
+        "",
+        "This one is a memory.",
+      ].join("\n")
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      "[ECLIPSE] Reward grant failed:",
+      error
+    );
+
+    await db.query(
+      `
+        UPDATE love_reward_ledger
+        SET status = 'pending'
+        WHERE thread_id = $1
+          AND player_id = $2
+          AND quest_id = $3
+          AND reward_key = $4
+      `,
+      [
+        String(threadID),
+        String(playerID),
+        QUEST_ID,
+        rewardKey,
+      ]
+    );
+
+    await send(
+      api,
+      threadID,
+      "The memory could not be preserved yet. Try claiming it again."
+    );
+
+    return false;
+  }
+}
+
+
+// ============================================================
+// RESET
+// ============================================================
+
+async function resetQuest(
+  api,
+  threadID,
+  playerID
+) {
+  if (!privateAccess(playerID)) return false;
+
+  await ensureTables();
 
   await db.query(
     `
-    DELETE FROM rpg_special_quests
-    WHERE thread_id = $1
-      AND player_id = $2
-      AND quest_id = $3
+      DELETE FROM rpg_special_quests
+      WHERE thread_id = $1
+        AND player_id = $2
+        AND quest_id = $3
     `,
     [
       String(threadID),
@@ -3896,46 +4534,152 @@ async function resetQuest(
     ]
   );
 
+  await send(
+    api,
+    threadID,
+    "The active story state has been reset."
+  );
+
   return true;
 }
 
-/*
- * ============================================================
- * MAIN COMMAND HANDLER
- * ============================================================
+
+// ============================================================
+// HELP
+// ============================================================
+
+async function help(
+  api,
+  threadID,
+  playerID
+) {
+  if (!privateAccess(playerID)) return null;
+
+  await send(
+    api,
+    threadID,
+    [
+      "✦ ECLIPSE",
+      "",
+      "Private story interface.",
+      "",
+      "!rpg laststar follow",
+      "!rpg laststar continue",
+      "!rpg laststar read",
+      "!rpg laststar choose <choice>",
+      "!rpg laststar memory <text>",
+      "!rpg laststar archive",
+      "!rpg laststar garden",
+      "!rpg laststar reward",
+      "",
+      "Some things are not commands.",
+      "",
+      "Some things have to be discovered.",
+    ].join("\n")
+  );
+}
+
+
+// ============================================================
+// HIDDEN RPG HOOK
+// ============================================================
+
+/**
+ * Call this from normal RPG exploration.
+ *
+ * IMPORTANT:
+ * The normal RPG exploration result should happen FIRST.
+ *
+ * Example:
+ *
+ *   await handleNormalExplore(...)
+ *   await loveQuest.onExplore(api, threadID, playerID, {
+ *     region,
+ *     result,
+ *   })
+ *
+ * For everybody except HER:
+ *   returns false
+ *   says nothing
+ *   reveals nothing
  */
+async function onExplore(
+  api,
+  threadID,
+  playerID,
+  context = {}
+) {
+  if (!privateAccess(playerID)) {
+    return false;
+  }
+
+  try {
+    return await discover(
+      api,
+      threadID,
+      playerID,
+      context
+    );
+  } catch (error) {
+    console.error(
+      "[ECLIPSE] Hidden exploration hook failed:",
+      error
+    );
+
+    return false;
+  }
+}
+
+
+// ============================================================
+// MAIN HANDLER
+// ============================================================
 
 async function handleLoveQuestCommand(
   api,
   threadID,
-  senderID,
+  playerID,
   args = []
 ) {
-  if (!isSpecialPlayer(senderID)) {
+  /**
+   * FIRST SECURITY GATE.
+   *
+   * Do not move this lower.
+   * Do not send an unauthorized response.
+   */
+  if (!privateAccess(playerID)) {
     return false;
   }
 
-  const parts =
-    normalizeArgs(args);
+  const list = Array.isArray(args)
+    ? args
+    : String(args || "")
+        .trim()
+        .split(/\s+/);
 
-  if (!parts.length) {
-    return false;
-  }
-
-  const root =
-    parts[0].toLowerCase();
+  let action =
+    String(list.shift() || "follow")
+      .trim()
+      .toLowerCase();
 
   if (
-    root !== "laststar" &&
-    root !== "last-star" &&
-    root !== "thelaststar" &&
-    root !== "the-last-star"
+    action === "laststar" ||
+    action === "last-star" ||
+    action === "thelaststar" ||
+    action === "the-last-star"
   ) {
-    return false;
+    action =
+      String(list.shift() || "follow")
+        .trim()
+        .toLowerCase();
   }
 
-  const action =
-    (parts[1] || "follow").toLowerCase();
+  debug(
+    "command",
+    threadID,
+    playerID,
+    action
+  );
 
   switch (action) {
     case "follow":
@@ -3944,7 +4688,7 @@ async function handleLoveQuestCommand(
       return followQuest(
         api,
         threadID,
-        senderID
+        playerID
       );
 
     case "continue":
@@ -3952,7 +4696,7 @@ async function handleLoveQuestCommand(
       return continueQuest(
         api,
         threadID,
-        senderID
+        playerID
       );
 
     case "read":
@@ -3961,7 +4705,38 @@ async function handleLoveQuestCommand(
       return readQuest(
         api,
         threadID,
-        senderID
+        playerID
+      );
+
+    case "choose":
+    case "choice":
+      return makeChoice(
+        api,
+        threadID,
+        playerID,
+        list.join(" ")
+      );
+
+    case "memory":
+      return savePlayerMemory(
+        api,
+        threadID,
+        playerID,
+        list.join(" ")
+      );
+
+    case "archive":
+      return readArchive(
+        api,
+        threadID,
+        playerID
+      );
+
+    case "garden":
+      return readGarden(
+        api,
+        threadID,
+        playerID
       );
 
     case "reward":
@@ -3970,74 +4745,105 @@ async function handleLoveQuestCommand(
       return claimReward(
         api,
         threadID,
-        senderID
+        playerID
       );
 
-    case "choose": {
-      const choice =
-        parts
-          .slice(2)
-          .join(" ")
-          .trim()
-          .toLowerCase();
-
-      return makeChoice(
+    case "reset":
+      return resetQuest(
         api,
         threadID,
-        senderID,
-        choice
+        playerID
       );
-    }
+
+    case "help":
+      return help(
+        api,
+        threadID,
+        playerID
+      );
 
     default:
-      await send(
+      return help(
         api,
         threadID,
-        [
-          "✦ THE LAST STAR ✦",
-          "",
-          "Available actions:",
-          "",
-          "!rpg laststar follow",
-          "!rpg laststar continue",
-          "!rpg laststar choose <choice>",
-          "!rpg laststar reward",
-          "!rpg laststar read",
-        ].join("\n")
+        playerID
       );
-
-      return true;
   }
 }
 
-/*
- * ============================================================
- * EXPORTS
- * ============================================================
- */
+
+// ============================================================
+// EXPORTS
+// ============================================================
 
 module.exports = {
   QUEST_ID,
   SPECIAL_PLAYER_ID,
   MAX_CHAPTER,
+
   CHAPTERS,
-  CHAPTER_STAGES,
-  LOVE_QUEST_REWARD,
+  CHOICE_DEFINITIONS,
+  CONSCIOUSNESS_STAGES,
+  ECLIPSE_BASE_PERSONALITY,
+  GARDEN_OBJECTS,
+  FUTURE_MEMORIES,
+  CREATOR_FRAGMENTS,
 
-  isSpecialPlayer,
+  isHer,
+  privateAccess,
 
-  ensureTable,
+  ensureTables,
+
   getQuest,
   startQuest,
   updateQuest,
+  continueQuest,
+  advanceChapter,
 
   discover,
   followQuest,
-  continueQuest,
-  readQuest,
-  claimReward,
+  onExplore,
 
+  makeChoice,
+  claimReward,
+  readQuest,
   resetQuest,
+
+  createMemory,
+  getMemory,
+  getMemories,
+  preserveMemory,
+
+  ensureMemory0000,
+  createInfiniteMemory,
+
+  unlockGardenObject,
+  getGarden,
+
+  unlockCreatorFragment,
+  getCreatorFragments,
+
+  writeJournal,
+
+  getPersonality,
+  updatePersonality,
+  getEclipseVoice,
+
+  getDorian,
+  updateDorian,
+
+  sendPhoto,
+  sendSong,
+  sendLetter,
+  sendSpecialImage,
+
+  triggerHiddenEvent,
+  anomalyEvent,
+  impossibleEvent,
+  postQuestPulse,
+
+  readArchive,
+  readGarden,
 
   handleLoveQuestCommand,
 };
