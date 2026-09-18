@@ -29,20 +29,13 @@ const {
   getAdaptationContext,
 } = require("./adaptation");
 
+const { reply } = require("../util");
+
 const CHARACTER_ID = "lucien";
 
 
 function send(api, message, threadID) {
-  return new Promise((resolve, reject) => {
-    api.sendMessage(
-      message,
-      threadID,
-      (error) => {
-        if (error) reject(error);
-        else resolve();
-      }
-    );
-  });
+  return reply(api, threadID, message);
 }
 
 
