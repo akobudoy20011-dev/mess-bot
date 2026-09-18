@@ -1,89 +1,84 @@
 "use strict";
 
-/**
- * util.js
- * =======
- * Shared utility helpers for ECLIPSE.
- *
- * IMPORTANT:
- * The installed ws3-fca version uses:
- *
- *   api.sendMessage(message, threadID, replyToMessage, callback)
- *
- * Therefore the callback MUST be the 4th argument.
- *
- * Passing the callback as the 3rd argument makes ws3-fca
- * interpret the function as a message ID, causing:
- *
- *   MessageID should be of type string and not String.
- */
-
-// ============================================================
-// SAFE REPLY
-// ============================================================
-
 function reply(api, threadID, message) {
   return new Promise((resolve, reject) => {
+    let finished = false;
+
+    const finish = (error, messageInfo) => {
+      if (finished) {
+        return;
+      }
+
+      finished = true;
+
+      if (error) {
+        console.error(
+          "[MESSENGER] sendMessage failed:",
+          error
+        );
+
+        reject(error);
+        return;
+      }
+
+      resolve(messageInfo || null);
+    };
+
     try {
       if (
         !api ||
         typeof api.sendMessage !== "function"
       ) {
-        reject(
+        finish(
           new Error(
             "Messenger sendMessage is unavailable."
           )
         );
-
         return;
       }
 
-      const cleanThreadID =
-        String(threadID);
-
-      api.sendMessage(
+      const result = api.sendMessage(
         message,
-        cleanThreadID,
+        String(threadID),
         null,
         (error, messageInfo) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-
-          resolve(
-            messageInfo || null
-          );
+          finish(error, messageInfo);
         }
       );
+
+      // ws3-fca can return a Promise even when
+      // a callback is supplied. Catch rejected sends.
+      if (
+        result &&
+        typeof result.then === "function"
+      ) {
+        result
+          .then((messageInfo) => {
+            finish(null, messageInfo);
+          })
+          .catch((error) => {
+            finish(error);
+          });
+      }
     } catch (error) {
-      reject(error);
+      finish(error);
     }
   });
 }
 
-// ============================================================
-// TIME FORMATTER
-// ============================================================
-
 function fmtTime(seconds) {
-  seconds =
-    Math.max(
-      0,
-      Math.floor(
-        Number(seconds) || 0
-      )
-    );
+  seconds = Math.max(
+    0,
+    Math.floor(Number(seconds) || 0)
+  );
 
-  const hours =
-    Math.floor(
-      seconds / 3600
-    );
+  const hours = Math.floor(
+    seconds / 3600
+  );
 
-  const minutes =
-    Math.floor(
-      (seconds % 3600) / 60
-    );
+  const minutes = Math.floor(
+    (seconds % 3600) / 60
+  );
 
   if (hours) {
     return `${hours}h ${minutes}m`;
@@ -91,10 +86,6 @@ function fmtTime(seconds) {
 
   return `${minutes}m`;
 }
-
-// ============================================================
-// EXPORTS
-// ============================================================
 
 module.exports = {
   reply,
