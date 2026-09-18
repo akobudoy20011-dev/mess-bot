@@ -337,11 +337,18 @@ function sendMessageAsync(
         error,
         messageInfo
       ) => {
-        if (finished) return;
+        if (finished) {
+          return;
+        }
 
         finished = true;
 
         if (error) {
+          console.error(
+            "[GAMES] sendMessage failed:",
+            error
+          );
+
           reject(error);
           return;
         }
@@ -352,65 +359,58 @@ function sendMessageAsync(
       };
 
       try {
-        api.sendMessage(
-          text,
-          String(threadID),
-          null,
-          (error, messageInfo) =>
-            finish(
+        if (
+          !api ||
+          typeof api.sendMessage !== "function"
+        ) {
+          finish(
+            new Error(
+              "Messenger sendMessage is unavailable."
+            )
+          );
+
+          return;
+        }
+
+        const result =
+          api.sendMessage(
+            text,
+            String(threadID),
+            null,
+            (
               error,
               messageInfo
-            )
-        );
-      } catch (error) {
-        finish(error);
-      }
-    }
-  );
-}
-async function editMessageSafe(
-  api,
-  newText,
-  messageID
-) {
-  if (
-    !messageID ||
-    !api ||
-    typeof api.editMessage !==
-      "function"
-  ) {
-    return false;
-  }
-
-  return new Promise(
-    (resolve) => {
-      let finished = false;
-
-      const finish = (error) => {
-        if (finished) return;
-
-        finished = true;
-        resolve(!error);
-      };
-
-      const timeout =
-        setTimeout(() => {
-          finish(
-            new Error("timeout")
+            ) => {
+              finish(
+                error,
+                messageInfo
+              );
+            }
           );
-        }, EDIT_TIMEOUT_MS);
 
-      try {
-        api.editMessage(
-          newText,
-          messageID,
-          (error) => {
-            clearTimeout(timeout);
-            finish(error);
-          }
-        );
+        // ws3-fca may return a Promise even when
+        // a callback is supplied. Catch rejected sends
+        // so they do not become unhandled rejections.
+        if (
+          result &&
+          typeof result.then === "function"
+        ) {
+          result
+            .then(
+              (messageInfo) => {
+                finish(
+                  null,
+                  messageInfo
+                );
+              }
+            )
+            .catch(
+              (error) => {
+                finish(error);
+              }
+            );
+        }
       } catch (error) {
-        clearTimeout(timeout);
         finish(error);
       }
     }
