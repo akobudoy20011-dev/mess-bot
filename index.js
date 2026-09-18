@@ -224,46 +224,79 @@ function withTimeout(
 // ============================================================
 // MESSENGER PROMISE WRAPPER
 // ============================================================
+//
+// IMPORTANT:
+// The installed ws3-fca version used by ECLIPSE expects:
+//
+//   api.sendMessage(message, threadID, replyToMessage, callback)
+//
+// Therefore the callback MUST be the 4th argument.
+//
+// Keeping this compatibility fix here means every part of
+// index.js that uses sendApiMessage() gets the correct behavior.
+// ============================================================
 
-async function sendApiMessage(api, message, threadID, callback) {
-  let messageInfo;
-
-  try {
-    messageInfo = await api.sendMessage(message, threadID);
-  } catch (error) {
-    if (typeof callback === "function") {
-      try {
-        callback(error);
-      } catch (callbackError) {
-        console.error("Messenger send callback error:", callbackError);
-      }
-    } else {
-      console.error("Messenger send error:", error);
-    }
-    return;
-  }
-
-  if (typeof callback === "function") {
-    try {
-      callback(null, messageInfo || null);
-    } catch (callbackError) {
-      console.error("Messenger send callback error:", callbackError);
-    }
-  }
-}
-
-function sendMessengerMessage(
+function sendApiMessage(
   api,
   message,
-  threadID
+  threadID,
+  callback
 ) {
   return new Promise((resolve, reject) => {
+    let finished = false;
+
+    const finish = (
+      error,
+      messageInfo
+    ) => {
+      if (finished) {
+        return;
+      }
+
+      finished = true;
+
+      if (error) {
+        if (typeof callback === "function") {
+          try {
+            callback(error);
+          } catch (callbackError) {
+            console.error(
+              "Messenger send callback error:",
+              callbackError
+            );
+          }
+        }
+
+        reject(error);
+        return;
+      }
+
+      const result =
+        messageInfo || null;
+
+      if (typeof callback === "function") {
+        try {
+          callback(
+            null,
+            result
+          );
+        } catch (callbackError) {
+          console.error(
+            "Messenger send callback error:",
+            callbackError
+          );
+        }
+      }
+
+      resolve(result);
+    };
+
     try {
       if (
         !api ||
         typeof api.sendMessage !== "function"
       ) {
-        reject(
+        finish(
           new Error(
             "Messenger sendMessage is unavailable."
           )
@@ -272,22 +305,22 @@ function sendMessengerMessage(
         return;
       }
 
-      sendApiMessage(api, 
+      api.sendMessage(
         message,
-        threadID,
-        (error, messageInfo) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-
-          resolve(
-            messageInfo || null
+        String(threadID),
+        null,
+        (
+          sendError,
+          messageInfo
+        ) => {
+          finish(
+            sendError,
+            messageInfo
           );
         }
       );
     } catch (error) {
-      reject(error);
+      finish(error);
     }
   });
 }
