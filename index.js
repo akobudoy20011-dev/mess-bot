@@ -10,26 +10,6 @@ const { login } = require("ws3-fca");
 
 const db = require("./db");
 
-// ============================================================
-// PROCESS-LEVEL REJECTION SAFETY
-// ============================================================
-//
-// ws3-fca can surface Messenger/Facebook send failures through
-// asynchronous Promise rejections. Log them instead of allowing
-// Node to terminate the Render service. The actual send wrapper
-// below also consumes ws3-fca's returned Promise.
-// ============================================================
-
-process.on(
-  "unhandledRejection",
-  (reason) => {
-    console.error(
-      "[PROCESS] Unhandled Promise rejection (process kept alive):",
-      reason
-    );
-  }
-);
-
 const { handleEconomyCommand } = require("./economy");
 
 const {
@@ -242,27 +222,291 @@ function withTimeout(
 }
 
 // ============================================================
-// MESSENGER PROMISE WRAPPER
+// MESSENGER SEND PROTECTION
 // ============================================================
 //
-// IMPORTANT:
-// The installed ws3-fca version used by ECLIPSE expects:
+// ws3-fca 3.5.2 uses:
 //
 //   api.sendMessage(message, threadID, replyToMessage, callback)
 //
-// Therefore the callback MUST be the 4th argument.
+// Facebook error 1545012 is handled here instead of allowing one
+// rejected send to become an unhandled Promise rejection.
 //
-// Keeping this compatibility fix here means every part of
-// index.js that uses sendApiMessage() gets the correct behavior.
+// Flow for 1545012:
+//   1. Detect the Facebook error code.
+//   2. Check whether the thread is still accessible.
+//   3. If accessible/unknown, retry with exponential backoff.
+//   4. If the thread is confirmed inaccessible, temporarily cool it down.
+//   5. Never crash the Render process because of this send failure.
 // ============================================================
 
-function sendApiMessage(
+const THREAD_SEND_MAX_RETRIES = 3;
+const THREAD_SEND_RETRY_DELAYS_MS = [
+  1500,
+  4000,
+  8000,
+];
+const THREAD_SEND_COOLDOWN_MS =
+  5 * 60 * 1000;
+const THREAD_VERIFY_TIMEOUT_MS = 8000;
+
+const threadSendState = new Map();
+
+function getMessengerErrorCode(error) {
+  if (error == null) {
+    return null;
+  }
+
+  const candidates = [
+    error,
+    error.code,
+    error.errorCode,
+    error.error_code,
+    error.status,
+    error.statusCode,
+    error.response && error.response.code,
+    error.response && error.response.errorCode,
+    error.data && error.data.error,
+    error.error && error.error.code,
+    error.error && error.error.errorCode,
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate === 1545012 || String(candidate) === "1545012") {
+      return 1545012;
+    }
+  }
+
+  let serialized = "";
+
+  try {
+    serialized = JSON.stringify(error);
+  } catch (_) {
+    serialized = "";
+  }
+
+  const text = [
+    serialized,
+    error && error.message,
+    String(error),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const match = text.match(/1545012/);
+  return match ? 1545012 : null;
+}
+
+function is1545012(error) {
+  return getMessengerErrorCode(error) === 1545012;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function getThreadSendState(threadID) {
+  const key = String(threadID);
+  const state = threadSendState.get(key);
+
+  if (!state) {
+    return null;
+  }
+
+  if (
+    state.cooldownUntil &&
+    state.cooldownUntil <= Date.now()
+  ) {
+    threadSendState.delete(key);
+    return null;
+  }
+
+  return state;
+}
+
+function setThreadCooldown(
+  threadID,
+  reason = "unknown"
+) {
+  const key = String(threadID);
+  const cooldownUntil =
+    Date.now() + THREAD_SEND_COOLDOWN_MS;
+
+  threadSendState.set(key, {
+    cooldownUntil,
+    reason,
+  });
+
+  console.warn(
+    `[MESSENGER] Thread ${key} placed on send cooldown for ${Math.ceil(THREAD_SEND_COOLDOWN_MS / 1000)}s (${reason}).`
+  );
+}
+
+function clearThreadSendState(threadID) {
+  threadSendState.delete(String(threadID));
+}
+
+function callGetThreadInfo(
+  api,
+  threadID
+) {
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      finish({
+        status: "unknown",
+        info: null,
+        error: new Error(
+          `getThreadInfo timed out after ${THREAD_VERIFY_TIMEOUT_MS}ms`
+        ),
+      });
+    }, THREAD_VERIFY_TIMEOUT_MS);
+
+    try {
+      if (
+        !api ||
+        typeof api.getThreadInfo !== "function"
+      ) {
+        finish({
+          status: "unknown",
+          info: null,
+          error: new Error(
+            "getThreadInfo is unavailable"
+          ),
+        });
+        return;
+      }
+
+      const callback = (
+        error,
+        info
+      ) => {
+        if (error) {
+          finish({
+            status: "unknown",
+            info: null,
+            error,
+          });
+          return;
+        }
+
+        finish({
+          status: "ok",
+          info: info || null,
+          error: null,
+        });
+      };
+
+      const result = api.getThreadInfo(
+        String(threadID),
+        callback
+      );
+
+      if (
+        result &&
+        typeof result.then === "function"
+      ) {
+        result.then(
+          (info) => {
+            finish({
+              status: "ok",
+              info: info || null,
+              error: null,
+            });
+          },
+          (error) => {
+            finish({
+              status: "unknown",
+              info: null,
+              error,
+            });
+          }
+        );
+      }
+    } catch (error) {
+      finish({
+        status: "unknown",
+        info: null,
+        error,
+      });
+    }
+  });
+}
+
+async function verifyThreadAccess(
+  api,
+  threadID
+) {
+  const result = await callGetThreadInfo(
+    api,
+    threadID
+  );
+
+  if (result.status !== "ok") {
+    console.warn(
+      `[MESSENGER] Could not verify thread ${threadID}; treating access as unknown:`,
+      result.error || "unknown error"
+    );
+
+    return {
+      accessible: null,
+      info: null,
+      error: result.error || null,
+    };
+  }
+
+  const info = result.info || {};
+  const currentUserID =
+    typeof api.getCurrentUserID === "function"
+      ? String(api.getCurrentUserID())
+      : null;
+
+  const participantIDs = Array.isArray(
+    info.participantIDs
+  )
+    ? info.participantIDs.map(String)
+    : [];
+
+  if (
+    currentUserID &&
+    participantIDs.length > 0 &&
+    !participantIDs.includes(currentUserID)
+  ) {
+    return {
+      accessible: false,
+      info,
+      error: new Error(
+        "Current account is not listed as a participant in the thread."
+      ),
+    };
+  }
+
+  return {
+    accessible: true,
+    info,
+    error: null,
+  };
+}
+
+async function sendMessageAttempt(
   api,
   message,
-  threadID,
-  callback
+  threadID
 ) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     let finished = false;
 
     const finish = (
@@ -274,47 +518,10 @@ function sendApiMessage(
       }
 
       finished = true;
-
-      if (error) {
-        if (typeof callback === "function") {
-          try {
-            callback(error);
-          } catch (callbackError) {
-            console.error(
-              "Messenger send callback error:",
-              callbackError
-            );
-          }
-        }
-
-        // All current index.js callers use this helper as a
-        // fire-and-forget Messenger sender. Resolve with null
-        // after reporting the error instead of rejecting the
-        // wrapper Promise, which prevents Facebook error 1545012
-        // from terminating Node/Render through an unhandled
-        // rejection.
-        resolve(null);
-        return;
-      }
-
-      const result =
-        messageInfo || null;
-
-      if (typeof callback === "function") {
-        try {
-          callback(
-            null,
-            result
-          );
-        } catch (callbackError) {
-          console.error(
-            "Messenger send callback error:",
-            callbackError
-          );
-        }
-      }
-
-      resolve(result);
+      resolve({
+        error: error || null,
+        messageInfo: messageInfo || null,
+      });
     };
 
     try {
@@ -327,55 +534,245 @@ function sendApiMessage(
             "Messenger sendMessage is unavailable."
           )
         );
-
         return;
       }
 
-      const result =
-        api.sendMessage(
-          message,
-          String(threadID),
-          null,
-          (
+      const result = api.sendMessage(
+        message,
+        String(threadID),
+        null,
+        (
+          sendError,
+          messageInfo
+        ) => {
+          finish(
             sendError,
             messageInfo
-          ) => {
-            finish(
-              sendError,
-              messageInfo
-            );
-          }
-        );
+          );
+        }
+      );
 
-      // ws3-fca may return a Promise as well as invoking
-      // the callback. Always consume that Promise so a
-      // Facebook send rejection cannot become an unhandled
-      // rejection and crash the Render process.
       if (
         result &&
         typeof result.then === "function"
       ) {
-        result
-          .then(
-            (messageInfo) => {
-              finish(
-                null,
-                messageInfo
-              );
-            }
-          )
-          .catch(
-            (sendError) => {
-              finish(
-                sendError,
-                null
-              );
-            }
-          );
+        result.then(
+          (messageInfo) => {
+            finish(
+              null,
+              messageInfo
+            );
+          },
+          (sendError) => {
+            finish(
+              sendError,
+              null
+            );
+          }
+        );
       }
     } catch (error) {
-      finish(error);
+      finish(error, null);
     }
+  });
+}
+
+async function sendMessageWithProtection(
+  api,
+  message,
+  threadID
+) {
+  const key = String(threadID);
+  const existingState =
+    getThreadSendState(key);
+
+  if (
+    existingState &&
+    existingState.cooldownUntil > Date.now()
+  ) {
+    console.warn(
+      `[MESSENGER] Skipping send to cooled-down thread ${key}.`
+    );
+
+    return {
+      error: null,
+      messageInfo: null,
+      skipped: true,
+    };
+  }
+
+  let lastError = null;
+
+  for (
+    let attempt = 1;
+    attempt <= THREAD_SEND_MAX_RETRIES;
+    attempt++
+  ) {
+    const result =
+      await sendMessageAttempt(
+        api,
+        message,
+        key
+      );
+
+    if (!result.error) {
+      clearThreadSendState(key);
+      return {
+        ...result,
+        skipped: false,
+      };
+    }
+
+    lastError = result.error;
+
+    if (!is1545012(result.error)) {
+      return {
+        ...result,
+        skipped: false,
+      };
+    }
+
+    console.warn(
+      `[MESSENGER] Facebook 1545012 on thread ${key} (attempt ${attempt}/${THREAD_SEND_MAX_RETRIES}).`
+    );
+
+    if (attempt >= THREAD_SEND_MAX_RETRIES) {
+      break;
+    }
+
+    const verification =
+      await verifyThreadAccess(
+        api,
+        key
+      );
+
+    if (
+      verification.accessible === false
+    ) {
+      setThreadCooldown(
+        key,
+        "thread access verification failed"
+      );
+
+      console.warn(
+        `[MESSENGER] Thread ${key} appears inaccessible; stopping 1545012 retries.`
+      );
+
+      return {
+        error: lastError,
+        messageInfo: null,
+        skipped: false,
+        inaccessible: true,
+      };
+    }
+
+    const delay =
+      THREAD_SEND_RETRY_DELAYS_MS[
+        Math.min(
+          attempt - 1,
+          THREAD_SEND_RETRY_DELAYS_MS.length - 1
+        )
+      ];
+
+    console.log(
+      `[MESSENGER] Retrying thread ${key} in ${delay}ms${
+        verification.accessible === true
+          ? " (thread verified)"
+          : " (thread access unknown)"
+      }.`
+    );
+
+    await sleep(delay);
+  }
+
+  setThreadCooldown(
+    key,
+    "1545012 retry limit reached"
+  );
+
+  console.error(
+    `[MESSENGER] Giving up on thread ${key} after ${THREAD_SEND_MAX_RETRIES} attempts due to Facebook error 1545012.`
+  );
+
+  return {
+    error: lastError,
+    messageInfo: null,
+    skipped: false,
+    inaccessible: false,
+  };
+}
+
+// ============================================================
+// MESSENGER PROMISE WRAPPER
+// ============================================================
+
+function sendApiMessage(
+  api,
+  message,
+  threadID,
+  callback
+) {
+  return sendMessageWithProtection(
+    api,
+    message,
+    threadID
+  ).then((result) => {
+    if (result.error) {
+      if (typeof callback === "function") {
+        try {
+          callback(result.error);
+        } catch (callbackError) {
+          console.error(
+            "Messenger send callback error:",
+            callbackError
+          );
+        }
+      }
+
+      // Send failures are intentionally resolved rather than rejected.
+      // Most ECLIPSE sends are fire-and-forget, so rejecting here would
+      // create an unhandled Promise rejection and could terminate Render.
+      return null;
+    }
+
+    const messageInfo =
+      result.messageInfo || null;
+
+    if (typeof callback === "function") {
+      try {
+        callback(
+          null,
+          messageInfo
+        );
+      } catch (callbackError) {
+        console.error(
+          "Messenger send callback error:",
+          callbackError
+        );
+      }
+    }
+
+    return messageInfo;
+  }).catch((error) => {
+    // Final safety net: this wrapper must never leak an unhandled send
+    // rejection back into fire-and-forget callers.
+    console.error(
+      "[MESSENGER] Protected send wrapper failed:",
+      error
+    );
+
+    if (typeof callback === "function") {
+      try {
+        callback(error);
+      } catch (callbackError) {
+        console.error(
+          "Messenger send callback error:",
+          callbackError
+        );
+      }
+    }
+
+    return null;
   });
 }
 
