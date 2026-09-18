@@ -500,7 +500,6 @@ async function verifyThreadAccess(
     error: null,
   };
 }
-
 async function sendMessageAttempt(
   api,
   message,
@@ -575,6 +574,7 @@ async function sendMessageAttempt(
       finish(error, null);
     }
   });
+
 }
 
 async function sendMessageWithProtection(
