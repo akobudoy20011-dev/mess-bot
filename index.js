@@ -170,12 +170,69 @@ let musicJobCounter = 0;
 // GLOBAL BOT STATE
 // ============================================================
 
+let shuttingDown = false;
+let currentApi = null;
+let reconnecting = false;
+let loginGeneration = 0;
+let reconnectTimer = null;
+let mqttListenerActive = false;
+
+let lastMessengerEventAt = null;
+let lastSuccessfulSendAt = null;
+let lastListenerErrorAt = null;
+let lastLoginAttemptAt = null;
+let lastLoginSuccessAt = null;
+let lastReconnectAt = null;
+
+const MESSENGER_WATCHDOG_MS = Number.parseInt(
+  process.env.MESSENGER_WATCHDOG_MS || "180000",
+  10
+);
+
 if (typeof global.botDisabled !== "boolean") {
   global.botDisabled = false;
 }
 
 if (typeof global.botPaused !== "boolean") {
   global.botPaused = false;
+}
+
+function invalidateCurrentApi(reason) {
+  if (currentApi) {
+    console.warn(
+      `[FB] Invalidating stale Messenger session (${reason}).`
+    );
+  }
+
+  currentApi = null;
+  mqttListenerActive = false;
+}
+
+function resetMessengerWatchdog() {
+  if (!Number.isFinite(MESSENGER_WATCHDOG_MS) || MESSENGER_WATCHDOG_MS <= 0) {
+    return;
+  }
+
+  if (typeof global.__messengerWatchdogTimer !== "undefined") {
+    clearTimeout(global.__messengerWatchdogTimer);
+  }
+
+  global.__messengerWatchdogTimer = setTimeout(() => {
+    if (shuttingDown || reconnecting) {
+      return;
+    }
+
+    if (!currentApi || !mqttListenerActive) {
+      return;
+    }
+
+    console.warn(
+      `[WATCHDOG] No Messenger activity for ${MESSENGER_WATCHDOG_MS}ms. Invalidating stale session.`
+    );
+
+    invalidateCurrentApi("watchdog_inactive");
+    scheduleReconnect("watchdog_inactive");
+  }, MESSENGER_WATCHDOG_MS);
 }
 
 // ============================================================
@@ -617,6 +674,11 @@ async function sendMessageWithProtection(
 
     if (!result.error) {
       clearThreadSendState(key);
+      lastSuccessfulSendAt = new Date().toISOString();
+      console.log(
+        `[SEND] Success thread=${key} attempt=${attempt}`
+      );
+
       return {
         ...result,
         skipped: false,
@@ -626,6 +688,12 @@ async function sendMessageWithProtection(
     lastError = result.error;
 
     if (!is1545012(result.error)) {
+      console.error(
+        `[SEND] Failed thread=${key} errorCode=${getMessengerErrorCode(result.error)} error=${String(
+          result.error
+        )}`
+      );
+
       return {
         ...result,
         skipped: false,
@@ -729,9 +797,6 @@ function sendApiMessage(
         }
       }
 
-      // Send failures are intentionally resolved rather than rejected.
-      // Most ECLIPSE sends are fire-and-forget, so rejecting here would
-      // create an unhandled Promise rejection and could terminate Render.
       return null;
     }
 
@@ -754,8 +819,6 @@ function sendApiMessage(
 
     return messageInfo;
   }).catch((error) => {
-    // Final safety net: this wrapper must never leak an unhandled send
-    // rejection back into fire-and-forget callers.
     console.error(
       "[MESSENGER] Protected send wrapper failed:",
       error
@@ -839,122 +902,103 @@ function sendMusicAudio(
   threadID,
   job = null
 ) {
-  return new Promise(
-    (resolve, reject) => {
-      let settled = false;
-      let stream = null;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stream = null;
 
-      const fail = (error) => {
-        if (settled) return;
+    const finish = (error, messageInfo) => {
+      if (settled) return;
+      settled = true;
 
-        settled = true;
+      if (stream) {
+        try {
+          stream.destroy();
+        } catch {}
+      }
 
+      if (job) {
+        job.audioStream = null;
+      }
+
+      if (error) {
         reject(
           error instanceof Error
             ? error
             : new Error(String(error))
         );
-      };
-
-      const succeed = (messageInfo) => {
-        if (settled) return;
-
-        settled = true;
-
-        resolve(
-          messageInfo || null
-        );
-      };
-
-      try {
-        if (
-          !api ||
-          typeof api.sendMessage !== "function"
-        ) {
-          fail(
-            new Error(
-              "Messenger sendMessage is unavailable."
-            )
-          );
-
-          return;
-        }
-
-        if (
-          !filePath ||
-          !fs.existsSync(filePath)
-        ) {
-          fail(
-            new Error(
-              "Audio file no longer exists."
-            )
-          );
-
-          return;
-        }
-
-        if (job?.cancelled) {
-          fail(
-            new Error(
-              "Music request was cancelled."
-            )
-          );
-
-          return;
-        }
-
-        stream =
-          fs.createReadStream(
-            filePath
-          );
-
-        if (job) {
-          job.audioStream = stream;
-        }
-
-        stream.once(
-          "error",
-          (streamError) => {
-            console.error(
-              "[Music] Audio stream error:",
-              streamError
-            );
-
-            fail(streamError);
-          }
-        );
-
-        sendApiMessage(api, 
-          {
-            body,
-            attachment:
-              stream,
-          },
-          threadID,
-          (
-            sendError,
-            messageInfo
-          ) => {
-            if (sendError) {
-              fail(sendError);
-              return;
-            }
-
-            if (job?.cancelled) {
-              succeed(null);
-              return;
-            }
-
-            succeed(
-              messageInfo
-            );
-          }
-        );
-      } catch (error) {
-        fail(error);
+      } else {
+        resolve(messageInfo || null);
       }
+    };
+
+    try {
+      if (
+        !api ||
+        typeof api.sendMessage !== "function"
+      ) {
+        finish(
+          new Error("Messenger sendMessage is unavailable.")
+        );
+        return;
+      }
+
+      if (!filePath || !fs.existsSync(filePath)) {
+        finish(
+          new Error("Audio file no longer exists.")
+        );
+        return;
+      }
+
+      if (job?.cancelled) {
+        finish(
+          new Error("Music request was cancelled.")
+        );
+        return;
+      }
+
+      stream = fs.createReadStream(filePath);
+
+      if (job) {
+        job.audioStream = stream;
+      }
+
+      stream.once("error", (error) => {
+        console.error("[Music] Audio stream error:", error);
+        finish(error);
+      });
+
+      let callbackFinished = false;
+
+      const callback = (error, messageInfo) => {
+        if (callbackFinished) return;
+        callbackFinished = true;
+
+        finish(error, messageInfo);
+      };
+
+      const result = api.sendMessage(
+        {
+          body,
+          attachment: stream,
+        },
+        String(threadID),
+        null,
+        callback
+      );
+
+      if (
+        result &&
+        typeof result.then === "function"
+      ) {
+        result.then(
+          (messageInfo) => callback(null, messageInfo),
+          (error) => callback(error, null)
+        );
+      }
+    } catch (error) {
+      finish(error);
     }
-  );
+  });
 }
 
 // ============================================================
@@ -2343,18 +2387,28 @@ app.get("/health", (_req, res) => {
   const music =
     getMusicStats();
 
+  const nowIso =
+    new Date().toISOString();
+
   res.status(200).json({
     ok: true,
-
-    botDisabled:
-      global.botDisabled === true,
-
-    botPaused:
-      global.botPaused === true,
-
-    uptime:
-      process.uptime(),
-
+    httpServer: true,
+    facebookConnected:
+      Boolean(currentApi) &&
+      !reconnecting &&
+      mqttListenerActive &&
+      !shuttingDown,
+    mqttListening: mqttListenerActive === true,
+    reconnecting: reconnecting === true,
+    botPaused: global.botPaused === true,
+    botDisabled: global.botDisabled === true,
+    lastEventAt: lastMessengerEventAt || null,
+    lastSuccessfulSendAt: lastSuccessfulSendAt || null,
+    lastListenerErrorAt: lastListenerErrorAt || null,
+    lastLoginAttemptAt: lastLoginAttemptAt || null,
+    lastLoginSuccessAt: lastLoginSuccessAt || null,
+    lastReconnectAt: lastReconnectAt || null,
+    uptime: process.uptime(),
     music: {
       activeDownloads:
         music.activeDownloads,
@@ -2371,9 +2425,7 @@ app.get("/health", (_req, res) => {
       pendingJobs:
         music.pendingJobs,
     },
-
-    timestamp:
-      new Date().toISOString(),
+    timestamp: nowIso,
   });
 });
 
@@ -2516,10 +2568,52 @@ try {
 //  startLogin()/scheduleReconnect() near the bottom of this file)
 // ============================================================
 
-let currentApi = null;
-let reconnecting = false;
+function scheduleReconnect(reason) {
+  if (shuttingDown || reconnecting) {
+    return;
+  }
+
+  reconnecting = true;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  loginGeneration++;
+  currentApi = null;
+  mqttListenerActive = false;
+  lastReconnectAt = new Date().toISOString();
+
+  console.error(
+    `[RECONNECT] Attempting in 10s due to: ${reason}`
+  );
+
+  reconnectTimer = setTimeout(() => {
+    if (shuttingDown) {
+      reconnecting = false;
+      reconnectTimer = null;
+      return;
+    }
+
+    reconnecting = false;
+    reconnectTimer = null;
+    console.log(
+      "[RECONNECT] Attempting to reconnect to Facebook..."
+    );
+
+    startLogin();
+  }, 10_000);
+}
 
 function startLogin() {
+  const generation = ++loginGeneration;
+  lastLoginAttemptAt = new Date().toISOString();
+
+  console.log(
+    `[FB] Login attempt started (generation=${generation})`
+  );
+
   login(
     { appState },
     {
@@ -2533,9 +2627,23 @@ function startLogin() {
       loginError,
       api
     ) => {
+      if (shuttingDown) {
+        console.warn(
+          `[FB] Ignoring stale login result (generation=${generation}) after shutdown.`
+        );
+        return;
+      }
+
+      if (generation !== loginGeneration) {
+        console.warn(
+          `[FB] Ignoring stale login result (generation=${generation}, current=${loginGeneration}).`
+        );
+        return;
+      }
+
       if (loginError) {
         console.error(
-          "Login failed:",
+          "[FB] Login failed:",
           loginError
         );
 
@@ -2548,7 +2656,7 @@ function startLogin() {
 
       if (!api) {
         console.error(
-          "Login failed: Facebook API object was not returned."
+          "[FB] Login failed: API object was not returned."
         );
 
         scheduleReconnect(
@@ -2559,10 +2667,13 @@ function startLogin() {
       }
 
       currentApi = api;
+      mqttListenerActive = false;
 
       console.log(
-        "Logged in successfully."
+        `[FB] Connected successfully (generation=${generation})`
       );
+
+      lastLoginSuccessAt = new Date().toISOString();
 
       // ========================================================
       // DATABASE
@@ -2604,108 +2715,152 @@ function startLogin() {
       // LISTENER
       // ========================================================
 
-      api.setOptions({
-        listenEvents: true,
-        selfListen: false,
-      });
+      try {
+        api.setOptions({
+          listenEvents: true,
+          selfListen: false,
+        });
 
-      const startupThreadID =
-        process.env.STARTUP_THREAD_ID;
+        const startupThreadID =
+          process.env.STARTUP_THREAD_ID;
 
-      if (startupThreadID) {
-        sendApiMessage(api, 
-          [
-            "╭─────── ୨୧ ♡ ୨୧ ───────╮",
-            "        🎀 E C L I P S E",
-            "          ONLINE ♡",
-            "╰─────── ୨୧ ♡ ୨୧ ───────╯",
-            "",
-            "୨୧ bot is online and ready ♡",
-            "",
-            "♡ music protection: 2 / GC",
-            "♡ global downloads: 2",
-            "♡ pause system: ready",
-          ].join("\n"),
-          startupThreadID,
-          (sendError) => {
-            if (sendError) {
-              console.error(
-                "Startup message failed:",
-                sendError
+        if (startupThreadID) {
+          sendApiMessage(api, 
+            [
+              "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+              "        🎀 E C L I P S E",
+              "          ONLINE ♡",
+              "╰─────── ୨୧ ♡ ୨୧ ───────╯",
+              "",
+              "୨୧ bot is online and ready ♡",
+              "",
+              "♡ music protection: 2 / GC",
+              "♡ global downloads: 2",
+              "♡ pause system: ready",
+            ].join("\n"),
+            startupThreadID,
+            (sendError) => {
+              if (sendError) {
+                console.error(
+                  "[FB] Startup message failed:",
+                  sendError
+                );
+              }
+            }
+          );
+        }
+
+        api.listenMqtt(
+          (listenError, event) => {
+            if (shuttingDown) {
+              return;
+            }
+
+            if (generation !== loginGeneration || api !== currentApi) {
+              console.warn(
+                `[MQTT] Ignoring stale listener callback (generation=${generation}, currentGeneration=${loginGeneration}).`
               );
+              return;
+            }
+
+            if (listenError) {
+              lastListenerErrorAt = new Date().toISOString();
+              console.error(
+                `[MQTT] Listener error (generation=${generation}):`,
+                listenError
+              );
+
+              invalidateCurrentApi("listener_error");
+              mqttListenerActive = false;
+              scheduleReconnect(
+                "listener_error"
+              );
+
+              return;
+            }
+
+            if (
+              !event ||
+              typeof event !== "object"
+            ) {
+              console.warn(
+                "[MQTT] Ignored invalid event payload."
+              );
+              return;
+            }
+
+            mqttListenerActive = true;
+            lastMessengerEventAt = new Date().toISOString();
+            resetMessengerWatchdog();
+
+            console.log(
+              `[MSG] Incoming event type=${event.type} thread=${event.threadID || "unknown"} sender=${event.senderID || "unknown"}`
+            );
+
+            if (
+              (
+                event.type ===
+                  "message" ||
+                event.type ===
+                  "message_reply"
+              ) &&
+              event.threadID
+            ) {
+              const threadID =
+                String(
+                  event.threadID
+                );
+
+              registerActiveThread(
+                threadID
+              );
+
+              void registerGCActivity(
+                threadID
+              ).catch(
+                (error) => {
+                  console.error(
+                    "[GC ACTIVITY] Failed to register activity:",
+                    error
+                  );
+                }
+              );
+
+              void handleMessage(
+                api,
+                event
+              ).catch((error) => {
+                console.error(
+                  "[HANDLE] Unhandled message failure:",
+                  error
+                );
+
+                scheduleReconnect(
+                  "handle_message_failed"
+                );
+              });
             }
           }
         );
+
+        mqttListenerActive = true;
+        resetMessengerWatchdog();
+
+        console.log(
+          `[MQTT] Listener started successfully (generation=${generation})`
+        );
+      } catch (error) {
+        console.error(
+          "[MQTT] Failed to start listener:",
+          error
+        );
+
+        invalidateCurrentApi("listener_start_failed");
+        mqttListenerActive = false;
+        scheduleReconnect(
+          "listener_start_failed"
+        );
       }
-
-      console.log(
-        "Listener started."
-      );
-
-      api.listenMqtt(
-        (
-          listenError,
-          event
-        ) => {
-          if (listenError) {
-            console.error(
-              "Listener error:",
-              listenError
-            );
-
-            // The MQTT session died. Reconnect instead of going
-            // silent for the rest of the process lifetime.
-            scheduleReconnect(
-              "listener_error"
-            );
-
-            return;
-          }
-
-          if (
-            !event ||
-            typeof event !==
-              "object"
-          ) {
-            return;
-          }
-
-          if (
-            (
-              event.type ===
-                "message" ||
-              event.type ===
-                "message_reply"
-            ) &&
-            event.threadID
-          ) {
-            const threadID =
-              String(
-                event.threadID
-              );
-
-            registerActiveThread(
-              threadID
-            );
-
-            void registerGCActivity(
-              threadID
-            ).catch(
-              (error) => {
-                console.error(
-                  "[GC ACTIVITY] Failed to register activity:",
-                  error
-                );
-              }
-            );
-
-            void handleMessage(
-              api,
-              event
-            );
-          }
-        }
-      );
     }
   );
 }
@@ -2723,33 +2878,8 @@ function startLogin() {
 // the bot in that dead state.
 // ============================================================
 
-function scheduleReconnect(
-  reason
-) {
-  if (
-    shuttingDown ||
-    reconnecting
-  ) {
-    return;
-  }
-
-  reconnecting = true;
-  currentApi = null;
-
-  console.error(
-    `[SYSTEM] Reconnecting in 10s due to: ${reason}`
-  );
-
-  setTimeout(() => {
-    reconnecting = false;
-
-    console.log(
-      "[SYSTEM] Attempting to reconnect to Facebook..."
-    );
-
-    startLogin();
-  }, 10_000);
-}
+// This is intentionally kept above the first call to ensure
+// it exists before startup.
 
 startLogin();
 
@@ -2789,531 +2919,460 @@ async function handleMessage(
     body,
   } = event;
 
-  if (
-    !threadID ||
-    typeof body !==
-      "string" ||
-    !body.trim()
-  ) {
-    return;
-  }
-
   const threadId =
-    String(threadID);
-
-  const originalText =
-    body.trim();
-
-  const text =
-    originalText.toLowerCase();
+    threadID
+      ? String(threadID)
+      : "";
 
   const senderId =
-    String(
-      senderID || ""
-    ).trim();
+    senderID
+      ? String(senderID)
+      : "";
 
-  const isAdmin =
-    ADMIN_IDS.includes(
-      senderId
-    );
+  console.log(
+    `[CMD] Starting command processing for thread=${threadId} sender=${senderId}`
+  );
 
-  // ==========================================================
-  // PAUSE / RESUME / BOT CONTROL
-  // ==========================================================
-
-  const pauseMatch =
-    originalText.match(
-      /^!pause(?:\s+(status))?$/i
-    );
-
-  const resumeMatch =
-    /^!resume$/i.test(
-      originalText
-    );
-
-  if (
-    pauseMatch ||
-    resumeMatch
-  ) {
-    if (!isAdmin) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  PAUSE CONTROL  🎀 ──────╮",
-          "",
-          "🔒 ADMIN ONLY",
-          "",
-          "Only the bot admin can control",
-          "the global pause state.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadId
+  try {
+    if (
+      !threadId ||
+      typeof body !==
+        "string" ||
+      !body.trim()
+    ) {
+      console.warn(
+        `[MSG] Ignored invalid event thread=${threadId} sender=${senderId}`
       );
-
       return;
     }
 
-    if (resumeMatch) {
+    const originalText =
+      body.trim();
+
+    const text =
+      originalText.toLowerCase();
+
+    const isAdmin =
+      ADMIN_IDS.includes(
+        senderId
+      );
+
+    // ==========================================================
+    // PAUSE / RESUME / BOT CONTROL
+    // ==========================================================
+
+    const pauseMatch =
+      originalText.match(
+        /^!pause(?:\s+(status))?$/i
+      );
+
+    const resumeMatch =
+      /^!resume$/i.test(
+        originalText
+      );
+
+    if (
+      pauseMatch ||
+      resumeMatch
+    ) {
+      if (!isAdmin) {
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  PAUSE CONTROL  🎀 ──────╮",
+            "",
+            "🔒 ADMIN ONLY",
+            "",
+            "Only the bot admin can control",
+            "the global pause state.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadId
+        );
+
+        return;
+      }
+
+      if (resumeMatch) {
+        global.botPaused =
+          false;
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  E C L I P S E  🎀 ──────╮",
+            "",
+            "🟢 BOT RESUMED",
+            "",
+            "୨୧ global pause",
+            "    ♡ OFF",
+            "",
+            "Normal commands are active again.",
+            "",
+            "♡ pending music may now continue.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadId
+        );
+
+        resumeMusicProcessing();
+
+        return;
+      }
+
+      if (
+        pauseMatch[1] ===
+        "status"
+      ) {
+        const music =
+          getMusicStats();
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  PAUSE STATUS  🎀 ──────╮",
+            "",
+            "୨୧ global pause",
+            `    ♡ ${
+              global.botPaused
+                ? "🟡 PAUSED"
+                : "🟢 ACTIVE"
+            }`,
+            "",
+            "୨୧ process",
+            "    ♡ 🟢 STILL RUNNING",
+            "",
+            "୨୧ music",
+            `    ♡ active downloads: ${
+              music.activeDownloads
+            }/${
+              MUSIC_MAX_GLOBAL_DOWNLOADS
+            }`,
+            `    ♡ pending: ${
+              music.waitingGlobal
+            }`,
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadId
+        );
+
+        return;
+      }
+
       global.botPaused =
-        false;
+        true;
 
       sendReplyWithTyping(
         api,
         [
           "╭────── 🎀  E C L I P S E  🎀 ──────╮",
           "",
-          "🟢 BOT RESUMED",
+          "🟡 BOT IS NOW PAUSED",
           "",
           "୨୧ global pause",
-          "    ♡ OFF",
-          "",
-          "Normal commands are active again.",
-          "",
-          "♡ pending music may now continue.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadId
-      );
-
-      resumeMusicProcessing();
-
-      return;
-    }
-
-    if (
-      pauseMatch[1] ===
-      "status"
-    ) {
-      const music =
-        getMusicStats();
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  PAUSE STATUS  🎀 ──────╮",
-          "",
-          "୨୧ global pause",
-          `    ♡ ${
-            global.botPaused
-              ? "🟡 PAUSED"
-              : "🟢 ACTIVE"
-          }`,
-          "",
-          "୨୧ process",
-          "    ♡ 🟢 STILL RUNNING",
-          "",
-          "୨୧ music",
-          `    ♡ active downloads: ${
-            music.activeDownloads
-          }/${
-            MUSIC_MAX_GLOBAL_DOWNLOADS
-          }`,
-          `    ♡ pending: ${
-            music.waitingGlobal
-          }`,
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadId
-      );
-
-      return;
-    }
-
-    global.botPaused =
-      true;
-
-    sendReplyWithTyping(
-      api,
-      [
-        "╭────── 🎀  E C L I P S E  🎀 ──────╮",
-        "",
-        "🟡 BOT IS NOW PAUSED",
-        "",
-        "୨୧ global pause",
-        "    ♡ ON",
-        "",
-        "Normal commands are now ignored.",
-        "",
-        "♡ Render process remains alive.",
-        "♡ Messenger listener remains alive.",
-        "♡ !resume remains available.",
-        "",
-        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-      ].join("\n"),
-      threadId
-    );
-
-    return;
-  }
-
-  // ==========================================================
-  // GLOBAL BOT CONTROL
-  // ==========================================================
-
-  const botControlMatch =
-    originalText.match(
-      /^!(bot(?:\s+(off|on|status))?|shutdown|startup)$/i
-    );
-
-  if (botControlMatch) {
-    if (!isAdmin) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
-          "",
-          "🔒 ADMIN ONLY",
-          "",
-          "Only the bot admin can use",
-          "global bot controls.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    const rawControl =
-      (
-        botControlMatch[1] ||
-        "bot"
-      ).toLowerCase();
-
-    if (
-      rawControl ===
-      "bot"
-    ) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
-          "୨୧ status",
-          "    ♡ !bot status",
-          "",
-          "୨୧ controls",
-          "    ♡ !bot on",
-          "    ♡ !bot off",
-          "    ♡ !shutdown",
-          "    ♡ !startup",
-          "",
-          "୨୧ pause",
-          "    ♡ !pause",
-          "    ♡ !pause status",
-          "    ♡ !resume",
-          "",
-          "୨୧ communication",
-          "    ♡ !broadcast <message>",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    if (
-      rawControl ===
-      "bot status"
-    ) {
-      const music =
-        getMusicStats();
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BOT STATUS  🎀 ──────╮",
-          "",
-          "୨୧ global status",
-          `    ♡ ${
-            global.botDisabled
-              ? "🔴 OFF"
-              : "🟢 ON"
-          }`,
-          "",
-          "୨୧ pause status",
-          `    ♡ ${
-            global.botPaused
-              ? "🟡 PAUSED"
-              : "🟢 ACTIVE"
-          }`,
-          "",
-          "୨୧ music protection",
-          `    ♡ global downloads: ${music.activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
-          `    ♡ global pending: ${music.waitingGlobal}`,
-          "",
-          "୨୧ controls",
-          "    ♡ !bot on",
-          "    ♡ !bot off",
-          "    ♡ !pause",
-          "    ♡ !resume",
-          "    ♡ !shutdown",
-          "    ♡ !startup",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    if (
-      rawControl ===
-        "bot off" ||
-      rawControl ===
-        "shutdown"
-    ) {
-      global.botDisabled =
-        true;
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
-          "",
-          "🔴 BOT IS NOW OFF",
-          "",
-          "୨୧ global state",
-          "    ♡ OFF",
+          "    ♡ ON",
           "",
           "Normal commands are now ignored.",
           "",
-          "୨୧ admin controls remain available",
-          "    ♡ !bot status",
-          "    ♡ !bot on",
-          "    ♡ !startup",
+          "♡ Render process remains alive.",
+          "♡ Messenger listener remains alive.",
+          "♡ !resume remains available.",
           "",
           "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
         ].join("\n"),
-        threadID
+        threadId
       );
 
       return;
     }
 
-    if (
-      rawControl ===
-        "bot on" ||
-      rawControl ===
-        "startup"
-    ) {
-      global.botDisabled =
-        false;
+    // ==========================================================
+    // GLOBAL BOT CONTROL
+    // ==========================================================
 
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
-          "",
-          "🟢 BOT IS NOW ON",
-          "",
-          "୨୧ global state",
-          "    ♡ ON",
-          "",
-          "Normal commands are active again.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
+    const botControlMatch =
+      originalText.match(
+        /^!(bot(?:\s+(off|on|status))?|shutdown|startup)$/i
       );
 
-      resumeMusicProcessing();
+    if (botControlMatch) {
+      if (!isAdmin) {
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+            "",
+            "🔒 ADMIN ONLY",
+            "",
+            "Only the bot admin can use",
+            "global bot controls.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
 
-      return;
-    }
-  }
+        return;
+      }
 
-  // ==========================================================
-  // GLOBAL DISABLED / PAUSED STATE
-  // ==========================================================
-
-  if (
-    global.botDisabled === true ||
-    global.botPaused === true
-  ) {
-    return;
-  }
-
-  // ==========================================================
-  // AI TRAINING / ADAPTATION
-  // ==========================================================
-
-  try {
-    const trainingHandled =
-      await handleTrainingCommand(
-        senderId,
-        threadId,
-        originalText
-      );
-
-    if (
-      trainingHandled
-    ) {
-      return;
-    }
-
-    if (
-      !originalText.startsWith(
-        "!"
-      )
-    ) {
-      await observeMessage({
-        senderID:
-          senderId,
-        threadID:
-          threadId,
-        body:
-          originalText,
-      });
-    }
-  } catch (error) {
-    console.error(
-      "[AI ADAPTATION] Training/observation failed:",
-      error
-    );
-  }
-
-  // ==========================================================
-  // DEBUG
-  // ==========================================================
-
-  try {
-    if (
-      await handleDebugCommand(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "[DEBUG] Handler failed:",
-      error
-    );
-  }
-
-  // ==========================================================
-  // CLEANUP
-  // ==========================================================
-
-  const cleanupMatch =
-    originalText.match(
-      /^!cleanup(?:\s+(status|run|repair|optimize|full))?$/i
-    );
-
-  if (cleanupMatch) {
-    if (!isAdmin) {
-      return;
-    }
-
-    const cleanupCommand =
-      (
-        cleanupMatch[1] ||
-        ""
-      ).toLowerCase();
-
-    if (!cleanupCommand) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  CLEANUP  🎀 ──────╮",
-          "୨୧ status",
-          "    ♡ !cleanup status",
-          "",
-          "୨୧ maintenance",
-          "    ♡ !cleanup run",
-          "    ♡ !cleanup repair",
-          "    ♡ !cleanup optimize",
-          "    ♡ !cleanup full",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    if (
-      cleanupCommand ===
-      "status"
-    ) {
-      const status =
-        getCleanupStatus();
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  CLEANUP  🎀 ──────╮",
-          "୨୧ status",
-          `    ♡ scheduler: ${
-            status.schedulerActive
-              ? "🟢 ACTIVE"
-              : "🔴 OFF"
-          }`,
-          `    ♡ running: ${
-            status.running
-              ? "🟡 YES"
-              : "🟢 NO"
-          }`,
-          `    ♡ last run: ${
-            status.lastCleanupAt ||
-            "Never"
-          }`,
-          "",
-          "୨୧ schedule",
-          "    ♡ every 24 hours",
-          "    ♡ temporary files: 3 days",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    const modeMap = {
-      run: "clean",
-      repair: "repair",
-      optimize: "optimize",
-      full: "full",
-    };
-
-    const mode =
-      modeMap[
-        cleanupCommand
-      ];
-
-    if (!mode) {
-      return;
-    }
-
-    try {
-      const result =
-        await runCleanup({
-          mode,
-        });
+      const rawControl =
+        (
+          botControlMatch[1] ||
+          "bot"
+        ).toLowerCase();
 
       if (
-        result?.skipped
+        rawControl ===
+        "bot"
       ) {
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+            "୨୧ status",
+            "    ♡ !bot status",
+            "",
+            "୨୧ controls",
+            "    ♡ !bot on",
+            "    ♡ !bot off",
+            "    ♡ !shutdown",
+            "    ♡ !startup",
+            "",
+            "୨୧ pause",
+            "    ♡ !pause",
+            "    ♡ !pause status",
+            "    ♡ !resume",
+            "",
+            "୨୧ communication",
+            "    ♡ !broadcast <message>",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      if (
+        rawControl ===
+        "bot status"
+      ) {
+        const music =
+          getMusicStats();
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  BOT STATUS  🎀 ──────╮",
+            "",
+            "୨୧ global status",
+            `    ♡ ${
+              global.botDisabled
+                ? "🔴 OFF"
+                : "🟢 ON"
+            }`,
+            "",
+            "୨୧ pause status",
+            `    ♡ ${
+              global.botPaused
+                ? "🟡 PAUSED"
+                : "🟢 ACTIVE"
+            }`,
+            "",
+            "୨୧ music protection",
+            `    ♡ global downloads: ${music.activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
+            `    ♡ global pending: ${music.waitingGlobal}`,
+            "",
+            "୨୧ controls",
+            "    ♡ !bot on",
+            "    ♡ !bot off",
+            "    ♡ !pause",
+            "    ♡ !resume",
+            "    ♡ !shutdown",
+            "    ♡ !startup",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      if (
+        rawControl ===
+          "bot off" ||
+        rawControl ===
+          "shutdown"
+      ) {
+        global.botDisabled =
+          true;
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+            "",
+            "🔴 BOT IS NOW OFF",
+            "",
+            "୨୧ global state",
+            "    ♡ OFF",
+            "",
+            "Normal commands are now ignored.",
+            "",
+            "୨୧ admin controls remain available",
+            "    ♡ !bot status",
+            "    ♡ !bot on",
+            "    ♡ !startup",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      if (
+        rawControl ===
+          "bot on" ||
+        rawControl ===
+          "startup"
+      ) {
+        global.botDisabled =
+          false;
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  BOT CONTROL  🎀 ──────╮",
+            "",
+            "🟢 BOT IS NOW ON",
+            "",
+            "୨୧ global state",
+            "    ♡ ON",
+            "",
+            "Normal commands are active again.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        resumeMusicProcessing();
+
+        return;
+      }
+    }
+
+    // ==========================================================
+    // GLOBAL DISABLED / PAUSED STATE
+    // ==========================================================
+
+    if (
+      global.botDisabled === true ||
+      global.botPaused === true
+    ) {
+      return;
+    }
+
+    // ==========================================================
+    // AI TRAINING / ADAPTATION
+    // ==========================================================
+
+    try {
+      const trainingHandled =
+        await handleTrainingCommand(
+          senderId,
+          threadId,
+          originalText
+        );
+
+      if (
+        trainingHandled
+      ) {
+        return;
+      }
+
+      if (
+        !originalText.startsWith(
+          "!"
+        )
+      ) {
+        await observeMessage({
+          senderID:
+            senderId,
+          threadID:
+            threadId,
+          body:
+            originalText,
+        });
+      }
+    } catch (error) {
+      console.error(
+        "[AI ADAPTATION] Training/observation failed:",
+        error
+      );
+    }
+
+    // ==========================================================
+    // DEBUG
+    // ==========================================================
+
+    try {
+      if (
+        await handleDebugCommand(
+          api,
+          event,
+          text,
+          originalText
+        )
+      ) {
+        return;
+      }
+    } catch (error) {
+      console.error(
+        "[DEBUG] Handler failed:",
+        error
+      );
+    }
+
+    // ==========================================================
+    // CLEANUP
+    // ==========================================================
+
+    const cleanupMatch =
+      originalText.match(
+        /^!cleanup(?:\s+(status|run|repair|optimize|full))?$/i
+      );
+
+    if (cleanupMatch) {
+      if (!isAdmin) {
+        return;
+      }
+
+      const cleanupCommand =
+        (
+          cleanupMatch[1] ||
+          ""
+        ).toLowerCase();
+
+      if (!cleanupCommand) {
         sendReplyWithTyping(
           api,
           [
             "╭────── 🎀  CLEANUP  🎀 ──────╮",
+            "୨୧ status",
+            "    ♡ !cleanup status",
             "",
-            "🟡 CLEANUP ALREADY RUNNING",
-            "",
-            "Please wait for the current",
-            "maintenance operation to finish.",
-            "",
+            "୨୧ maintenance",
+            "    ♡ !cleanup run",
+            "    ♡ !cleanup repair",
+            "    ♡ !cleanup optimize",
+            "    ♡ !cleanup full",
             "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
           ].join("\n"),
           threadID
@@ -3322,363 +3381,36 @@ async function handleMessage(
         return;
       }
 
-      const temporaryFiles =
-        Number(
-          result?.cleaned
-            ?.temporaryFiles ||
-            0
-        );
-
-      const expiredSessions =
-        Number(
-          result?.cleaned
-            ?.expiredSessions ||
-            0
-        );
-
-      const repairs =
-        Array.isArray(
-          result?.repaired
-            ?.stateFiles
-        )
-          ? result.repaired
-              .stateFiles.length
-          : 0;
-
-      const optimizerFindings =
-        Array.isArray(
-          result?.optimizer
-            ?.findings
-        )
-          ? result.optimizer
-              .findings
-          : [];
-
-      const gc =
-        result?.gc || {};
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  CLEANUP  🎀 ──────╮",
-          "          ♡ COMPLETE ♡",
-          "╰─────────────────────────────╯",
-          "",
-          "୨୧ mode",
-          `    ♡ ${mode.toUpperCase()}`,
-          "",
-          "୨୧ cleaned",
-          `    ♡ temporary files: ${temporaryFiles}`,
-          `    ♡ expired sessions: ${expiredSessions}`,
-          `    ♡ repairs: ${repairs}`,
-          `    ♡ optimizer findings: ${optimizerFindings.length}`,
-          "",
-          "୨୧ gc maintenance",
-          `    ♡ inactive: ${Number(
-            gc.markedInactive || 0
-          )}`,
-          `    ♡ features off: ${Number(
-            gc.expensiveFeaturesDisabled ||
-              0
-          )}`,
-          `    ♡ archived: ${Number(
-            gc.archived || 0
-          )}`,
-          "",
-          "୨୧ database",
-          `    ♡ ${
-            result?.databaseMaintenance
-              ? "🟢 OK"
-              : "🔴 FAILED"
-          }`,
-          `    ♡ duration: ${Number(
-            result?.durationMs || 0
-          )}ms`,
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-    } catch (error) {
-      console.error(
-        "[CLEANUP] Manual cleanup failed:",
-        error
-      );
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  CLEANUP  🎀 ──────╮",
-          "",
-          "🔴 CLEANUP FAILED",
-          "",
-          "Check Render logs for details.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-    }
-
-    return;
-  }
-
-  // ==========================================================
-  // GC STATUS
-  // ==========================================================
-
-  if (
-    /^!gcstatus$/i.test(
-      originalText
-    )
-  ) {
-    if (!isAdmin) {
-      sendReplyWithTyping(
-        api,
-        "❌ Admin only.",
-        threadID
-      );
-
-      return;
-    }
-
-    try {
-      const status =
-        await getGCStatus();
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  GC MONITOR  🎀 ──────╮",
-          "୨୧ activity",
-          `    ♡ tracked GCs: ${status.total}`,
-          `    ♡ active: ${status.active}`,
-          `    ♡ inactive: ${status.inactive}`,
-          "",
-          "୨୧ maintenance",
-          `    ♡ features off: ${status.featuresDisabled}`,
-          `    ♡ archived: ${status.archived}`,
-          "",
-          "୨୧ database",
-          "    ♡ bot_gc_activity",
-          "    ♡ tracker: 🟢 ONLINE",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-    } catch (error) {
-      console.error(
-        "[GC STATUS] Failed:",
-        error
-      );
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  GC MONITOR  🎀 ──────╮",
-          "",
-          "🔴 STATUS CHECK FAILED",
-          "",
-          "Unable to read GC activity data.",
-          "",
-          "Check the Render logs.",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-    }
-
-    return;
-  }
-
-  // ==========================================================
-  // PING
-  // ==========================================================
-
-  if (
-    text === "!ping"
-  ) {
-    sendReplyWithTyping(
-      api,
-      "🏓 Pong!",
-      threadID
-    );
-
-    return;
-  }
-
-  // ==========================================================
-  // HELP
-  // ==========================================================
-
-  if (
-    text === "!help"
-  ) {
-    sendReplyWithTyping(
-      api,
-      [
-        "╭─────── ୨୧ ♡ ୨୧ ───────╮",
-        "        🎀 E C L I P S E",
-        "         P U B L I C",
-        "╰─────── ୨୧ ♡ ୨୧ ───────╯",
-        "",
-        "୨୧ GENERAL",
-        "♡ !ping",
-        "♡ !help",
-        "",
-        "୨୧ MUSIC",
-        "♡ !play <song>",
-        "  Search YouTube + send audio.",
-        "♡ !music status",
-        "  Show the GC music queue.",
-        "♡ !music stop",
-        "  Stop all music in this GC.",
-        "♡ !music cancel",
-        "  Alias for !music stop.",
-        "♡ !music clear",
-        "  Clear waiting songs only.",
-        "♡ !music skip",
-        "  Skip the current music request.",
-        "♡ Maximum 2 songs per GC.",
-        "",
-        "୨୧ BOT CONTROL",
-        "♡ !pause",
-        "♡ !pause status",
-        "♡ !resume",
-        "",
-        "୨୧ PICTURES",
-        "♡ !pic",
-        "♡ !picture",
-        "♡ !photo",
-        "",
-        "୨୧ ECLIPSE RPG",
-        "♡ !rpg help",
-        "♡ !rpg profile",
-        "♡ !rpg kingdom",
-        "♡ !rpg property",
-        "♡ !rpg train <unit> <amount>",
-        "♡ !rpg march <region>",
-        "",
-        "୨୧ ECONOMY",
-        "♡ !balance / !bal",
-        "♡ !daily",
-        "♡ !work",
-        "♡ !pay <amount>",
-        "♡ !leaderboard / !lb",
-        "♡ !shop",
-        "♡ !buy <item>",
-        "♡ !inventory / !inv",
-        "",
-        "୨୧ GAME CENTER",
-        "♡ !games",
-        "♡ !games rules",
-        "♡ !games status",
-        "♡ !trivia",
-        "♡ !rps <choice>",
-        "♡ !roll <amount>",
-        "♡ !guess <number>",
-        "♡ !coinflip <amount> <side>",
-        "♡ !slots <amount>",
-        "♡ !blackjack",
-        "♡ !hit / !stand",
-        "♡ !math",
-        "♡ !riddle",
-        "♡ !8ball <question>",
-        "",
-        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-      ].join("\n"),
-      threadID
-    );
-
-    return;
-  }
-
-  // ==========================================================
-  // MUSIC PLAY
-  // ==========================================================
-
-  if (
-    text === "!play" ||
-    text.startsWith(
-      "!play "
-    )
-  ) {
-    const requestedSong =
-      originalText
-        .slice(
-          "!play".length
-        )
-        .trim();
-
-    handleMusicCommand(
-      api,
-      requestedSong,
-      threadID
-    );
-
-    return;
-  }
-
-  // ==========================================================
-  // MUSIC CONTROL
-  // ==========================================================
-
-  const musicControlMatch =
-    originalText.match(
-      /^!music(?:\s+(status|stop|cancel|clear|skip))?$/i
-    );
-
-  if (musicControlMatch) {
-    const musicAction =
-      (
-        musicControlMatch[1] ||
+      if (
+        cleanupCommand ===
         "status"
-      ).toLowerCase();
-
-    // --------------------------------------------------------
-    // STATUS
-    // --------------------------------------------------------
-
-    if (
-      musicAction ===
-      "status"
-    ) {
-      sendMusicStatus(
-        api,
-        threadID
-      );
-
-      return;
-    }
-
-    // --------------------------------------------------------
-    // STOP / CANCEL
-    // --------------------------------------------------------
-
-    if (
-      musicAction === "stop" ||
-      musicAction === "cancel"
-    ) {
-      const result =
-        cancelAllMusicForThread(
-          threadID,
-          musicAction
-        );
-
-      if (
-        result.cancelledCount ===
-        0
       ) {
+        const status =
+          getCleanupStatus();
+
         sendReplyWithTyping(
           api,
           [
-            "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
+            "╭────── 🎀  CLEANUP  🎀 ──────╮",
+            "୨୧ status",
+            `    ♡ scheduler: ${
+              status.schedulerActive
+                ? "🟢 ACTIVE"
+                : "🔴 OFF"
+            }`,
+            `    ♡ running: ${
+              status.running
+                ? "🟡 YES"
+                : "🟢 NO"
+            }`,
+            `    ♡ last run: ${
+              status.lastCleanupAt ||
+              "Never"
+            }`,
             "",
-            "♡ NOTHING TO CANCEL",
-            "",
-            "This GC has no active or queued music.",
-            "",
+            "୨୧ schedule",
+            "    ♡ every 24 hours",
+            "    ♡ temporary files: 3 days",
             "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
           ].join("\n"),
           threadID
@@ -3687,470 +3419,605 @@ async function handleMessage(
         return;
       }
 
-      sendMusicStatusMessage(
-        api,
-        [
-          "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
-          "",
-          "🔴 MUSIC STOPPED",
-          "",
-          `୨୧ cancelled: ${result.cancelledCount}`,
-          "୨୧ active + pending requests cleared",
-          "",
-          "♡ no cancelled song will be sent.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
+      const modeMap = {
+        run: "clean",
+        repair: "repair",
+        optimize: "optimize",
+        full: "full",
+      };
 
-      setImmediate(
-        processMusicQueue
-      );
+      const mode =
+        modeMap[
+          cleanupCommand
+        ];
 
-      return;
-    }
-
-    // --------------------------------------------------------
-    // CLEAR QUEUE
-    // --------------------------------------------------------
-
-    if (
-      musicAction ===
-      "clear"
-    ) {
-      const result =
-        clearQueuedMusicForThread(
-          threadID
-        );
-
-      if (
-        result.clearedCount ===
-        0
-      ) {
-        sendReplyWithTyping(
-          api,
-          [
-            "╭────── 🎀  MUSIC QUEUE  🎀 ──────╮",
-            "",
-            "♡ NO WAITING SONGS",
-            "",
-            "There are no pending songs to clear.",
-            "",
-            "♡ The current song, if any, was left alone.",
-            "",
-            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-          ].join("\n"),
-          threadID
-        );
-
+      if (!mode) {
         return;
       }
 
-      sendMusicStatusMessage(
-        api,
-        [
-          "╭────── 🎀  MUSIC QUEUE  🎀 ──────╮",
-          "",
-          "🟢 QUEUE CLEARED",
-          "",
-          `୨୧ removed: ${result.clearedCount}`,
-          "",
-          "♡ the current active song was left alone.",
-          "♡ only waiting songs were removed.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
+      try {
+        const result =
+          await runCleanup({
+            mode,
+          });
 
-      setImmediate(
-        processMusicQueue
-      );
-
-      return;
-    }
-
-    // --------------------------------------------------------
-    // SKIP CURRENT SONG
-    // --------------------------------------------------------
-
-    if (
-      musicAction ===
-      "skip"
-    ) {
-      const skippedJob =
-        skipCurrentMusicForThread(
-          threadID
-        );
-
-      if (!skippedJob) {
-        sendReplyWithTyping(
-          api,
-          [
-            "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
-            "",
-            "♡ NOTHING IS PLAYING",
-            "",
-            "There is no active music request to skip.",
-            "",
-            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-          ].join("\n"),
-          threadID
-        );
-
-        return;
-      }
-
-      sendMusicStatusMessage(
-        api,
-        [
-          "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
-          "",
-          "⏭️ MUSIC SKIPPED",
-          "",
-          `୨୧ ${(
-            skippedJob.title ||
-            skippedJob.requestedSong ||
-            "Current song"
-          ).slice(0, 100)}`,
-          "",
-          "♡ moving to the next request if available.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      setImmediate(
-        processMusicQueue
-      );
-
-      return;
-    }
-  }
-
-  // ==========================================================
-  // PICTURES
-  // ==========================================================
-
-  if (
-    text === "!pic" ||
-    text === "!picture" ||
-    text === "!photo"
-  ) {
-    try {
-      sendRandomPicture(
-        api,
-        threadID
-      );
-    } catch (error) {
-      console.error(
-        "[PICTURES] Command failed:",
-        error
-      );
-
-      sendReplyWithTyping(
-        api,
-        "❌ Failed to send a picture.",
-        threadID
-      );
-    }
-
-    return;
-  }
-
-  // ==========================================================
-  // BROADCAST
-  // ==========================================================
-
-  if (
-    text.startsWith(
-      "!broadcast "
-    )
-  ) {
-    if (!isAdmin) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BROADCAST  🎀 ──────╮",
-          "",
-          "🔒 ADMIN ONLY",
-          "",
-          "Only the bot admin can broadcast.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    const message =
-      originalText
-        .slice(
-          "!broadcast ".length
-        )
-        .trim();
-
-    if (!message) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BROADCAST  🎀 ──────╮",
-          "",
-          "୨୧ usage",
-          "    ♡ !broadcast <message>",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    const targetCount =
-      activeThreads.size;
-
-    broadcastToAllThreads(
-      api,
-      message
-    );
-
-    sendReplyWithTyping(
-      api,
-      [
-        "╭────── 🎀  BROADCAST  🎀 ──────╮",
-        "",
-        "📢 BROADCAST QUEUED",
-        "",
-        "୨୧ active threads",
-        `    ♡ ${targetCount}`,
-        "",
-        "୨୧ status",
-        "    ♡ 🟢 queued",
-        "",
-        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-      ].join("\n"),
-      threadID
-    );
-
-    return;
-  }
-
-  // ==========================================================
-  // MODERATION
-  // ==========================================================
-
-  try {
-    if (
-      await handleModerationMessage(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "Moderation handler failed:",
-      error
-    );
-  }
-
-  // ==========================================================
-  // AI
-  // ==========================================================
-
-  try {
-    if (
-      await handleAiMessage(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "AI message handler failed:",
-      error
-    );
-  }
-
-  // ==========================================================
-  // RPG CHARACTER AI
-  // ==========================================================
-
-  try {
-    if (
-      await handleRpgCharacterMessage(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "RPG character handler failed:",
-      error
-    );
-  }
-
-  // ==========================================================
-  // GAME RESPONSE
-  // ==========================================================
-
-  try {
-    if (
-      await handleGameResponse(
-        api,
-        event,
-        text,
-        originalText
-      )
-    ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "Game response failed:",
-      error
-    );
-  }
-
-  // ==========================================================
-  // RPG / LOVE QUEST / GAMES / ECONOMY
-  // ==========================================================
-
-  try {
-    // --------------------------------------------------------
-    // RPG
-    // --------------------------------------------------------
-
-    if (
-      /^!rpg(?:\s|$)/i.test(
-        originalText
-      )
-    ) {
-      const rpgParts =
-        originalText
-          .trim()
-          .split(/\s+/);
-
-      const rpgArgs =
-        rpgParts.slice(1);
-
-      // ------------------------------------------------------
-      // LOVE QUEST
-      // ------------------------------------------------------
-
-      if (
-        isSpecialPlayer(
-          senderId
-        )
-      ) {
-        try {
-          const loveQuestHandled =
-            await handleLoveQuestCommand(
-              api,
-              threadID,
-              senderId,
-              rpgArgs
-            );
-
-          if (
-            loveQuestHandled
-          ) {
-            return;
-          }
-        } catch (loveQuestError) {
-          console.error(
-            "[LOVE QUEST] Command failed:",
-            loveQuestError
-          );
-
+        if (
+          result?.skipped
+        ) {
           sendReplyWithTyping(
             api,
-            "❌ The Last Star quest encountered an error.",
+            [
+              "╭────── 🎀  CLEANUP  🎀 ──────╮",
+              "",
+              "🟡 CLEANUP ALREADY RUNNING",
+              "",
+              "Please wait for the current",
+              "maintenance operation to finish.",
+              "",
+              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+            ].join("\n"),
             threadID
           );
 
           return;
         }
+
+        const temporaryFiles =
+          Number(
+            result?.cleaned
+              ?.temporaryFiles ||
+              0
+          );
+
+        const expiredSessions =
+          Number(
+            result?.cleaned
+              ?.expiredSessions ||
+              0
+          );
+
+        const repairs =
+          Array.isArray(
+            result?.repaired
+              ?.stateFiles
+          )
+            ? result.repaired
+                .stateFiles.length
+            : 0;
+
+        const optimizerFindings =
+          Array.isArray(
+            result?.optimizer
+              ?.findings
+          )
+            ? result.optimizer
+                .findings
+            : [];
+
+        const gc =
+          result?.gc || {};
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  CLEANUP  🎀 ──────╮",
+            "          ♡ COMPLETE ♡",
+            "╰─────────────────────────────╯",
+            "",
+            "୨୧ mode",
+            `    ♡ ${mode.toUpperCase()}`,
+            "",
+            "୨୧ cleaned",
+            `    ♡ temporary files: ${temporaryFiles}`,
+            `    ♡ expired sessions: ${expiredSessions}`,
+            `    ♡ repairs: ${repairs}`,
+            `    ♡ optimizer findings: ${optimizerFindings.length}`,
+            "",
+            "୨୧ gc maintenance",
+            `    ♡ inactive: ${Number(
+              gc.markedInactive || 0
+            )}`,
+            `    ♡ features off: ${Number(
+              gc.expensiveFeaturesDisabled ||
+                0
+            )}`,
+            `    ♡ archived: ${Number(
+              gc.archived || 0
+            )}`,
+            "",
+            "୨୧ database",
+            `    ♡ ${
+              result?.databaseMaintenance
+                ? "🟢 OK"
+                : "🔴 FAILED"
+            }`,
+            `    ♡ duration: ${Number(
+              result?.durationMs || 0
+            )}ms`,
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+      } catch (error) {
+        console.error(
+          "[CLEANUP] Manual cleanup failed:",
+          error
+        );
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  CLEANUP  🎀 ──────╮",
+            "",
+            "🔴 CLEANUP FAILED",
+            "",
+            "Check Render logs for details.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
       }
 
-      const isRpgExplore =
-        /^!rpg\s+explore(?:\s|$)/i.test(
-          originalText
+      return;
+    }
+
+    // ==========================================================
+    // GC STATUS
+    // ==========================================================
+
+    if (
+      /^!gcstatus$/i.test(
+        originalText
+      )
+    ) {
+      if (!isAdmin) {
+        sendReplyWithTyping(
+          api,
+          "❌ Admin only.",
+          threadID
         );
 
-      const rpgHandled =
-        await handleRpgCommand(
+        return;
+      }
+
+      try {
+        const status =
+          await getGCStatus();
+
+        sendReplyWithTyping(
           api,
-          event,
-          text,
-          originalText
+          [
+            "╭────── 🎀  GC MONITOR  🎀 ──────╮",
+            "୨୧ activity",
+            `    ♡ tracked GCs: ${status.total}`,
+            `    ♡ active: ${status.active}`,
+            `    ♡ inactive: ${status.inactive}`,
+            "",
+            "୨୧ maintenance",
+            `    ♡ features off: ${status.featuresDisabled}`,
+            `    ♡ archived: ${status.archived}`,
+            "",
+            "୨୧ database",
+            "    ♡ bot_gc_activity",
+            "    ♡ tracker: 🟢 ONLINE",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
         );
+      } catch (error) {
+        console.error(
+          "[GC STATUS] Failed:",
+          error
+        );
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  GC MONITOR  🎀 ──────╮",
+            "",
+            "🔴 STATUS CHECK FAILED",
+            "",
+            "Unable to read GC activity data.",
+            "",
+            "Check the Render logs.",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+      }
+
+      return;
+    }
+
+    // ==========================================================
+    // PING
+    // ==========================================================
+
+    if (
+      text === "!ping"
+    ) {
+      sendReplyWithTyping(
+        api,
+        "🏓 Pong!",
+        threadID
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // HELP
+    // ==========================================================
+
+    if (
+      text === "!help"
+    ) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+          "        🎀 E C L I P S E",
+          "         P U B L I C",
+          "╰─────── ୨୧ ♡ ୨୧ ───────╯",
+          "",
+          "୨୧ GENERAL",
+          "♡ !ping",
+          "♡ !help",
+          "",
+          "୨୧ MUSIC",
+          "♡ !play <song>",
+          "  Search YouTube + send audio.",
+          "♡ !music status",
+          "  Show the GC music queue.",
+          "♡ !music stop",
+          "  Stop all music in this GC.",
+          "♡ !music cancel",
+          "  Alias for !music stop.",
+          "♡ !music clear",
+          "  Clear waiting songs only.",
+          "♡ !music skip",
+          "  Skip the current music request.",
+          "♡ Maximum 2 songs per GC.",
+          "",
+          "୨୧ BOT CONTROL",
+          "♡ !pause",
+          "♡ !pause status",
+          "♡ !resume",
+          "",
+          "୨୧ PICTURES",
+          "♡ !pic",
+          "♡ !picture",
+          "♡ !photo",
+          "",
+          "୨୧ ECLIPSE RPG",
+          "♡ !rpg help",
+          "♡ !rpg profile",
+          "♡ !rpg kingdom",
+          "♡ !rpg property",
+          "♡ !rpg train <unit> <amount>",
+          "♡ !rpg march <region>",
+          "",
+          "୨୧ ECONOMY",
+          "♡ !balance / !bal",
+          "♡ !daily",
+          "♡ !work",
+          "♡ !pay <amount>",
+          "♡ !leaderboard / !lb",
+          "♡ !shop",
+          "♡ !buy <item>",
+          "♡ !inventory / !inv",
+          "",
+          "୨୧ GAME CENTER",
+          "♡ !games",
+          "♡ !games rules",
+          "♡ !games status",
+          "♡ !trivia",
+          "♡ !rps <choice>",
+          "♡ !roll <amount>",
+          "♡ !guess <number>",
+          "♡ !coinflip <amount> <side>",
+          "♡ !slots <amount>",
+          "♡ !blackjack",
+          "♡ !hit / !stand",
+          "♡ !math",
+          "♡ !riddle",
+          "♡ !8ball <question>",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // MUSIC PLAY
+    // ==========================================================
+
+    if (
+      text === "!play" ||
+      text.startsWith(
+        "!play "
+      )
+    ) {
+      const requestedSong =
+        originalText
+          .slice(
+            "!play".length
+          )
+          .trim();
+
+      handleMusicCommand(
+        api,
+        requestedSong,
+        threadID
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // MUSIC CONTROL
+    // ==========================================================
+
+    const musicControlMatch =
+      originalText.match(
+        /^!music(?:\s+(status|stop|cancel|clear|skip))?$/i
+      );
+
+    if (musicControlMatch) {
+      const musicAction =
+        (
+          musicControlMatch[1] ||
+          "status"
+        ).toLowerCase();
+
+      // --------------------------------------------------------
+      // STATUS
+      // --------------------------------------------------------
 
       if (
-        rpgHandled
+        musicAction ===
+        "status"
       ) {
+        sendMusicStatus(
+          api,
+          threadID
+        );
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // STOP / CANCEL
+      // --------------------------------------------------------
+
+      if (
+        musicAction === "stop" ||
+        musicAction === "cancel"
+      ) {
+        const result =
+          cancelAllMusicForThread(
+            threadID,
+            musicAction
+          );
+
         if (
-          isRpgExplore &&
-          isSpecialPlayer(
-            senderId
-          )
+          result.cancelledCount ===
+          0
         ) {
-          try {
-            await discoverLoveQuest(
-              api,
-              threadID,
-              senderId
-            );
-          } catch (loveQuestError) {
-            console.error(
-              "[LOVE QUEST] Discovery failed:",
-              loveQuestError
-            );
-          }
+          sendReplyWithTyping(
+            api,
+            [
+              "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
+              "",
+              "♡ NOTHING TO CANCEL",
+              "",
+              "This GC has no active or queued music.",
+              "",
+              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+            ].join("\n"),
+            threadID
+          );
+
+          return;
         }
+
+        sendMusicStatusMessage(
+          api,
+          [
+            "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
+            "",
+            "🔴 MUSIC STOPPED",
+            "",
+            `୨୧ cancelled: ${result.cancelledCount}`,
+            "୨୧ active + pending requests cleared",
+            "",
+            "♡ no cancelled song will be sent.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        setImmediate(
+          processMusicQueue
+        );
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // CLEAR QUEUE
+      // --------------------------------------------------------
+
+      if (
+        musicAction ===
+        "clear"
+      ) {
+        const result =
+          clearQueuedMusicForThread(
+            threadID
+          );
+
+        if (
+          result.clearedCount ===
+          0
+        ) {
+          sendReplyWithTyping(
+            api,
+            [
+              "╭────── 🎀  MUSIC QUEUE  🎀 ──────╮",
+              "",
+              "♡ NO WAITING SONGS",
+              "",
+              "There are no pending songs to clear.",
+              "",
+              "♡ The current song, if any, was left alone.",
+              "",
+              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+            ].join("\n"),
+            threadID
+          );
+
+          return;
+        }
+
+        sendMusicStatusMessage(
+          api,
+          [
+            "╭────── 🎀  MUSIC QUEUE  🎀 ──────╮",
+            "",
+            "🟢 QUEUE CLEARED",
+            "",
+            `୨୧ removed: ${result.clearedCount}`,
+            "",
+            "♡ the current active song was left alone.",
+            "♡ only waiting songs were removed.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        setImmediate(
+          processMusicQueue
+        );
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // SKIP CURRENT SONG
+      // --------------------------------------------------------
+
+      if (
+        musicAction ===
+        "skip"
+      ) {
+        const skippedJob =
+          skipCurrentMusicForThread(
+            threadID
+          );
+
+        if (!skippedJob) {
+          sendReplyWithTyping(
+            api,
+            [
+              "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
+              "",
+              "♡ NOTHING IS PLAYING",
+              "",
+              "There is no active music request to skip.",
+              "",
+              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+            ].join("\n"),
+            threadID
+          );
+
+          return;
+        }
+
+        sendMusicStatusMessage(
+          api,
+          [
+            "╭────── 🎀  MUSIC CONTROL  🎀 ──────╮",
+            "",
+            "⏭️ MUSIC SKIPPED",
+            "",
+            `୨୧ ${(
+              skippedJob.title ||
+              skippedJob.requestedSong ||
+              "Current song"
+            ).slice(0, 100)}`,
+            "",
+            "♡ moving to the next request if available.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        setImmediate(
+          processMusicQueue
+        );
 
         return;
       }
     }
 
-    // --------------------------------------------------------
-    // GAME CONTROL
-    // --------------------------------------------------------
-
-    const gameControlMatch =
-      text.match(
-        /^!game(?:\s+(on|off|status))?$/i
-      );
+    // ==========================================================
+    // PICTURES
+    // ==========================================================
 
     if (
-      gameControlMatch
+      text === "!pic" ||
+      text === "!picture" ||
+      text === "!photo"
+    ) {
+      try {
+        sendRandomPicture(
+          api,
+          threadID
+        );
+      } catch (error) {
+        console.error(
+          "[PICTURES] Command failed:",
+          error
+        );
+
+        sendReplyWithTyping(
+          api,
+          "❌ Failed to send a picture.",
+          threadID
+        );
+      }
+
+      return;
+    }
+
+    // ==========================================================
+    // BROADCAST
+    // ==========================================================
+
+    if (
+      text.startsWith(
+        "!broadcast "
+      )
     ) {
       if (!isAdmin) {
         sendReplyWithTyping(
           api,
           [
-            "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
+            "╭────── 🎀  BROADCAST  🎀 ──────╮",
             "",
             "🔒 ADMIN ONLY",
             "",
-            "Only the bot admin can configure",
-            "games.",
+            "Only the bot admin can broadcast.",
             "",
             "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
           ].join("\n"),
@@ -4160,48 +4027,22 @@ async function handleMessage(
         return;
       }
 
-      const gameSubcommand =
-        (
-          gameControlMatch[1] ||
-          ""
-        ).toLowerCase();
+      const message =
+        originalText
+          .slice(
+            "!broadcast ".length
+          )
+          .trim();
 
-      if (!gameSubcommand) {
-        let currentStatus =
-          false;
-
-        try {
-          currentStatus =
-            await db.isGameEnabled(
-              threadID
-            );
-        } catch (error) {
-          console.error(
-            "[GAME] Failed to check status:",
-            error
-          );
-        }
-
+      if (!message) {
         sendReplyWithTyping(
           api,
           [
-            "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
-            "୨୧ status",
-            `    ♡ ${
-              currentStatus
-                ? "🟢 ON"
-                : "🔴 OFF"
-            }`,
-            "    ♡ !game status",
+            "╭────── 🎀  BROADCAST  🎀 ──────╮",
             "",
-            "୨୧ controls",
-            "    ♡ !game on",
-            "    ♡ !game off",
+            "୨୧ usage",
+            "    ♡ !broadcast <message>",
             "",
-            "୨୧ game center",
-            "    ♡ !games",
-            "    ♡ !games rules",
-            "    ♡ !games status",
             "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
           ].join("\n"),
           threadID
@@ -4210,31 +4051,376 @@ async function handleMessage(
         return;
       }
 
+      const targetCount =
+        activeThreads.size;
+
+      broadcastToAllThreads(
+        api,
+        message
+      );
+
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  BROADCAST  🎀 ──────╮",
+          "",
+          "📢 BROADCAST QUEUED",
+          "",
+          "୨୧ active threads",
+          `    ♡ ${targetCount}`,
+          "",
+          "୨୧ status",
+          "    ♡ 🟢 queued",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // MODERATION
+    // ==========================================================
+
+    try {
       if (
-        gameSubcommand ===
-        "status"
+        await handleModerationMessage(
+          api,
+          event,
+          text,
+          originalText
+        )
       ) {
-        try {
-          const enabled =
-            await db.isGameEnabled(
+        return;
+      }
+    } catch (error) {
+      console.error(
+        "Moderation handler failed:",
+        error
+      );
+    }
+
+    // ==========================================================
+    // AI
+    // ==========================================================
+
+    try {
+      if (
+        await handleAiMessage(
+          api,
+          event,
+          text,
+          originalText
+        )
+      ) {
+        return;
+      }
+    } catch (error) {
+      console.error(
+        "AI message handler failed:",
+        error
+      );
+    }
+
+    // ==========================================================
+    // RPG CHARACTER AI
+    // ==========================================================
+
+    try {
+      if (
+        await handleRpgCharacterMessage(
+          api,
+          event,
+          text,
+          originalText
+        )
+      ) {
+        return;
+      }
+    } catch (error) {
+      console.error(
+        "RPG character handler failed:",
+        error
+      );
+    }
+
+    // ==========================================================
+    // GAME RESPONSE
+    // ==========================================================
+
+    try {
+      if (
+        await handleGameResponse(
+          api,
+          event,
+          text,
+          originalText
+        )
+      ) {
+        return;
+      }
+    } catch (error) {
+      console.error(
+        "Game response failed:",
+        error
+      );
+    }
+
+    // ==========================================================
+    // RPG / LOVE QUEST / GAMES / ECONOMY
+    // ==========================================================
+
+    try {
+      // --------------------------------------------------------
+      // RPG
+      // --------------------------------------------------------
+
+      if (
+        /^!rpg(?:\s|$)/i.test(
+          originalText
+        )
+      ) {
+        const rpgParts =
+          originalText
+            .trim()
+            .split(/\s+/);
+
+        const rpgArgs =
+          rpgParts.slice(1);
+
+        // ------------------------------------------------------
+        // LOVE QUEST
+        // ------------------------------------------------------
+
+        if (
+          isSpecialPlayer(
+            senderId
+          )
+        ) {
+          try {
+            const loveQuestHandled =
+              await handleLoveQuestCommand(
+                api,
+                threadID,
+                senderId,
+                rpgArgs
+              );
+
+            if (
+              loveQuestHandled
+            ) {
+              return;
+            }
+          } catch (loveQuestError) {
+            console.error(
+              "[LOVE QUEST] Command failed:",
+              loveQuestError
+            );
+
+            sendReplyWithTyping(
+              api,
+              "❌ The Last Star quest encountered an error.",
               threadID
             );
+
+            return;
+          }
+        }
+
+        const isRpgExplore =
+          /^!rpg\s+explore(?:\s|$)/i.test(
+            originalText
+          );
+
+        const rpgHandled =
+          await handleRpgCommand(
+            api,
+            event,
+            text,
+            originalText
+          );
+
+        if (
+          rpgHandled
+        ) {
+          if (
+            isRpgExplore &&
+            isSpecialPlayer(
+              senderId
+            )
+          ) {
+            try {
+              await discoverLoveQuest(
+                api,
+                threadID,
+                senderId
+              );
+            } catch (loveQuestError) {
+              console.error(
+                "[LOVE QUEST] Discovery failed:",
+                loveQuestError
+              );
+            }
+          }
+
+          return;
+        }
+      }
+
+      // --------------------------------------------------------
+      // GAME CONTROL
+      // --------------------------------------------------------
+
+      const gameControlMatch =
+        text.match(
+          /^!game(?:\s+(on|off|status))?$/i
+        );
+
+      if (
+        gameControlMatch
+      ) {
+        if (!isAdmin) {
+          sendReplyWithTyping(
+            api,
+            [
+              "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
+              "",
+              "🔒 ADMIN ONLY",
+              "",
+              "Only the bot admin can configure",
+              "games.",
+              "",
+              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+            ].join("\n"),
+            threadID
+          );
+
+          return;
+        }
+
+        const gameSubcommand =
+          (
+            gameControlMatch[1] ||
+            ""
+          ).toLowerCase();
+
+        if (!gameSubcommand) {
+          let currentStatus =
+            false;
+
+          try {
+            currentStatus =
+              await db.isGameEnabled(
+                threadID
+              );
+          } catch (error) {
+            console.error(
+              "[GAME] Failed to check status:",
+              error
+            );
+          }
 
           sendReplyWithTyping(
             api,
             [
-              "╭────── 🎀  GAME STATUS  🎀 ──────╮",
-              "",
-              "୨୧ current group status",
+              "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
+              "୨୧ status",
               `    ♡ ${
-                enabled
+                currentStatus
                   ? "🟢 ON"
                   : "🔴 OFF"
               }`,
+              "    ♡ !game status",
               "",
               "୨୧ controls",
               "    ♡ !game on",
               "    ♡ !game off",
+              "",
+              "୨୧ game center",
+              "    ♡ !games",
+              "    ♡ !games rules",
+              "    ♡ !games status",
+              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+            ].join("\n"),
+            threadID
+          );
+
+          return;
+        }
+
+        if (
+          gameSubcommand ===
+          "status"
+        ) {
+          try {
+            const enabled =
+              await db.isGameEnabled(
+                threadID
+              );
+
+            sendReplyWithTyping(
+              api,
+              [
+                "╭────── 🎀  GAME STATUS  🎀 ──────╮",
+                "",
+                "୨୧ current group status",
+                `    ♡ ${
+                  enabled
+                    ? "🟢 ON"
+                    : "🔴 OFF"
+                }`,
+                "",
+                "୨୧ controls",
+                "    ♡ !game on",
+                "    ♡ !game off",
+                "",
+                "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+              ].join("\n"),
+              threadID
+            );
+          } catch (error) {
+            console.error(
+              "[GAME STATUS] Error:",
+              error
+            );
+
+            sendReplyWithTyping(
+              api,
+              "🔴 Unable to read the game setting.",
+              threadID
+            );
+          }
+
+          return;
+        }
+
+        const enabled =
+          gameSubcommand ===
+          "on";
+
+        try {
+          await db.setGameEnabled(
+            threadID,
+            enabled
+          );
+
+          sendReplyWithTyping(
+            api,
+            [
+              "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
+              "",
+              enabled
+                ? "🟢 GAMES ARE NOW ON"
+                : "🔴 GAMES ARE NOW OFF",
+              "",
+              "୨୧ group status",
+              `    ♡ ${
+                enabled
+                  ? "ON"
+                  : "OFF"
+              }`,
               "",
               "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
             ].join("\n"),
@@ -4242,13 +4428,13 @@ async function handleMessage(
           );
         } catch (error) {
           console.error(
-            "[GAME STATUS] Error:",
+            "[GAME TOGGLE] Error:",
             error
           );
 
           sendReplyWithTyping(
             api,
-            "🔴 Unable to read the game setting.",
+            "🔴 Failed to change the game setting.",
             threadID
           );
         }
@@ -4256,24 +4442,259 @@ async function handleMessage(
         return;
       }
 
-      const enabled =
-        gameSubcommand ===
-        "on";
+      // --------------------------------------------------------
+      // GAME COMMANDS
+      // --------------------------------------------------------
 
-      try {
-        await db.setGameEnabled(
-          threadID,
-          enabled
+      const gameMatch =
+        text.match(
+          /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
         );
+
+      if (
+        gameMatch
+      ) {
+        const gameCommand =
+          gameMatch[1].toLowerCase();
+
+        const gameArgs =
+          gameMatch[2]
+            ? gameMatch[2]
+                .trim()
+                .split(/\s+/)
+            : [];
+
+        if (
+          gameCommand ===
+          "games"
+        ) {
+          const handled =
+            await handleGamesCommand(
+              api,
+              event,
+              gameCommand,
+              gameArgs
+            );
+
+          if (
+            handled
+          ) {
+            return;
+          }
+
+          sendGameCenter(
+            api,
+            threadID
+          );
+
+          return;
+        }
+
+        const gamesEnabled =
+          await db.isGameEnabled(
+            threadID
+          );
+
+        if (
+          !gamesEnabled
+        ) {
+          sendReplyWithTyping(
+            api,
+            [
+              "╭────── 🎀  GAME CENTER  🎀 ──────╮",
+              "",
+              "🔴 GAMES ARE OFF",
+              "",
+              "An admin can enable them with:",
+              "    ♡ !game on",
+              "",
+              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+            ].join("\n"),
+            threadID
+          );
+
+          return;
+        }
+
+        if (
+          await handleGamesCommand(
+            api,
+            event,
+            gameCommand,
+            gameArgs
+          )
+        ) {
+          return;
+        }
+      }
+
+      // --------------------------------------------------------
+      // ECONOMY
+      // --------------------------------------------------------
+
+      if (
+        await handleEconomyCommand(
+          api,
+          event,
+          text,
+          originalText
+        )
+      ) {
+        return;
+      }
+    } catch (error) {
+      console.error(
+        "RPG/economy/games command failed:",
+        error
+      );
+
+      sendReplyWithTyping(
+        api,
+        "🌑 Something went wrong running that command. Please try again in a moment.",
+        threadID
+      );
+
+      return;
+    }
+
+    // ==========================================================
+    // BANAT CONTROL
+    // ==========================================================
+
+    const banatControlMatch =
+      text.match(
+        /^!banat(?:\s+(on|off|status))?$/i
+      );
+
+    if (
+      banatControlMatch
+    ) {
+      if (!isAdmin) {
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
+            "",
+            "🔒 ADMIN ONLY",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      const banatSubcommand =
+        (
+          banatControlMatch[1] ||
+          ""
+        ).toLowerCase();
+
+      if (
+        !banatSubcommand
+      ) {
+        let enabled =
+          false;
+
+        try {
+          enabled =
+            await db.isRoastEnabled(
+              threadId
+            );
+        } catch (error) {
+          console.error(
+            "[BANAT] Failed to check status:",
+            error
+          );
+        }
 
         sendReplyWithTyping(
           api,
           [
-            "╭────── 🎀  GAME CONTROL  🎀 ──────╮",
+            "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
+            "୨୧ status",
+            `    ♡ ${
+              enabled
+                ? "🟢 ON"
+                : "🔴 OFF"
+            }`,
+            "",
+            "୨୧ controls",
+            "    ♡ !banat on",
+            "    ♡ !banat off",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      if (
+        banatSubcommand ===
+        "status"
+      ) {
+        try {
+          const enabled =
+            await db.isRoastEnabled(
+              threadId
+            );
+
+          sendReplyWithTyping(
+            api,
+            [
+              "╭────── 🎀  BANAT STATUS  🎀 ──────╮",
+              "",
+              "୨୧ automatic banat",
+              `    ♡ ${
+                enabled
+                  ? "🟢 ON"
+                  : "🔴 OFF"
+              }`,
+              "",
+              "୨୧ controls",
+              "    ♡ !banat on",
+              "    ♡ !banat off",
+              "",
+              "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+            ].join("\n"),
+            threadID
+          );
+        } catch (error) {
+          console.error(
+            "[BANAT] Status failed:",
+            error
+          );
+        }
+
+        return;
+      }
+
+      const enabled =
+        banatSubcommand ===
+        "on";
+
+      try {
+        await db.setRoastEnabled(
+          threadId,
+          enabled
+        );
+
+        if (!enabled) {
+          lastRandomRoastByThread.delete(
+            threadId
+          );
+        }
+
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
             "",
             enabled
-              ? "🟢 GAMES ARE NOW ON"
-              : "🔴 GAMES ARE NOW OFF",
+              ? "🟢 BANAT IS NOW ON"
+              : "🔴 BANAT IS NOW OFF",
             "",
             "୨୧ group status",
             `    ♡ ${
@@ -4288,13 +4709,13 @@ async function handleMessage(
         );
       } catch (error) {
         console.error(
-          "[GAME TOGGLE] Error:",
+          "[BANAT] Update failed:",
           error
         );
 
         sendReplyWithTyping(
           api,
-          "🔴 Failed to change the game setting.",
+          "🔴 Failed to update banat.",
           threadID
         );
       }
@@ -4302,378 +4723,111 @@ async function handleMessage(
       return;
     }
 
-    // --------------------------------------------------------
-    // GAME COMMANDS
-    // --------------------------------------------------------
+    // ==========================================================
+    // BANAT STATUS
+    // ==========================================================
 
-    const gameMatch =
-      text.match(
-        /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
+    let roastEnabled =
+      false;
+
+    try {
+      roastEnabled =
+        await db.isRoastEnabled(
+          threadId
+        );
+    } catch (error) {
+      console.error(
+        "[BANAT] Failed to check roast status:",
+        error
       );
+    }
+
+    // ==========================================================
+    // TARGETED TRIGGER
+    // ==========================================================
 
     if (
-      gameMatch
+      roastEnabled
     ) {
-      const gameCommand =
-        gameMatch[1].toLowerCase();
-
-      const gameArgs =
-        gameMatch[2]
-          ? gameMatch[2]
-              .trim()
-              .split(/\s+/)
-          : [];
-
-      if (
-        gameCommand ===
-        "games"
-      ) {
-        const handled =
-          await handleGamesCommand(
-            api,
-            event,
-            gameCommand,
-            gameArgs
+      try {
+        const triggerReply =
+          await getTriggerReply(
+            body,
+            senderId,
+            threadId
           );
 
         if (
-          handled
+          triggerReply
         ) {
+          sendReplyWithTyping(
+            api,
+            triggerReply,
+            threadID,
+            true
+          );
+
           return;
         }
-
-        sendGameCenter(
-          api,
-          threadID
+      } catch (error) {
+        console.error(
+          "Trigger system failed:",
+          error
         );
-
-        return;
-      }
-
-      const gamesEnabled =
-        await db.isGameEnabled(
-          threadID
-        );
-
-      if (
-        !gamesEnabled
-      ) {
-        sendReplyWithTyping(
-          api,
-          [
-            "╭────── 🎀  GAME CENTER  🎀 ──────╮",
-            "",
-            "🔴 GAMES ARE OFF",
-            "",
-            "An admin can enable them with:",
-            "    ♡ !game on",
-            "",
-            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-          ].join("\n"),
-          threadID
-        );
-
-        return;
-      }
-
-      if (
-        await handleGamesCommand(
-          api,
-          event,
-          gameCommand,
-          gameArgs
-        )
-      ) {
-        return;
       }
     }
 
-    // --------------------------------------------------------
-    // ECONOMY
-    // --------------------------------------------------------
+    // ==========================================================
+    // RANDOM ROAST
+    // ==========================================================
 
     if (
-      await handleEconomyCommand(
-        api,
-        event,
-        text,
-        originalText
+      !RANDOM_ROAST_ENABLED ||
+      !roastEnabled
+    ) {
+      return;
+    }
+
+    if (
+      canRandomRoastThread(
+        threadId
       )
     ) {
-      return;
-    }
-  } catch (error) {
-    console.error(
-      "RPG/economy/games command failed:",
-      error
-    );
-
-    // FIX: this catch previously only logged the error and left
-    // the user with zero response, which looked exactly like a
-    // dead/unregistered command (!trivia, !help-adjacent game
-    // commands, etc.). Now the user gets told something broke
-    // instead of silence.
-    sendReplyWithTyping(
-      api,
-      "🌑 Something went wrong running that command. Please try again in a moment.",
-      threadID
-    );
-
-    return;
-  }
-
-  // ==========================================================
-  // BANAT CONTROL
-  // ==========================================================
-
-  const banatControlMatch =
-    text.match(
-      /^!banat(?:\s+(on|off|status))?$/i
-    );
-
-  if (
-    banatControlMatch
-  ) {
-    if (!isAdmin) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
-          "",
-          "🔒 ADMIN ONLY",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    const banatSubcommand =
-      (
-        banatControlMatch[1] ||
-        ""
-      ).toLowerCase();
-
-    if (
-      !banatSubcommand
-    ) {
-      let enabled =
-        false;
-
-      try {
-        enabled =
-          await db.isRoastEnabled(
-            threadId
-          );
-      } catch (error) {
-        console.error(
-          "[BANAT] Failed to check status:",
-          error
-        );
-      }
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
-          "୨୧ status",
-          `    ♡ ${
-            enabled
-              ? "🟢 ON"
-              : "🔴 OFF"
-          }`,
-          "",
-          "୨୧ controls",
-          "    ♡ !banat on",
-          "    ♡ !banat off",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    if (
-      banatSubcommand ===
-      "status"
-    ) {
-      try {
-        const enabled =
-          await db.isRoastEnabled(
-            threadId
-          );
-
-        sendReplyWithTyping(
-          api,
-          [
-            "╭────── 🎀  BANAT STATUS  🎀 ──────╮",
-            "",
-            "୨୧ automatic banat",
-            `    ♡ ${
-              enabled
-                ? "🟢 ON"
-                : "🔴 OFF"
-            }`,
-            "",
-            "୨୧ controls",
-            "    ♡ !banat on",
-            "    ♡ !banat off",
-            "",
-            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-          ].join("\n"),
-          threadID
-        );
-      } catch (error) {
-        console.error(
-          "[BANAT] Status failed:",
-          error
-        );
-      }
-
-      return;
-    }
-
-    const enabled =
-      banatSubcommand ===
-      "on";
-
-    try {
-      await db.setRoastEnabled(
-        threadId,
-        enabled
-      );
-
-      if (!enabled) {
-        lastRandomRoastByThread.delete(
-          threadId
-        );
-      }
-
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  BANAT CONTROL  🎀 ──────╮",
-          "",
-          enabled
-            ? "🟢 BANAT IS NOW ON"
-            : "🔴 BANAT IS NOW OFF",
-          "",
-          "୨୧ group status",
-          `    ♡ ${
-            enabled
-              ? "ON"
-              : "OFF"
-          }`,
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-    } catch (error) {
-      console.error(
-        "[BANAT] Update failed:",
-        error
-      );
-
-      sendReplyWithTyping(
-        api,
-        "🔴 Failed to update banat.",
-        threadID
-      );
-    }
-
-    return;
-  }
-
-  // ==========================================================
-  // BANAT STATUS
-  // ==========================================================
-
-  let roastEnabled =
-    false;
-
-  try {
-    roastEnabled =
-      await db.isRoastEnabled(
-        threadId
-      );
-  } catch (error) {
-    console.error(
-      "[BANAT] Failed to check roast status:",
-      error
-    );
-  }
-
-  // ==========================================================
-  // TARGETED TRIGGER
-  // ==========================================================
-
-  if (
-    roastEnabled
-  ) {
-    try {
-      const triggerReply =
-        await getTriggerReply(
-          body,
-          senderId,
-          threadId
-        );
+      const publicReply =
+        getNextPublicReply();
 
       if (
-        triggerReply
+        publicReply
       ) {
+        lastRandomRoastByThread.set(
+          threadId,
+          Date.now()
+        );
+
         sendReplyWithTyping(
           api,
-          triggerReply,
+          publicReply,
           threadID,
           true
         );
-
-        return;
       }
-    } catch (error) {
-      console.error(
-        "Trigger system failed:",
-        error
-      );
     }
-  }
+  } catch (error) {
+    console.error(
+      `[HANDLE] Fatal error for thread=${threadId} sender=${senderId}:`,
+      error
+    );
 
-  // ==========================================================
-  // RANDOM ROAST
-  // ==========================================================
-
-  if (
-    !RANDOM_ROAST_ENABLED ||
-    !roastEnabled
-  ) {
-    return;
-  }
-
-  if (
-    canRandomRoastThread(
-      threadId
-    )
-  ) {
-    const publicReply =
-      getNextPublicReply();
-
-    if (
-      publicReply
-    ) {
-      lastRandomRoastByThread.set(
-        threadId,
-        Date.now()
-      );
-
+    try {
       sendReplyWithTyping(
         api,
-        publicReply,
-        threadID,
-        true
+        "🌑 Something went wrong processing that message. Please try again.",
+        threadId
+      );
+    } catch (replyError) {
+      console.error(
+        "[HANDLE] Failed to send error reply:",
+        replyError
       );
     }
   }
@@ -4996,9 +5150,12 @@ function sendReplyWithTyping(
               sendError
             ) {
               console.error(
-                "Reply failed:",
-                sendError
+                "[SEND] Reply failed thread=%s: %s",
+                String(threadID),
+                String(sendError)
               );
+            } else {
+              lastSuccessfulSendAt = new Date().toISOString();
             }
           }
         );
@@ -5120,9 +5277,6 @@ async function cleanupMusicFiles() {
   }
 }
 
-let shuttingDown =
-  false;
-
 async function gracefulShutdown(
   signal
 ) {
@@ -5132,11 +5286,20 @@ async function gracefulShutdown(
 
   shuttingDown = true;
 
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  reconnecting = false;
+  loginGeneration++;
+  currentApi = null;
+  mqttListenerActive = false;
+
   console.log(
     `[SYSTEM] Received ${signal}. Cleaning up ECLIPSE...`
   );
 
-  // Cancel every known music job, including active jobs.
   for (
     const queue of
       musicQueues.values()
@@ -5166,10 +5329,11 @@ async function gracefulShutdown(
   try {
     if (server) {
       await new Promise(
-        (resolve) => {
-          server.close(
-            () => resolve()
-          );
+        (resolve, reject) => {
+          server.close((error) => {
+            if (error) reject(error);
+            else resolve();
+          });
         }
       );
     }
@@ -5178,6 +5342,11 @@ async function gracefulShutdown(
       "[SYSTEM] Server shutdown failed:",
       error
     );
+  }
+
+  if (typeof global.__messengerWatchdogTimer !== "undefined") {
+    clearTimeout(global.__messengerWatchdogTimer);
+    delete global.__messengerWatchdogTimer;
   }
 
   process.exit(0);
@@ -5200,6 +5369,28 @@ process.once(
     );
   }
 );
+
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    "[PROCESS] Unhandled rejection:",
+    reason
+  );
+
+  if (!shuttingDown) {
+    void gracefulShutdown("UNHANDLED_REJECTION");
+  }
+});
+
+process.on("uncaughtException", (error) => {
+  console.error(
+    "[PROCESS] Uncaught exception:",
+    error
+  );
+
+  if (!shuttingDown) {
+    void gracefulShutdown("UNCAUGHT_EXCEPTION");
+  }
+});
 
 // ============================================================
 // MEMORY MONITOR
