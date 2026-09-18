@@ -169,6 +169,10 @@ let activeMusicDownloads = 0;
 // Monotonically increasing job ID.
 let musicJobCounter = 0;
 
+// When true, no NEW music jobs will start (queueing still works,
+// and any job already downloading/searching/sending finishes normally).
+let musicPaused = false;
+
 // ============================================================
 // GLOBAL BOT STATE
 // ============================================================
@@ -544,7 +548,8 @@ function formatMusicBytes(bytes) {
 function processMusicQueue() {
   if (
     global.botDisabled === true ||
-    global.botPaused === true
+    global.botPaused === true ||
+    musicPaused === true
   ) {
     return;
   }
@@ -624,7 +629,8 @@ async function processMusicJob(job) {
 
   try {
     if (
-      global.botDisabled === true
+      global.botDisabled === true ||
+      job.cancelled
     ) {
       job.cancelled = true;
       return;
@@ -676,6 +682,12 @@ async function processMusicJob(job) {
       throw new Error(
         `No YouTube result found for "${job.requestedSong}".`
       );
+    }
+
+    if (
+      job.cancelled
+    ) {
+      return;
     }
 
     const title =
@@ -737,7 +749,8 @@ async function processMusicJob(job) {
     });
 
     if (
-      global.botDisabled === true
+      global.botDisabled === true ||
+      job.cancelled
     ) {
       job.cancelled = true;
       return;
@@ -783,6 +796,12 @@ async function processMusicJob(job) {
       "YouTube audio download timed out."
     );
 
+    if (
+      job.cancelled
+    ) {
+      return;
+    }
+
     // ========================================================
     // STEP 6
     // VERIFY AUDIO
@@ -816,7 +835,8 @@ async function processMusicJob(job) {
     }
 
     if (
-      global.botDisabled === true
+      global.botDisabled === true ||
+      job.cancelled
     ) {
       job.cancelled = true;
       return;
@@ -1059,6 +1079,10 @@ function handleMusicCommand(
         "୨୧ example",
         "   !play Die With A Smile",
         "",
+        "୨୧ also try",
+        "   !music queue",
+        "   !music skip",
+        "",
         "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
       ].join("\n"),
       threadID
@@ -1277,6 +1301,148 @@ function sendMusicStatus(
   sendReplyWithTyping(
     api,
     lines.join("\n"),
+    threadID
+  );
+}
+
+// ============================================================
+// MUSIC SKIP
+// ============================================================
+//
+// Skips whatever song is currently active for this GC (searching /
+// processing / downloading / streaming). If nothing is active yet,
+// skips the next pending song in this GC's queue instead.
+// ============================================================
+
+function handleMusicSkip(
+  api,
+  threadID
+) {
+  const queue =
+    getMusicQueue(threadID);
+
+  const activeJob =
+    queue.find(
+      (job) =>
+        job.status !==
+          "pending" &&
+        !job.cancelled
+    );
+
+  if (activeJob) {
+    activeJob.cancelled =
+      true;
+
+    sendReplyWithTyping(
+      api,
+      buildMusicPanel({
+        title:
+          activeJob.title ||
+          activeJob.requestedSong,
+
+        author:
+          activeJob.author ||
+          "",
+
+        duration:
+          activeJob.duration ||
+          "--:--",
+
+        state:
+          "cancelled",
+      }),
+      threadID
+    );
+
+    return;
+  }
+
+  const pendingJob =
+    queue.find(
+      (job) =>
+        job.status ===
+          "pending" &&
+        !job.cancelled
+    );
+
+  if (pendingJob) {
+    pendingJob.cancelled =
+      true;
+
+    removePendingMusicJob(
+      pendingJob
+    );
+
+    removeMusicJob(
+      pendingJob
+    );
+
+    sendReplyWithTyping(
+      api,
+      buildMusicPanel({
+        title:
+          pendingJob.title ||
+          pendingJob.requestedSong,
+
+        state:
+          "cancelled",
+      }),
+      threadID
+    );
+
+    return;
+  }
+
+  sendReplyWithTyping(
+    api,
+    [
+      "╭────── 🎀  MUSIC SKIP  🎀 ──────╮",
+      "",
+      "♡ there's nothing to skip in this GC.",
+      "",
+      "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+    ].join("\n"),
+    threadID
+  );
+}
+
+// ============================================================
+// MUSIC PAUSE / RESUME
+// ============================================================
+//
+// Pausing does NOT stop a song that's already downloading or
+// being sent - it just stops the next queued song from starting.
+// ============================================================
+
+function handleMusicPauseToggle(
+  api,
+  threadID,
+  paused
+) {
+  musicPaused = paused;
+
+  if (!paused) {
+    resumeMusicProcessing();
+  }
+
+  sendReplyWithTyping(
+    api,
+    [
+      "╭────── 🎀  MUSIC  🎀 ──────╮",
+      "",
+      paused
+        ? "🟡 MUSIC QUEUE PAUSED"
+        : "🟢 MUSIC QUEUE RESUMED",
+      "",
+      "୨୧ effect",
+      paused
+        ? "    ♡ no new songs will start"
+        : "    ♡ queued songs will start again",
+      "    ♡ a song already downloading/",
+      "      sending is not affected",
+      "",
+      "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+    ].join("\n"),
     threadID
   );
 }
@@ -2425,8 +2591,14 @@ async function handleMessage(
         "୨୧ MUSIC",
         "♡ !play <song>",
         "  Search YouTube + send audio.",
-        "♡ !music status",
+        "♡ !music status / !music queue",
         "  Show the GC music queue.",
+        "♡ !music skip",
+        "  Skip the current/next song.",
+        "♡ !music pause (admin)",
+        "  Stop new songs from starting.",
+        "♡ !music resume / !music play (admin)",
+        "  Let the queue continue.",
         "♡ Maximum 2 songs per GC.",
         "",
         "୨୧ BOT CONTROL",
@@ -2508,20 +2680,109 @@ async function handleMessage(
   }
 
   // ==========================================================
-  // MUSIC STATUS
+  // MUSIC QUEUE / SKIP / PAUSE / RESUME
   // ==========================================================
 
-  if (
-    /^!music\s+status$/i.test(
-      originalText
-    )
-  ) {
-    sendMusicStatus(
-      api,
-      threadID
+  const musicSubMatch =
+    originalText.match(
+      /^!music\s+(status|queue|skip|pause|resume|play)$/i
     );
 
-    return;
+  if (musicSubMatch) {
+    const musicSubcommand =
+      musicSubMatch[1].toLowerCase();
+
+    if (
+      musicSubcommand ===
+        "status" ||
+      musicSubcommand ===
+        "queue"
+    ) {
+      sendMusicStatus(
+        api,
+        threadID
+      );
+
+      return;
+    }
+
+    if (
+      musicSubcommand ===
+      "skip"
+    ) {
+      handleMusicSkip(
+        api,
+        threadID
+      );
+
+      return;
+    }
+
+    if (
+      musicSubcommand ===
+      "pause"
+    ) {
+      if (!isAdmin) {
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  MUSIC  🎀 ──────╮",
+            "",
+            "🔒 ADMIN ONLY",
+            "",
+            "Only the bot admin can pause",
+            "the music queue.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      handleMusicPauseToggle(
+        api,
+        threadID,
+        true
+      );
+
+      return;
+    }
+
+    if (
+      musicSubcommand ===
+        "resume" ||
+      musicSubcommand ===
+        "play"
+    ) {
+      if (!isAdmin) {
+        sendReplyWithTyping(
+          api,
+          [
+            "╭────── 🎀  MUSIC  🎀 ──────╮",
+            "",
+            "🔒 ADMIN ONLY",
+            "",
+            "Only the bot admin can resume",
+            "the music queue.",
+            "",
+            "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+          ].join("\n"),
+          threadID
+        );
+
+        return;
+      }
+
+      handleMusicPauseToggle(
+        api,
+        threadID,
+        false
+      );
+
+      return;
+    }
   }
 
   // ==========================================================
