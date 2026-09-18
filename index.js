@@ -1910,87 +1910,80 @@ server.on(
 // ============================================================
 
 function readAppState() {
-  const rawCookies =
-    process.env.FB_COOKIES;
+  const rawCookies = process.env.FB_COOKIES;
 
-  if (
-    typeof rawCookies !== "string" ||
-    !rawCookies.trim()
-  ) {
-    throw new Error(
-      "FB_COOKIES is missing."
-    );
+  if (typeof rawCookies !== "string" || !rawCookies.trim()) {
+    throw new Error("FB_COOKIES is missing.");
   }
 
   let parsed;
 
   try {
-    parsed =
-      JSON.parse(
-        rawCookies
-      );
+    parsed = JSON.parse(rawCookies);
 
-    if (
-      typeof parsed ===
-      "string"
-    ) {
-      parsed =
-        JSON.parse(
-          parsed
-        );
+    if (typeof parsed === "string") {
+      parsed = JSON.parse(parsed);
     }
-  } catch {
-    throw new Error(
-      "FB_COOKIES must contain valid JSON."
-    );
+  } catch (error) {
+    throw new Error(`FB_COOKIES must contain valid JSON: ${error.message}`);
   }
 
+  // Cookie-Editor may export either:
+  // 1. an array of cookies
+  // 2. an object containing { cookies: [...] }
   if (
-    !Array.isArray(parsed) ||
-    parsed.length === 0
+    parsed &&
+    !Array.isArray(parsed) &&
+    Array.isArray(parsed.cookies)
   ) {
+    parsed = parsed.cookies;
+  }
+
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error("FB_COOKIES must be a non-empty cookie array.");
+  }
+
+  const appState = parsed
+    .filter(
+      (cookie) =>
+        cookie &&
+        typeof cookie === "object" &&
+        !Array.isArray(cookie) &&
+        typeof cookie.value === "string"
+    )
+    .map((cookie) => ({
+      ...cookie,
+      key:
+        typeof cookie.key === "string" && cookie.key.trim()
+          ? cookie.key.trim()
+          : cookie.name,
+    }))
+    .filter(
+      (cookie) =>
+        typeof cookie.key === "string" &&
+        cookie.key.trim() &&
+        typeof cookie.value === "string"
+    )
+    .map((cookie) => {
+      const normalized = { ...cookie };
+
+      // ws3-fca expects "key", not Cookie-Editor's "name".
+      delete normalized.name;
+
+      return normalized;
+    });
+
+  if (appState.length === 0) {
     throw new Error(
-      "FB_COOKIES must be a non-empty cookie array."
+      "FB_COOKIES was parsed, but no usable cookies were found."
     );
   }
 
-  return parsed.map(
-    (cookie) => {
-      if (
-        !cookie ||
-        typeof cookie !==
-          "object" ||
-        Array.isArray(cookie)
-      ) {
-        throw new Error(
-          "Each FB_COOKIES entry must be an object."
-        );
-      }
-
-      const key =
-        typeof cookie.key ===
-        "string"
-          ? cookie.key
-          : cookie.name;
-
-      if (
-        typeof key !==
-          "string" ||
-        !key.trim() ||
-        typeof cookie.value !==
-          "string"
-      ) {
-        throw new Error(
-          "Every cookie must contain string name/key and value fields."
-        );
-      }
-
-      return {
-        ...cookie,
-        key,
-      };
-    }
+  console.log(
+    `[AUTH] Loaded ${appState.length} Facebook cookies from FB_COOKIES.`
   );
+
+  return appState;
 }
 
 let appState;
@@ -2011,7 +2004,7 @@ try {
 // ============================================================
 
 login(
-  appState,
+  { appState },
   {
     online: true,
     updatePresence: true,
