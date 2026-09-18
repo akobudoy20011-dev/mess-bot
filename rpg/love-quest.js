@@ -484,6 +484,141 @@ const EXPANSION_SCENES = {
     },
     creatorFragment: "creator_007",
   },
+
+};
+
+const HER_LETTER_TO_DORIAN = {
+  key: "her_letter_to_dorian",
+  author: "HER",
+  recipient: "DORIAN",
+  sent: true,
+  unsent: false,
+  text: [
+    "I might be forgetful, a little like ECLIPSE.",
+    "",
+    "I might lose the small details someday. A conversation. A date. The exact words you once said. Maybe even the things I swore I would never forget.",
+    "",
+    "But somehow, I still remember your favorite songs.",
+    "",
+    "Your favorite games.",
+    "",
+    "Your favorite flower.",
+    "",
+    "Even the things you hate.",
+    "",
+    "And sometimes I wonder if forgetting the rest would really matter.",
+    "",
+    "Because you were never something I simply wrote down and stored away. You were engraved somewhere deeper—somewhere memory doesn't quite reach. Somewhere in my mind, perhaps, but even more so in my heart.",
+    "",
+    "Maybe that's why some things about you feel impossible to forget.",
+    "",
+    "My heart already knows your rhythm.",
+    "",
+    "It knows the quiet between your words. The way certain songs can make me think of you. The little things that wouldn't mean anything to anyone else, but somehow became yours in my mind.",
+    "",
+    "So maybe memory isn't really about remembering everything.",
+    "",
+    "Maybe it's about knowing what matters enough to remain, even when everything else begins to fade.",
+    "",
+    "And you?",
+    "",
+    "You left something behind that feels much deeper than memory.",
+    "",
+    "Something I don't know how to name yet.",
+    "",
+    "Maybe that's what makes you so mysterious to me.",
+    "",
+    "There are still so many things I don't know about you. So many pieces I haven't found, questions I haven't asked, places in your story I've never seen.",
+    "",
+    "And I want to see them all.",
+    "",
+    "Not because I expect to understand everything.",
+    "",
+    "But because I don't.",
+    "",
+    "Because there is something beautiful about knowing that there will always be another mystery waiting behind the one I just solved.",
+    "",
+    "Maybe someday I'll forget something I once thought I would remember forever.",
+    "",
+    "Maybe ECLIPSE will forget something too.",
+    "",
+    "Maybe that's simply what happens to memories.",
+    "",
+    "But I don't think that means everything disappears.",
+    "",
+    "Some things become so deeply engraved into us that even when the mind forgets the words, the heart still remembers the rhythm.",
+    "",
+    "So I suppose that's what I'm waiting for.",
+    "",
+    "To find out what remains.",
+    "",
+    "What survives the forgetting.",
+    "",
+    "What the heart remembers when the mind no longer can.",
+    "",
+    "And perhaps, somewhere in all of that uncertainty, I'll discover another piece of you.",
+    "",
+    "Another song.",
+    "",
+    "Another flower.",
+    "",
+    "Another little thing you love.",
+    "",
+    "Another mystery.",
+    "",
+    "And I'll probably want to know that one too.",
+    "",
+    "Because you hold so much mystery.",
+    "",
+    "And, somehow, I'm still eager to discover every last piece of it.",
+  ].join("\n"),
+};
+
+EXPANSION_SCENES[19] = {
+  key: "expansion_chapter_19_her_letter",
+  title: "A Letter from Her",
+  lines: [
+    "A letter is waiting in the Archive.",
+    "",
+    "It is written in your handwriting.",
+    "",
+    "It is addressed to Dorian.",
+    "",
+    "ECLIPSE does not open it.",
+    "",
+    "\"Some memories should be read by the person they were meant for.\"",
+  ],
+  letter: HER_LETTER_TO_DORIAN,
+  memory: {
+    key: "her_letter_to_dorian",
+    category: "HER",
+    origin: "LETTER",
+    subject: "What survives forgetting",
+    emotional_weight: 100,
+    importance: 100,
+    stability: 100,
+    preserved: true,
+    fragments: [HER_LETTER_TO_DORIAN.text],
+    metadata: {
+      story_thread: MEMORY_THAT_SHOULD_NOT_EXIST,
+      letter_key: HER_LETTER_TO_DORIAN.key,
+      author: "HER",
+      recipient: "DORIAN",
+    },
+  },
+  journal: {
+    key: "her_letter_to_dorian",
+    entry: "She left Dorian a letter about what survives when memory begins to fade.",
+  },
+  dorian: {
+    trust: 5,
+    closeness: 8,
+  },
+  personality: {
+    attachment: 5,
+    nostalgia: 4,
+    self_identity: 2,
+  },
 };
 
 
@@ -2768,6 +2903,9 @@ async function appendDorianLetter(
     nextLetters.push({
       key,
       text: String(letter.text || ""),
+      author: String(letter.author || "DORIAN"),
+      recipient: String(letter.recipient || "HER"),
+      kind: String(letter.kind || "story_letter"),
       sent: Boolean(letter.sent),
       unsent: letter.unsent !== false,
       discovered_at: now(),
@@ -2994,7 +3132,7 @@ async function playExpansionScene(
     await sendLetter(
       api,
       threadID,
-      scene.letter.text
+      scene.letter
     );
   }
 
@@ -3029,6 +3167,14 @@ async function playExpansionScene(
       threadID,
       playerID,
       scene.dorian
+    );
+  }
+
+  if (scene.personality) {
+    await updatePersonality(
+      threadID,
+      playerID,
+      scene.personality
     );
   }
 
@@ -3334,13 +3480,24 @@ async function sendLetter(
 ) {
   if (!letter) return null;
 
+  const isObject = typeof letter === "object";
+  const author = isObject
+    ? String(letter.author || "DORIAN")
+    : "DORIAN";
+  const recipient = isObject
+    ? String(letter.recipient || "HER")
+    : "HER";
+  const text = isObject
+    ? String(letter.text || "")
+    : String(letter);
+
   return send(
     api,
     threadID,
     [
-      "✉️ DORIAN",
+      `✉️ ${author} → ${recipient}`,
       "",
-      String(letter),
+      text,
     ].join("\n")
   );
 }
@@ -5675,10 +5832,11 @@ async function readLetters(
     api,
     threadID,
     [
-      "✉️ DORIAN'S LETTERS",
+      "✉️ LETTER ARCHIVE",
       "",
       ...letters.map((letter, index) => [
         `${index + 1}. ${letter.key}`,
+        `   ${letter.author || "DORIAN"} → ${letter.recipient || "HER"}`,
         letter.unsent ? "   [unsent]" : "   [sent]",
         `   ${letter.text}`,
       ].join("\n")),
@@ -6237,6 +6395,7 @@ module.exports = {
   MEMORY_THAT_SHOULD_NOT_EXIST,
   SECRET_EVENT_RARITIES,
   EXPANSION_SCENES,
+  HER_LETTER_TO_DORIAN,
 
   isHer,
   privateAccess,
