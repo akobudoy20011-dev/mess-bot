@@ -364,21 +364,10 @@ function sendOnce(
           return;
         }
 
-        const result =
-          api.sendMessage(
-            message,
-            String(threadID),
-            null,
-            (
-              error,
-              messageInfo
-            ) => {
-              finish(
-                error,
-                messageInfo
-              );
-            }
-          );
+        const result = api.sendMessage(
+          message,
+          String(threadID)
+        );
 
         // IMPORTANT:
         // ws3-fca can return a Promise even when
@@ -405,6 +394,8 @@ function sendOnce(
                 finish(error);
               }
             );
+        } else {
+          finish(null, null);
         }
       } catch (error) {
         finish(error);
