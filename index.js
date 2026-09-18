@@ -225,6 +225,33 @@ function withTimeout(
 // MESSENGER PROMISE WRAPPER
 // ============================================================
 
+async function sendApiMessage(api, message, threadID, callback) {
+  let messageInfo;
+
+  try {
+    messageInfo = await api.sendMessage(message, threadID);
+  } catch (error) {
+    if (typeof callback === "function") {
+      try {
+        callback(error);
+      } catch (callbackError) {
+        console.error("Messenger send callback error:", callbackError);
+      }
+    } else {
+      console.error("Messenger send error:", error);
+    }
+    return;
+  }
+
+  if (typeof callback === "function") {
+    try {
+      callback(null, messageInfo || null);
+    } catch (callbackError) {
+      console.error("Messenger send callback error:", callbackError);
+    }
+  }
+}
+
 function sendMessengerMessage(
   api,
   message,
@@ -245,7 +272,7 @@ function sendMessengerMessage(
         return;
       }
 
-      api.sendMessage(
+      sendApiMessage(api, 
         message,
         threadID,
         (error, messageInfo) => {
@@ -291,7 +318,7 @@ function sendMusicStatusMessage(
       return;
     }
 
-    api.sendMessage(
+    sendApiMessage(api, 
       message,
       threadID,
       (sendError) => {
@@ -413,7 +440,7 @@ function sendMusicAudio(
           }
         );
 
-        api.sendMessage(
+        sendApiMessage(api, 
           {
             body,
             attachment:
@@ -2086,7 +2113,7 @@ login(
       process.env.STARTUP_THREAD_ID;
 
     if (startupThreadID) {
-      api.sendMessage(
+      sendApiMessage(api, 
         [
           "╭─────── ୨୧ ♡ ୨୧ ───────╮",
           "        🎀 E C L I P S E",
@@ -4260,7 +4287,7 @@ function broadcastToAllThreads(
     ) => {
       setTimeout(
         () => {
-          api.sendMessage(
+          sendApiMessage(api, 
             broadcastMessage,
             threadID,
             (sendError) => {
@@ -4398,7 +4425,7 @@ function sendReplyWithTyping(
               }
             : message;
 
-        api.sendMessage(
+        sendApiMessage(api, 
           outgoingMessage,
           threadID,
           (sendError) => {
