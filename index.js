@@ -10,6 +10,26 @@ const { login } = require("ws3-fca");
 
 const db = require("./db");
 
+// ============================================================
+// PROCESS-LEVEL REJECTION SAFETY
+// ============================================================
+//
+// ws3-fca can surface Messenger/Facebook send failures through
+// asynchronous Promise rejections. Log them instead of allowing
+// Node to terminate the Render service. The actual send wrapper
+// below also consumes ws3-fca's returned Promise.
+// ============================================================
+
+process.on(
+  "unhandledRejection",
+  (reason) => {
+    console.error(
+      "[PROCESS] Unhandled Promise rejection (process kept alive):",
+      reason
+    );
+  }
+);
+
 const { handleEconomyCommand } = require("./economy");
 
 const {
@@ -267,7 +287,13 @@ function sendApiMessage(
           }
         }
 
-        reject(error);
+        // All current index.js callers use this helper as a
+        // fire-and-forget Messenger sender. Resolve with null
+        // after reporting the error instead of rejecting the
+        // wrapper Promise, which prevents Facebook error 1545012
+        // from terminating Node/Render through an unhandled
+        // rejection.
+        resolve(null);
         return;
       }
 
@@ -305,20 +331,48 @@ function sendApiMessage(
         return;
       }
 
-      api.sendMessage(
-        message,
-        String(threadID),
-        null,
-        (
-          sendError,
-          messageInfo
-        ) => {
-          finish(
+      const result =
+        api.sendMessage(
+          message,
+          String(threadID),
+          null,
+          (
             sendError,
             messageInfo
+          ) => {
+            finish(
+              sendError,
+              messageInfo
+            );
+          }
+        );
+
+      // ws3-fca may return a Promise as well as invoking
+      // the callback. Always consume that Promise so a
+      // Facebook send rejection cannot become an unhandled
+      // rejection and crash the Render process.
+      if (
+        result &&
+        typeof result.then === "function"
+      ) {
+        result
+          .then(
+            (messageInfo) => {
+              finish(
+                null,
+                messageInfo
+              );
+            }
+          )
+          .catch(
+            (sendError) => {
+              finish(
+                sendError,
+                null
+              );
+            }
           );
-        }
-      );
+      }
     } catch (error) {
       finish(error);
     }
@@ -2196,13 +2250,9 @@ function startLogin() {
           listenError,
           event
         ) => {
-          // ========================================================
-          // LISTENER ERROR
-          // ========================================================
-
           if (listenError) {
             console.error(
-              "[LISTENER] ERROR:",
+              "Listener error:",
               listenError
             );
 
@@ -2215,147 +2265,48 @@ function startLogin() {
             return;
           }
 
-          // ========================================================
-          // RAW EVENT DEBUG
-          // ========================================================
-
-          console.log(
-            "[LISTENER] EVENT RECEIVED:",
-            {
-              type: event?.type,
-              threadID: event?.threadID,
-              senderID: event?.senderID,
-              body:
-                typeof event?.body === "string"
-                  ? event.body.slice(0, 200)
-                  : event?.body,
-            }
-          );
-
-          // ========================================================
-          // VALIDATE EVENT
-          // ========================================================
-
           if (
             !event ||
-            typeof event !== "object"
+            typeof event !==
+              "object"
           ) {
-            console.log(
-              "[LISTENER] Ignored: invalid event."
-            );
-
             return;
           }
-
-          // ========================================================
-          // ONLY HANDLE MESSAGES
-          // ========================================================
 
           if (
-            event.type !== "message" &&
-            event.type !== "message_reply"
+            (
+              event.type ===
+                "message" ||
+              event.type ===
+                "message_reply"
+            ) &&
+            event.threadID
           ) {
-            console.log(
-              "[LISTENER] Ignored event type:",
-              event.type
-            );
+            const threadID =
+              String(
+                event.threadID
+              );
 
-            return;
-          }
-
-          // ========================================================
-          // REQUIRE THREAD ID
-          // ========================================================
-
-          if (!event.threadID) {
-            console.log(
-              "[LISTENER] Ignored message: missing threadID."
-            );
-
-            return;
-          }
-
-          // ========================================================
-          // REQUIRE MESSAGE BODY
-          // ========================================================
-
-          if (
-            typeof event.body !== "string" ||
-            !event.body.trim()
-          ) {
-            console.log(
-              "[LISTENER] Ignored message: empty body."
-            );
-
-            return;
-          }
-
-          const threadID =
-            String(event.threadID);
-
-          // ========================================================
-          // MESSAGE RECEIVED
-          // ========================================================
-
-          console.log(
-            "[LISTENER] MESSAGE:",
-            {
-              type: event.type,
-              threadID,
-              senderID: event.senderID,
-              body: event.body,
-            }
-          );
-
-          // ========================================================
-          // ACTIVE THREAD
-          // ========================================================
-
-          try {
             registerActiveThread(
               threadID
             );
-          } catch (error) {
-            console.error(
-              "[LISTENER] registerActiveThread failed:",
-              error
+
+            void registerGCActivity(
+              threadID
+            ).catch(
+              (error) => {
+                console.error(
+                  "[GC ACTIVITY] Failed to register activity:",
+                  error
+                );
+              }
+            );
+
+            void handleMessage(
+              api,
+              event
             );
           }
-
-          // ========================================================
-          // GC ACTIVITY
-          // ========================================================
-
-          void registerGCActivity(
-            threadID
-          ).catch(
-            (error) => {
-              console.error(
-                "[GC ACTIVITY] Failed to register activity:",
-                error
-              );
-            }
-          );
-
-          // ========================================================
-          // MAIN MESSAGE HANDLER
-          // ========================================================
-
-          console.log(
-            "[HANDLER] Calling handleMessage()..."
-          );
-
-          void handleMessage(
-            api,
-            event
-          ).catch(
-            (error) => {
-              console.error(
-                "[HANDLER] handleMessage failed:",
-                error
-              );
-            }
-          );
         }
       );
     }
