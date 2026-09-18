@@ -537,46 +537,18 @@ async function sendMessageAttempt(
       }
 
       const result = api.sendMessage(
-        message,
-        String(threadID),
-        null,
-        (
-          sendError,
-          messageInfo
-        ) => {
-          finish(
-            sendError,
-            messageInfo
-          );
-        }
-      );
-
-      if (
-        result &&
-        typeof result.then === "function"
-      ) {
-        result.then(
-          (messageInfo) => {
-            finish(
-              null,
-              messageInfo
-            );
-          },
-          (sendError) => {
-            finish(
-              sendError,
-              null
-            );
-          }
-        );
-      }
-    } catch (error) {
-      finish(error, null);
-    }
-  });
-
-}
-
+  message,
+  String(threadID),
+  (
+    sendError,
+    messageInfo
+  ) => {
+    finish(
+      sendError,
+      messageInfo
+    );
+  }
+);
 async function sendMessageWithProtection(
   api,
   message,
