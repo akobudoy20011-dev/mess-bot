@@ -2028,180 +2028,246 @@ try {
 
 // ============================================================
 // FACEBOOK LOGIN
+// (with automatic reconnect on unexpected disconnects — see
+//  startLogin()/scheduleReconnect() near the bottom of this file)
 // ============================================================
 
-login(
-  { appState },
-  {
-    online: true,
-    updatePresence: true,
-    selfListen: false,
-    randomUserAgent: false,
-  },
+let currentApi = null;
+let reconnecting = false;
 
-  async (
-    loginError,
-    api
-  ) => {
-    if (loginError) {
-      console.error(
-        "Login failed:",
-        loginError
-      );
-
-      process.exit(1);
-    }
-
-    if (!api) {
-      console.error(
-        "Login failed: Facebook API object was not returned."
-      );
-
-      process.exit(1);
-    }
-
-    console.log(
-      "Logged in successfully."
-    );
-
-    // ========================================================
-    // DATABASE
-    // ========================================================
-
-    try {
-      await db.connect();
-
-      console.log(
-        "Neon database connected successfully."
-      );
-    } catch (error) {
-      console.error(
-        "Database connection failed:",
-        error
-      );
-
-      process.exit(1);
-    }
-
-    // ========================================================
-    // CLEANUP
-    // ========================================================
-
-    try {
-      startCleanupScheduler();
-
-      console.log(
-        "[CLEANUP] Cleanup scheduler started."
-      );
-    } catch (error) {
-      console.error(
-        "[CLEANUP] Failed to start cleanup scheduler:",
-        error
-      );
-    }
-
-    // ========================================================
-    // LISTENER
-    // ========================================================
-
-    api.setOptions({
-      listenEvents: true,
+function startLogin() {
+  login(
+    { appState },
+    {
+      online: true,
+      updatePresence: true,
       selfListen: false,
-    });
+      randomUserAgent: false,
+    },
 
-    const startupThreadID =
-      process.env.STARTUP_THREAD_ID;
+    async (
+      loginError,
+      api
+    ) => {
+      if (loginError) {
+        console.error(
+          "Login failed:",
+          loginError
+        );
 
-    if (startupThreadID) {
-      sendApiMessage(api, 
-        [
-          "╭─────── ୨୧ ♡ ୨୧ ───────╮",
-          "        🎀 E C L I P S E",
-          "          ONLINE ♡",
-          "╰─────── ୨୧ ♡ ୨୧ ───────╯",
-          "",
-          "୨୧ bot is online and ready ♡",
-          "",
-          "♡ music protection: 2 / GC",
-          "♡ global downloads: 2",
-          "♡ pause system: ready",
-        ].join("\n"),
-        startupThreadID,
-        (sendError) => {
-          if (sendError) {
+        scheduleReconnect(
+          "login_failed"
+        );
+
+        return;
+      }
+
+      if (!api) {
+        console.error(
+          "Login failed: Facebook API object was not returned."
+        );
+
+        scheduleReconnect(
+          "no_api_object"
+        );
+
+        return;
+      }
+
+      currentApi = api;
+
+      console.log(
+        "Logged in successfully."
+      );
+
+      // ========================================================
+      // DATABASE
+      // ========================================================
+
+      try {
+        await db.connect();
+
+        console.log(
+          "Neon database connected successfully."
+        );
+      } catch (error) {
+        console.error(
+          "Database connection failed:",
+          error
+        );
+
+        process.exit(1);
+      }
+
+      // ========================================================
+      // CLEANUP
+      // ========================================================
+
+      try {
+        startCleanupScheduler();
+
+        console.log(
+          "[CLEANUP] Cleanup scheduler started."
+        );
+      } catch (error) {
+        console.error(
+          "[CLEANUP] Failed to start cleanup scheduler:",
+          error
+        );
+      }
+
+      // ========================================================
+      // LISTENER
+      // ========================================================
+
+      api.setOptions({
+        listenEvents: true,
+        selfListen: false,
+      });
+
+      const startupThreadID =
+        process.env.STARTUP_THREAD_ID;
+
+      if (startupThreadID) {
+        sendApiMessage(api, 
+          [
+            "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+            "        🎀 E C L I P S E",
+            "          ONLINE ♡",
+            "╰─────── ୨୧ ♡ ୨୧ ───────╯",
+            "",
+            "୨୧ bot is online and ready ♡",
+            "",
+            "♡ music protection: 2 / GC",
+            "♡ global downloads: 2",
+            "♡ pause system: ready",
+          ].join("\n"),
+          startupThreadID,
+          (sendError) => {
+            if (sendError) {
+              console.error(
+                "Startup message failed:",
+                sendError
+              );
+            }
+          }
+        );
+      }
+
+      console.log(
+        "Listener started."
+      );
+
+      api.listenMqtt(
+        (
+          listenError,
+          event
+        ) => {
+          if (listenError) {
             console.error(
-              "Startup message failed:",
-              sendError
+              "Listener error:",
+              listenError
+            );
+
+            // The MQTT session died. Reconnect instead of going
+            // silent for the rest of the process lifetime.
+            scheduleReconnect(
+              "listener_error"
+            );
+
+            return;
+          }
+
+          if (
+            !event ||
+            typeof event !==
+              "object"
+          ) {
+            return;
+          }
+
+          if (
+            (
+              event.type ===
+                "message" ||
+              event.type ===
+                "message_reply"
+            ) &&
+            event.threadID
+          ) {
+            const threadID =
+              String(
+                event.threadID
+              );
+
+            registerActiveThread(
+              threadID
+            );
+
+            void registerGCActivity(
+              threadID
+            ).catch(
+              (error) => {
+                console.error(
+                  "[GC ACTIVITY] Failed to register activity:",
+                  error
+                );
+              }
+            );
+
+            void handleMessage(
+              api,
+              event
             );
           }
         }
       );
     }
+  );
+}
+
+// ============================================================
+// AUTOMATIC RECONNECT
+// ============================================================
+//
+// Previously, if listenMqtt() ever errored out (e.g. the socket
+// dropped from a spin-down/network blip on a free hosting tier),
+// the bot would go completely silent for the rest of the process
+// life: no more messages would ever be handled, with no crash
+// and no log explaining why. This reconnect loop fixes that by
+// re-running startLogin() after a short delay instead of leaving
+// the bot in that dead state.
+// ============================================================
+
+function scheduleReconnect(
+  reason
+) {
+  if (
+    shuttingDown ||
+    reconnecting
+  ) {
+    return;
+  }
+
+  reconnecting = true;
+  currentApi = null;
+
+  console.error(
+    `[SYSTEM] Reconnecting in 10s due to: ${reason}`
+  );
+
+  setTimeout(() => {
+    reconnecting = false;
 
     console.log(
-      "Listener started."
+      "[SYSTEM] Attempting to reconnect to Facebook..."
     );
 
-    api.listenMqtt(
-      (
-        listenError,
-        event
-      ) => {
-        if (listenError) {
-          console.error(
-            "Listener error:",
-            listenError
-          );
+    startLogin();
+  }, 10_000);
+}
 
-          return;
-        }
-
-        if (
-          !event ||
-          typeof event !==
-            "object"
-        ) {
-          return;
-        }
-
-        if (
-          (
-            event.type ===
-              "message" ||
-            event.type ===
-              "message_reply"
-          ) &&
-          event.threadID
-        ) {
-          const threadID =
-            String(
-              event.threadID
-            );
-
-          registerActiveThread(
-            threadID
-          );
-
-          void registerGCActivity(
-            threadID
-          ).catch(
-            (error) => {
-              console.error(
-                "[GC ACTIVITY] Failed to register activity:",
-                error
-              );
-            }
-          );
-
-          void handleMessage(
-            api,
-            event
-          );
-        }
-      }
-    );
-  }
-);
+startLogin();
 
 // ============================================================
 // ACTIVE THREAD TRACKING
@@ -3857,6 +3923,19 @@ async function handleMessage(
       "RPG/economy/games command failed:",
       error
     );
+
+    // FIX: this catch previously only logged the error and left
+    // the user with zero response, which looked exactly like a
+    // dead/unregistered command (!trivia, !help-adjacent game
+    // commands, etc.). Now the user gets told something broke
+    // instead of silence.
+    sendReplyWithTyping(
+      api,
+      "🌑 Something went wrong running that command. Please try again in a moment.",
+      threadID
+    );
+
+    return;
   }
 
   // ==========================================================
