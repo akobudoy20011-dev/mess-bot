@@ -260,52 +260,6 @@ function sendMessengerMessage(
 }
 
 // ============================================================
-// EDIT MESSENGER MESSAGE
-// ============================================================
-//
-// Used by music so SEARCHING / PREPARING / DOWNLOADING all
-// reuse the exact same Messenger message.
-// ============================================================
-
-function editMessengerMessage(
-  api,
-  message,
-  messageID
-) {
-  return new Promise((resolve, reject) => {
-    if (
-      !messageID ||
-      typeof api.editMessage !==
-        "function"
-    ) {
-      reject(
-        new Error(
-          "Messenger editMessage is unavailable."
-        )
-      );
-
-      return;
-    }
-
-    try {
-      api.editMessage(
-        message,
-        messageID,
-        (error) => {
-          if (error) {
-            reject(error);
-          } else {
-            resolve();
-          }
-        }
-      );
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-// ============================================================
 // COQUETTE MUSIC PANEL
 // ============================================================
 
@@ -641,14 +595,16 @@ function processMusicQueue() {
 //
 // FLOW:
 //
-// 1. SEND ONE "SEARCHING YOUTUBE" MESSAGE.
+// 1. SEND "SEARCHING YOUTUBE" MESSAGE.
 // 2. SEARCH.
-// 3. EDIT SAME MESSAGE → "PREPARING AUDIO".
-// 4. EDIT SAME MESSAGE → "DOWNLOADING".
+// 3. SEND "PREPARING AUDIO" MESSAGE.
+// 4. SEND "DOWNLOADING" MESSAGE.
 // 5. DOWNLOAD.
 // 6. SEND NEW MESSAGE containing the actual audio.
-// 7. On failure, EDIT the original status message.
+// 7. On failure, SEND a new failure message.
 //
+// Every status update is its own message (no editing), since
+// editing the same Messenger message was buggy/unreliable.
 // ============================================================
 
 async function processMusicJob(job) {
@@ -666,9 +622,6 @@ async function processMusicJob(job) {
   job.temporaryFile =
     temporaryFile;
 
-  let statusMessageID =
-    null;
-
   try {
     if (
       global.botDisabled === true
@@ -679,40 +632,27 @@ async function processMusicJob(job) {
 
     // ========================================================
     // STEP 1
-    // CREATE ONE STATUS MESSAGE
+    // SEND "SEARCHING" MESSAGE
     // ========================================================
 
     job.status =
       "searching";
 
-    const statusMessage =
-      await sendMessengerMessage(
-        api,
-        buildMusicPanel({
-          title:
-            job.requestedSong,
-          state:
-            "searching",
-        }),
-        threadID
+    await sendMessengerMessage(
+      api,
+      buildMusicPanel({
+        title:
+          job.requestedSong,
+        state:
+          "searching",
+      }),
+      threadID
+    ).catch((sendError) => {
+      console.error(
+        `[Music] Failed to send searching status for job ${job.id}:`,
+        sendError
       );
-
-    // ws3-fca normally exposes the message ID as messageID.
-    // The fallbacks make this safer across versions.
-    statusMessageID =
-      statusMessage?.messageID ||
-      statusMessage?.messageId ||
-      statusMessage?.id ||
-      null;
-
-    job.statusMessageID =
-      statusMessageID;
-
-    if (!statusMessageID) {
-      console.warn(
-        `[Music] Job ${job.id}: Messenger did not return a message ID.`
-      );
-    }
+    });
 
     // ========================================================
     // STEP 2
@@ -773,33 +713,28 @@ async function processMusicJob(job) {
 
     // ========================================================
     // STEP 3
-    // EDIT SAME MESSAGE
-    // SEARCHING → PREPARING AUDIO
+    // SEND "PREPARING AUDIO" MESSAGE
     // ========================================================
 
     job.status =
       "processing";
 
-    if (statusMessageID) {
-      try {
-        await editMessengerMessage(
-          api,
-          buildMusicPanel({
-            title,
-            author,
-            duration,
-            state:
-              "processing",
-          }),
-          statusMessageID
-        );
-      } catch (editError) {
-        console.error(
-          `[Music] Failed to edit status to processing for job ${job.id}:`,
-          editError
-        );
-      }
-    }
+    await sendMessengerMessage(
+      api,
+      buildMusicPanel({
+        title,
+        author,
+        duration,
+        state:
+          "processing",
+      }),
+      threadID
+    ).catch((sendError) => {
+      console.error(
+        `[Music] Failed to send processing status for job ${job.id}:`,
+        sendError
+      );
+    });
 
     if (
       global.botDisabled === true
@@ -810,33 +745,28 @@ async function processMusicJob(job) {
 
     // ========================================================
     // STEP 4
-    // EDIT SAME MESSAGE
-    // PREPARING AUDIO → DOWNLOADING
+    // SEND "DOWNLOADING" MESSAGE
     // ========================================================
 
     job.status =
       "downloading";
 
-    if (statusMessageID) {
-      try {
-        await editMessengerMessage(
-          api,
-          buildMusicPanel({
-            title,
-            author,
-            duration,
-            state:
-              "downloading",
-          }),
-          statusMessageID
-        );
-      } catch (editError) {
-        console.error(
-          `[Music] Failed to edit status to downloading for job ${job.id}:`,
-          editError
-        );
-      }
-    }
+    await sendMessengerMessage(
+      api,
+      buildMusicPanel({
+        title,
+        author,
+        duration,
+        state:
+          "downloading",
+      }),
+      threadID
+    ).catch((sendError) => {
+      console.error(
+        `[Music] Failed to send downloading status for job ${job.id}:`,
+        sendError
+      );
+    });
 
     // ========================================================
     // STEP 5
@@ -965,7 +895,7 @@ async function processMusicJob(job) {
 
     // ========================================================
     // FAILURE
-    // REUSE ORIGINAL STATUS MESSAGE
+    // SEND A NEW FAILURE MESSAGE
     // ========================================================
 
     const failedPanel =
@@ -988,24 +918,14 @@ async function processMusicJob(job) {
       `\n\n♡ ${errorMessage}`;
 
     try {
-      if (
-        statusMessageID
-      ) {
-        await editMessengerMessage(
-          api,
-          failedPanel,
-          statusMessageID
-        );
-      } else {
-        await sendMessengerMessage(
-          api,
-          failedPanel,
-          threadID
-        );
-      }
+      await sendMessengerMessage(
+        api,
+        failedPanel,
+        threadID
+      );
     } catch (sendError) {
       console.error(
-        "[Music] Failed to update error message:",
+        "[Music] Failed to send error message:",
         sendError
       );
     }
@@ -1017,9 +937,6 @@ async function processMusicJob(job) {
       .catch(() => {});
 
     job.temporaryFile =
-      null;
-
-    job.statusMessageID =
       null;
   }
 }
@@ -1083,9 +1000,6 @@ function enqueueMusic(
       Date.now(),
 
     temporaryFile:
-      null,
-
-    statusMessageID:
       null,
 
     cancelled:
