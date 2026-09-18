@@ -2196,9 +2196,13 @@ function startLogin() {
           listenError,
           event
         ) => {
+          // ========================================================
+          // LISTENER ERROR
+          // ========================================================
+
           if (listenError) {
             console.error(
-              "Listener error:",
+              "[LISTENER] ERROR:",
               listenError
             );
 
@@ -2211,48 +2215,147 @@ function startLogin() {
             return;
           }
 
+          // ========================================================
+          // RAW EVENT DEBUG
+          // ========================================================
+
+          console.log(
+            "[LISTENER] EVENT RECEIVED:",
+            {
+              type: event?.type,
+              threadID: event?.threadID,
+              senderID: event?.senderID,
+              body:
+                typeof event?.body === "string"
+                  ? event.body.slice(0, 200)
+                  : event?.body,
+            }
+          );
+
+          // ========================================================
+          // VALIDATE EVENT
+          // ========================================================
+
           if (
             !event ||
-            typeof event !==
-              "object"
+            typeof event !== "object"
           ) {
+            console.log(
+              "[LISTENER] Ignored: invalid event."
+            );
+
             return;
           }
 
-          if (
-            (
-              event.type ===
-                "message" ||
-              event.type ===
-                "message_reply"
-            ) &&
-            event.threadID
-          ) {
-            const threadID =
-              String(
-                event.threadID
-              );
+          // ========================================================
+          // ONLY HANDLE MESSAGES
+          // ========================================================
 
+          if (
+            event.type !== "message" &&
+            event.type !== "message_reply"
+          ) {
+            console.log(
+              "[LISTENER] Ignored event type:",
+              event.type
+            );
+
+            return;
+          }
+
+          // ========================================================
+          // REQUIRE THREAD ID
+          // ========================================================
+
+          if (!event.threadID) {
+            console.log(
+              "[LISTENER] Ignored message: missing threadID."
+            );
+
+            return;
+          }
+
+          // ========================================================
+          // REQUIRE MESSAGE BODY
+          // ========================================================
+
+          if (
+            typeof event.body !== "string" ||
+            !event.body.trim()
+          ) {
+            console.log(
+              "[LISTENER] Ignored message: empty body."
+            );
+
+            return;
+          }
+
+          const threadID =
+            String(event.threadID);
+
+          // ========================================================
+          // MESSAGE RECEIVED
+          // ========================================================
+
+          console.log(
+            "[LISTENER] MESSAGE:",
+            {
+              type: event.type,
+              threadID,
+              senderID: event.senderID,
+              body: event.body,
+            }
+          );
+
+          // ========================================================
+          // ACTIVE THREAD
+          // ========================================================
+
+          try {
             registerActiveThread(
               threadID
             );
-
-            void registerGCActivity(
-              threadID
-            ).catch(
-              (error) => {
-                console.error(
-                  "[GC ACTIVITY] Failed to register activity:",
-                  error
-                );
-              }
-            );
-
-            void handleMessage(
-              api,
-              event
+          } catch (error) {
+            console.error(
+              "[LISTENER] registerActiveThread failed:",
+              error
             );
           }
+
+          // ========================================================
+          // GC ACTIVITY
+          // ========================================================
+
+          void registerGCActivity(
+            threadID
+          ).catch(
+            (error) => {
+              console.error(
+                "[GC ACTIVITY] Failed to register activity:",
+                error
+              );
+            }
+          );
+
+          // ========================================================
+          // MAIN MESSAGE HANDLER
+          // ========================================================
+
+          console.log(
+            "[HANDLER] Calling handleMessage()..."
+          );
+
+          void handleMessage(
+            api,
+            event
+          ).catch(
+            (error) => {
+              console.error(
+                "[HANDLER] handleMessage failed:",
+                error
+              );
+            }
+          );
         }
       );
     }
