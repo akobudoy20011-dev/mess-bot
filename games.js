@@ -354,7 +354,8 @@ function sendMessageAsync(
       try {
         api.sendMessage(
           text,
-          threadID,
+          String(threadID),
+          null,
           (error, messageInfo) =>
             finish(
               error,
@@ -367,7 +368,6 @@ function sendMessageAsync(
     }
   );
 }
-
 async function editMessageSafe(
   api,
   newText,
