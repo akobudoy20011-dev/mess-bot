@@ -553,6 +553,568 @@ async function connect() {
   `);
 
   // ═════════════════════════════════════════════════════════
+  // ECLIPSE RPG — NEW RPG SYSTEM
+  // ═════════════════════════════════════════════════════════
+
+  await pool.query(`
+    /*
+     * Core progression
+     */
+
+    ALTER TABLE rpg_players
+      ADD COLUMN IF NOT EXISTS title TEXT,
+      ADD COLUMN IF NOT EXISTS traitor BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS traitor_kingdom_id TEXT,
+      ADD COLUMN IF NOT EXISTS property_level INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS skill_points INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS affinity_points INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS special_points INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS total_hunts INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS total_bosses INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS total_dungeons INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS death_count INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS last_rest_at BIGINT,
+      ADD COLUMN IF NOT EXISTS last_hunt_at BIGINT;
+
+    /*
+     * Player affinities
+     *
+     * One row per player + affinity.
+     *
+     * tier:
+     * 0 = none
+     * 1 = weak
+     * 2 = normal
+     * 3 = strong
+     * 4 = exceptional
+     * 5 = mastered
+     * 6 = ascended
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_player_affinities (
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      affinity_id TEXT NOT NULL,
+
+      tier INTEGER NOT NULL DEFAULT 0,
+      mastery INTEGER NOT NULL DEFAULT 0,
+
+      primary_affinity BOOLEAN NOT NULL DEFAULT FALSE,
+      unlocked BOOLEAN NOT NULL DEFAULT TRUE,
+
+      source TEXT,
+      unlocked_at BIGINT,
+      updated_at BIGINT NOT NULL,
+
+      PRIMARY KEY(thread_id, user_id, affinity_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS rpg_affinity_player_idx
+      ON rpg_player_affinities(
+        thread_id,
+        user_id,
+        unlocked,
+        tier DESC,
+        mastery DESC
+      );
+
+    /*
+     * Spells
+     *
+     * Supports normal affinity spells,
+     * kingdom spells, mastery spells and special spells.
+     */
+
+    ALTER TABLE rpg_player_spells
+      ADD COLUMN IF NOT EXISTS mastery_level INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS source TEXT,
+      ADD COLUMN IF NOT EXISTS learned_at BIGINT;
+
+    /*
+     * Special moves
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_player_special_moves (
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      special_id TEXT NOT NULL,
+
+      unlocked BOOLEAN NOT NULL DEFAULT TRUE,
+      mastery INTEGER NOT NULL DEFAULT 0,
+
+      uses INTEGER NOT NULL DEFAULT 0,
+      source TEXT,
+      unlocked_at BIGINT,
+      updated_at BIGINT NOT NULL,
+
+      PRIMARY KEY(thread_id, user_id, special_id)
+    );
+
+    /*
+     * Passive / advanced class traits
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_player_traits (
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      trait_id TEXT NOT NULL,
+
+      level INTEGER NOT NULL DEFAULT 1,
+      unlocked BOOLEAN NOT NULL DEFAULT TRUE,
+
+      source TEXT,
+      unlocked_at BIGINT,
+      updated_at BIGINT NOT NULL,
+
+      PRIMARY KEY(thread_id, user_id, trait_id)
+    );
+
+    /*
+     * Pets
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_player_pets (
+      id BIGSERIAL PRIMARY KEY,
+
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      pet_id TEXT NOT NULL,
+
+      name TEXT,
+      level INTEGER NOT NULL DEFAULT 1,
+      experience INTEGER NOT NULL DEFAULT 0,
+
+      active BOOLEAN NOT NULL DEFAULT FALSE,
+      obtained_from TEXT,
+
+      obtained_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+
+      UNIQUE(thread_id, user_id, pet_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS rpg_player_pets_lookup_idx
+      ON rpg_player_pets(
+        thread_id,
+        user_id,
+        active
+      );
+
+    /*
+     * Equipment
+     */
+
+    ALTER TABLE rpg_equipment
+      ADD COLUMN IF NOT EXISTS enhancement INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS equipped_at BIGINT;
+
+    /*
+     * Quest progression
+     */
+
+    ALTER TABLE rpg_quests
+      ADD COLUMN IF NOT EXISTS kingdom_id TEXT,
+      ADD COLUMN IF NOT EXISTS affinity_id TEXT,
+      ADD COLUMN IF NOT EXISTS class_id TEXT,
+      ADD COLUMN IF NOT EXISTS reward_coins INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS reward_reputation INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS reward_affinity_mastery INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS reward_spell_id TEXT,
+      ADD COLUMN IF NOT EXISTS reward_special_id TEXT,
+      ADD COLUMN IF NOT EXISTS reward_pet_id TEXT,
+      ADD COLUMN IF NOT EXISTS claimed_at BIGINT;
+
+    /*
+     * Kingdom reputation
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_kingdom_reputation (
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      kingdom_id TEXT NOT NULL,
+
+      reputation INTEGER NOT NULL DEFAULT 0,
+      rank TEXT NOT NULL DEFAULT 'stranger',
+
+      quests_completed INTEGER NOT NULL DEFAULT 0,
+      last_quest_at BIGINT,
+
+      updated_at BIGINT NOT NULL,
+
+      PRIMARY KEY(thread_id, user_id, kingdom_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS rpg_kingdom_rep_player_idx
+      ON rpg_kingdom_reputation(
+        thread_id,
+        user_id,
+        reputation DESC
+      );
+
+    /*
+     * Kingdom quests
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_kingdom_quests (
+      id BIGSERIAL PRIMARY KEY,
+
+      thread_id TEXT NOT NULL,
+      kingdom_id TEXT NOT NULL,
+      quest_id TEXT NOT NULL,
+
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+
+      objective_type TEXT NOT NULL,
+      objective_key TEXT,
+      target INTEGER NOT NULL DEFAULT 1,
+
+      reward_coins INTEGER NOT NULL DEFAULT 0,
+      reward_xp INTEGER NOT NULL DEFAULT 0,
+      reward_reputation INTEGER NOT NULL DEFAULT 0,
+
+      reward_affinity TEXT,
+      reward_affinity_mastery INTEGER NOT NULL DEFAULT 0,
+      reward_spell TEXT,
+      reward_special TEXT,
+      reward_pet TEXT,
+
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at BIGINT NOT NULL,
+      expires_at BIGINT,
+
+      UNIQUE(thread_id, kingdom_id, quest_id)
+    );
+
+    /*
+     * Affinity quests / trials
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_affinity_trials (
+      id BIGSERIAL PRIMARY KEY,
+
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+
+      affinity_id TEXT NOT NULL,
+      trial_id TEXT NOT NULL,
+
+      stage INTEGER NOT NULL DEFAULT 1,
+      progress INTEGER NOT NULL DEFAULT 0,
+      target INTEGER NOT NULL DEFAULT 1,
+
+      status TEXT NOT NULL DEFAULT 'active',
+
+      started_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      completed_at BIGINT,
+
+      UNIQUE(
+        thread_id,
+        user_id,
+        affinity_id,
+        trial_id
+      )
+    );
+
+    /*
+     * Parties
+     *
+     * Minimum 3 players for group hunts / boss raids.
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_parties (
+      id BIGSERIAL PRIMARY KEY,
+
+      thread_id TEXT NOT NULL,
+      leader_id TEXT NOT NULL,
+
+      name TEXT NOT NULL DEFAULT 'Eclipse Party',
+
+      status TEXT NOT NULL DEFAULT 'forming',
+
+      max_members INTEGER NOT NULL DEFAULT 5,
+
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_party_members (
+      party_id BIGINT NOT NULL
+        REFERENCES rpg_parties(id)
+        ON DELETE CASCADE,
+
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+
+      role TEXT NOT NULL DEFAULT 'member',
+
+      joined_at BIGINT NOT NULL,
+      ready BOOLEAN NOT NULL DEFAULT FALSE,
+
+      PRIMARY KEY(party_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS rpg_party_members_lookup_idx
+      ON rpg_party_members(
+        thread_id,
+        user_id,
+        party_id
+      );
+
+    /*
+     * Boss sessions
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_boss_sessions (
+      id BIGSERIAL PRIMARY KEY,
+
+      thread_id TEXT NOT NULL,
+      boss_id TEXT NOT NULL,
+
+      party_id BIGINT,
+
+      boss_hp INTEGER NOT NULL,
+      boss_max_hp INTEGER NOT NULL,
+
+      phase INTEGER NOT NULL DEFAULT 1,
+      turn_number INTEGER NOT NULL DEFAULT 1,
+
+      status TEXT NOT NULL DEFAULT 'active',
+
+      environment TEXT,
+      weather TEXT,
+      season TEXT,
+
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_boss_participants (
+      boss_session_id BIGINT NOT NULL
+        REFERENCES rpg_boss_sessions(id)
+        ON DELETE CASCADE,
+
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+
+      damage_dealt INTEGER NOT NULL DEFAULT 0,
+      healing_done INTEGER NOT NULL DEFAULT 0,
+      damage_taken INTEGER NOT NULL DEFAULT 0,
+
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+
+      PRIMARY KEY(boss_session_id, user_id)
+    );
+
+    /*
+     * Guilds
+     *
+     * Kingdoms and guilds are intentionally separate systems.
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_guilds (
+      id BIGSERIAL PRIMARY KEY,
+
+      thread_id TEXT NOT NULL,
+      guild_id TEXT NOT NULL,
+
+      name TEXT NOT NULL,
+      founder_id TEXT NOT NULL,
+
+      treasury BIGINT NOT NULL DEFAULT 0,
+      level INTEGER NOT NULL DEFAULT 1,
+      experience BIGINT NOT NULL DEFAULT 0,
+
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+
+      UNIQUE(thread_id, guild_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rpg_guild_members (
+      guild_id BIGINT NOT NULL
+        REFERENCES rpg_guilds(id)
+        ON DELETE CASCADE,
+
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+
+      role TEXT NOT NULL DEFAULT 'member',
+
+      joined_at BIGINT NOT NULL,
+
+      PRIMARY KEY(guild_id, user_id)
+    );
+
+    /*
+     * Seasons / weather / world state
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_world_state (
+      thread_id TEXT PRIMARY KEY,
+
+      season TEXT NOT NULL DEFAULT 'spring',
+      weather TEXT NOT NULL DEFAULT 'clear',
+
+      season_started_at BIGINT NOT NULL,
+      weather_changed_at BIGINT NOT NULL,
+
+      active_event TEXT,
+
+      updated_at BIGINT NOT NULL
+    );
+
+    /*
+     * Global world events
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_world_events (
+      id BIGSERIAL PRIMARY KEY,
+
+      thread_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+
+      started_at BIGINT NOT NULL,
+      ends_at BIGINT,
+
+      UNIQUE(thread_id, event_id)
+    );
+
+    /*
+     * Location environmental state
+     */
+
+    ALTER TABLE rpg_location_states
+      ADD COLUMN IF NOT EXISTS season_modifier TEXT,
+      ADD COLUMN IF NOT EXISTS weather_modifier TEXT,
+      ADD COLUMN IF NOT EXISTS active_event TEXT;
+
+    /*
+     * Combat effects
+     *
+     * Persistent effects allow things like:
+     * - burn
+     * - poison
+     * - stun
+     * - Ice Wall
+     * - Infinite Darkness
+     * - Shadow Body
+     * - Divine buffs
+     * - Bark Skin
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_combat_effects (
+      id BIGSERIAL PRIMARY KEY,
+
+      thread_id TEXT NOT NULL,
+      combat_id BIGINT,
+      boss_session_id BIGINT,
+
+      user_id TEXT,
+      target_type TEXT NOT NULL DEFAULT 'player',
+      target_id TEXT,
+
+      effect_id TEXT NOT NULL,
+
+      stacks INTEGER NOT NULL DEFAULT 1,
+      remaining_turns INTEGER NOT NULL DEFAULT 1,
+
+      magnitude INTEGER NOT NULL DEFAULT 0,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS rpg_combat_effects_lookup_idx
+      ON rpg_combat_effects(
+        thread_id,
+        user_id,
+        effect_id,
+        remaining_turns
+      );
+
+    /*
+     * Combat session expansion
+     */
+
+    ALTER TABLE rpg_combat_sessions
+      ADD COLUMN IF NOT EXISTS round_number INTEGER NOT NULL DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS environment TEXT,
+      ADD COLUMN IF NOT EXISTS weather TEXT,
+      ADD COLUMN IF NOT EXISTS season TEXT,
+      ADD COLUMN IF NOT EXISTS enemy_count INTEGER NOT NULL DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+    /*
+     * Player progression statistics
+     */
+
+    CREATE TABLE IF NOT EXISTS rpg_player_statistics (
+      thread_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+
+      enemies_defeated INTEGER NOT NULL DEFAULT 0,
+      elites_defeated INTEGER NOT NULL DEFAULT 0,
+      bosses_defeated INTEGER NOT NULL DEFAULT 0,
+
+      hunts_completed INTEGER NOT NULL DEFAULT 0,
+      dungeons_completed INTEGER NOT NULL DEFAULT 0,
+      quests_completed INTEGER NOT NULL DEFAULT 0,
+
+      kingdom_quests_completed INTEGER NOT NULL DEFAULT 0,
+      affinity_trials_completed INTEGER NOT NULL DEFAULT 0,
+
+      total_damage INTEGER NOT NULL DEFAULT 0,
+      total_healing INTEGER NOT NULL DEFAULT 0,
+
+      deaths INTEGER NOT NULL DEFAULT 0,
+
+      updated_at BIGINT NOT NULL,
+
+      PRIMARY KEY(thread_id, user_id)
+    );
+
+    /*
+     * Helpful indexes
+     */
+
+    CREATE INDEX IF NOT EXISTS rpg_players_kingdom_idx
+      ON rpg_players(thread_id, kingdom_id);
+
+    CREATE INDEX IF NOT EXISTS rpg_players_region_idx
+      ON rpg_players(thread_id, region_id);
+
+    CREATE INDEX IF NOT EXISTS rpg_quests_player_status_idx
+      ON rpg_quests(
+        thread_id,
+        user_id,
+        status,
+        quest_type
+      );
+
+    CREATE INDEX IF NOT EXISTS rpg_spells_player_idx
+      ON rpg_player_spells(
+        thread_id,
+        user_id,
+        unlocked
+      );
+
+    CREATE INDEX IF NOT EXISTS rpg_specials_player_idx
+      ON rpg_player_special_moves(
+        thread_id,
+        user_id,
+        unlocked
+      );
+  `);
+
+  // ═════════════════════════════════════════════════════════
   // LOVE QUEST
   // ═════════════════════════════════════════════════════════
 
