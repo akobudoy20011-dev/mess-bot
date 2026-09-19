@@ -247,17 +247,6 @@ async function searchYouTube(query) {
    COOKIE CONFIGURATION
 ========================================================= */
 
-/*
- * Render environment variable:
- *
- * YOUTUBE_COOKIES=/opt/render/project/src/cookies.txt
- *
- * The file must be a valid Netscape-format cookies file.
- *
- * NEVER put the cookie contents directly into an
- * environment variable.
- */
-
 async function getCookiePath() {
   const configuredPath =
     String(
@@ -310,14 +299,6 @@ async function getCookiePath() {
    NODE / EJS CONFIGURATION
 ========================================================= */
 
-/*
- * Current yt-dlp EJS documentation requires Node 22+
- * when Node is used as the JavaScript runtime.
- *
- * We therefore only enable Node EJS when the running
- * Node version is compatible.
- */
-
 function getJsRuntimeOptions() {
   const major =
     Number(
@@ -342,29 +323,12 @@ function getJsRuntimeOptions() {
     `[YouTube] Node ${process.versions.node} detected. Node 22+ is required for current yt-dlp EJS support.`
   );
 
-  /*
-   * Do not pass an incompatible Node runtime
-   * to yt-dlp.
-   *
-   * If your yt-dlp installation has another supported
-   * runtime configured, yt-dlp can use that.
-   */
   return {};
 }
 
 /* =========================================================
    USER AGENT
 ========================================================= */
-
-/*
- * If you exported cookies from a browser and that browser
- * has a specific User-Agent, configure:
- *
- * YOUTUBE_USER_AGENT=Mozilla/5.0 ...
- *
- * The User-Agent should correspond to the browser session
- * used to obtain the cookies.
- */
 
 function getUserAgent() {
   const value =
@@ -477,8 +441,7 @@ function createFriendlyDownloadError(error) {
   }
 
   if (
-    lower.includes("age-restricted")
-  ) ||
+    lower.includes("age-restricted") ||
     lower.includes("sign in to confirm your age")
   ) {
     return new Error(
@@ -581,9 +544,6 @@ async function downloadYouTubeAudioOnce(
     const runtimeOptions =
       getJsRuntimeOptions();
 
-    /*
-     * Base yt-dlp configuration.
-     */
     const ytOptions = {
       output:
         temporaryTemplate,
@@ -603,9 +563,6 @@ async function downloadYouTubeAudioOnce(
       ffmpegLocation:
         ffmpegPath,
 
-      /*
-       * Conservative retry policy.
-       */
       retries:
         2,
 
@@ -621,21 +578,12 @@ async function downloadYouTubeAudioOnce(
       noPlaylist:
         true,
 
-      /*
-       * Avoid aggressively downloading fragments.
-       */
       concurrentFragments:
         1,
 
-      /*
-       * Useful diagnostics.
-       */
       print:
         "after_move:filepath",
 
-      /*
-       * Cookies only when explicitly configured.
-       */
       ...(cookiesPath
         ? {
             cookies:
@@ -643,24 +591,15 @@ async function downloadYouTubeAudioOnce(
           }
         : {}),
 
-      /*
-       * Browser-compatible User-Agent when supplied.
-       */
       ...(userAgent
         ? {
             userAgent,
           }
         : {}),
 
-      /*
-       * Current EJS configuration.
-       */
       ...runtimeOptions,
     };
 
-    /*
-     * Spawn yt-dlp.
-     */
     child =
       youtubedl(
         videoUrl,
@@ -803,27 +742,12 @@ async function downloadYouTubeAudioOnce(
        ACTUALLY WAIT FOR YT-DLP
     ===================================================== */
 
-    /*
-     * IMPORTANT:
-     *
-     * youtube-dl-exec returns a child process which is
-     * also awaitable.
-     *
-     * We MUST wait for the yt-dlp promise itself.
-     *
-     * Promise.resolve(child) alone can resolve immediately
-     * depending on how the child object is handled.
-     */
     const downloadPromise =
       Promise.resolve()
         .then(
           () => child
         );
 
-    /*
-     * If youtube-dl-exec exposes a .then() method,
-     * wait for it.
-     */
     const processPromise =
       typeof child?.then === "function"
         ? child.then(
@@ -885,10 +809,6 @@ async function downloadYouTubeAudioOnce(
             }
           );
 
-    /*
-     * Prevent an unused promise warning while retaining
-     * the intentionally deferred child reference.
-     */
     void downloadPromise;
 
     const racePromises = [
@@ -912,9 +832,6 @@ async function downloadYouTubeAudioOnce(
           racePromises
         );
     } catch (error) {
-      /*
-       * Preserve yt-dlp diagnostics.
-       */
       if (
         error &&
         typeof error === "object"
@@ -1235,10 +1152,6 @@ async function downloadYouTubeAudioOnce(
       );
     }
 
-    /* =====================================================
-       TIMER CLEANUP
-    ===================================================== */
-
     if (timeoutTimer) {
       clearTimeout(
         timeoutTimer
@@ -1246,10 +1159,6 @@ async function downloadYouTubeAudioOnce(
 
       timeoutTimer = null;
     }
-
-    /* =====================================================
-       ABORT CLEANUP
-    ===================================================== */
 
     if (
       signal &&
@@ -1267,17 +1176,9 @@ async function downloadYouTubeAudioOnce(
       abortHandler = null;
     }
 
-    /* =====================================================
-       PROCESS CLEANUP
-    ===================================================== */
-
     await killDownloadProcess(
       child
     );
-
-    /* =====================================================
-       TEMPORARY FILE CLEANUP
-    ===================================================== */
 
     try {
       const files =
@@ -1344,10 +1245,6 @@ async function downloadYouTubeAudio(
     );
   }
 
-  /*
-   * Prevent two requests for the same exact video
-   * from hitting YouTube simultaneously.
-   */
   const videoKey =
     String(videoUrl)
       .trim();
@@ -1366,10 +1263,6 @@ async function downloadYouTubeAudio(
     );
   }
 
-  /*
-   * Protect Render from too many simultaneous
-   * yt-dlp / FFmpeg processes.
-   */
   if (
     activeDownloads >=
     MAX_CONCURRENT_DOWNLOADS
@@ -1454,12 +1347,6 @@ async function downloadYouTubeAudio(
                 error
               );
 
-            /*
-             * Only retry errors that plausibly represent
-             * temporary YouTube access failures.
-             *
-             * Don't blindly retry every possible error.
-             */
             if (
               !rateLimited &&
               !forbidden
