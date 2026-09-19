@@ -377,6 +377,18 @@ async function updateGameMessage(api, threadID, messageID, text) {
   return edited;
 }
 
+// Player-driven results are sent as NEW messages (never edits).
+// Never throws, so a failed send can't undo an already-credited payout.
+async function sendResult(api, threadID, text) {
+  try {
+    return await sendMessageAsync(api, threadID, text);
+  } catch (error) {
+    console.error("[games] sendResult:", error);
+
+    return null;
+  }
+}
+
 async function createAnimator(api, threadID, initialText, gameType = "") {
   const result = {
     messageID: null,
@@ -1594,7 +1606,7 @@ async function resolveRollLadder(api, event, actionText) {
       balanceText,
     ].join("\n");
 
-    await updateGameMessage(api, threadID, session.messageID, finalText);
+    await sendResult(api, threadID, finalText);
 
     unlockGame(threadID, userID);
 
@@ -1631,7 +1643,7 @@ async function resolveRollLadder(api, event, actionText) {
         balanceText,
       ].join("\n");
 
-      await updateGameMessage(api, threadID, session.messageID, finalText);
+      await sendResult(api, threadID, finalText);
 
       unlockGame(threadID, userID);
 
@@ -1651,7 +1663,12 @@ async function resolveRollLadder(api, event, actionText) {
       rollLadderText(event, session),
     ].join("\n");
 
-    await updateGameMessage(api, threadID, session.messageID, finalText);
+    const sent = await sendResult(api, threadID, finalText);
+
+    // Keep the latest ladder message id on the live session object.
+    if (sent && sent.messageID) {
+      session.messageID = sent.messageID;
+    }
 
     return true;
   }
@@ -2256,7 +2273,7 @@ async function resolveCoinflipLadder(api, event, actionText) {
       balanceText,
     ].join("\n");
 
-    await updateGameMessage(api, threadID, session.messageID, finalText);
+    await sendResult(api, threadID, finalText);
 
     unlockGame(threadID, userID);
 
@@ -2293,7 +2310,7 @@ async function resolveCoinflipLadder(api, event, actionText) {
         balanceText,
       ].join("\n");
 
-      await updateGameMessage(api, threadID, session.messageID, finalText);
+      await sendResult(api, threadID, finalText);
 
       unlockGame(threadID, userID);
 
@@ -2313,7 +2330,12 @@ async function resolveCoinflipLadder(api, event, actionText) {
       coinflipLadderText(event, session),
     ].join("\n");
 
-    await updateGameMessage(api, threadID, session.messageID, finalText);
+    const sent = await sendResult(api, threadID, finalText);
+
+    // Keep the latest ladder message id on the live session object.
+    if (sent && sent.messageID) {
+      session.messageID = sent.messageID;
+    }
 
     return true;
   }
