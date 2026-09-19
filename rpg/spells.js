@@ -4,79 +4,89 @@
  * ECLIPSE RPG — SPELL SYSTEM
  * ===========================
  *
- * Spells are separate from affinities.
+ * Handles:
+ * - 13 affinities
+ * - spell tiers
+ * - spell mastery
+ * - starting class spells
+ * - learning/unlearning
+ * - kingdom/affinity requirements
+ * - Arcanist's one external-affinity spell rule
+ * - spell casting validation
+ * - spell display helpers
  *
- * affinities.js
- *   -> what magical power the player has access to
+ * DB:
+ *   rpg_player_spells
  *
- * spells.js
- *   -> what spells exist, their costs, requirements and effects
- *
- * specials.js
- *   -> unique class/affinity special moves
- *
- * The system supports:
- *   - 13 affinities
- *   - spell tiers
- *   - mastery requirements
- *   - kingdom unlocks
- *   - class restrictions
- *   - primary / secondary affinities
- *   - Arcanist external-affinity rule
- *   - environmental scaling
- *   - healing
- *   - damage
- *   - buffs
- *   - debuffs
- *   - control
- *   - shields
- *   - utility spells
- *
- * Combat execution is intentionally NOT handled here.
- * This file defines the spell and validates whether a player
- * is allowed to use/learn it.
+ * Expected columns:
+ *   thread_id
+ *   user_id
+ *   spell_id
+ *   mastery
+ *   source
+ *   learned_at
  */
 
 const db = require("../db");
-const affinities = require("./affinities");
+
+const {
+  getAffinity,
+  getPlayerAffinity,
+  getPlayerAffinities,
+  getPrimaryAffinity,
+  getTier,
+  canUseAffinity,
+} = require("./affinities");
 
 // ============================================================
 // CONFIG
 // ============================================================
 
-const SPELL_CATEGORIES = Object.freeze({
-  BASIC: "basic",
-  ADVANCED: "advanced",
-  MASTERY: "mastery",
-  KINGDOM: "kingdom",
-  SPECIAL: "special",
-  ULTIMATE: "ultimate",
-  UTILITY: "utility",
-});
+const SPELL_TIERS = {
+  BASIC: {
+    id: 1,
+    key: "basic",
+    name: "Basic",
+    masteryRequired: 0,
+  },
 
-const SPELL_TYPES = Object.freeze({
-  DAMAGE: "damage",
-  HEAL: "heal",
-  BUFF: "buff",
-  DEBUFF: "debuff",
-  CONTROL: "control",
-  SHIELD: "shield",
-  DRAIN: "drain",
-  SUMMON: "summon",
-  UTILITY: "utility",
-});
+  ADVANCED: {
+    id: 2,
+    key: "advanced",
+    name: "Advanced",
+    masteryRequired: 300,
+  },
 
-const TARGET_TYPES = Object.freeze({
-  SELF: "self",
-  SINGLE_ENEMY: "single_enemy",
-  ALL_ENEMIES: "all_enemies",
-  SINGLE_ALLY: "single_ally",
-  ALL_ALLIES: "all_allies",
-  PARTY: "party",
-  AREA: "area",
-});
+  MASTERY: {
+    id: 3,
+    key: "mastery",
+    name: "Mastery",
+    masteryRequired: 1000,
+  },
 
-const ELEMENTS = Object.freeze([
+  KINGDOM: {
+    id: 4,
+    key: "kingdom",
+    name: "Kingdom",
+    masteryRequired: 1500,
+  },
+
+  SPECIAL: {
+    id: 5,
+    key: "special",
+    name: "Special",
+    masteryRequired: 2500,
+  },
+
+  ULTIMATE: {
+    id: 6,
+    key: "ultimate",
+    name: "Ultimate",
+    masteryRequired: 5000,
+  },
+};
+
+const SPELL_SCHOOLS = [
   "fire",
   "ice",
   "lightning",
@@ -90,7 +100,7 @@ const ELEMENTS = Object.freeze([
   "water",
   "wind",
   "earth",
-]);
+];
 
 // ============================================================
 // SPELL DEFINITIONS
@@ -105,87 +115,81 @@ const SPELLS = {
     id: "firebolt",
     name: "Firebolt",
     affinity: "fire",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "A concentrated bolt of flame.",
-    mpCost: 8,
-    basePower: 28,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      damage: 28,
-      burnChance: 0.2,
-      burnTurns: 3,
-    },
+    tier: "basic",
+    type: "damage",
+    target: "enemy",
+    manaCost: 8,
+    damage: 24,
+    power: 24,
+    description: "A compact bolt of flame.",
+    effects: [
+      {
+        id: "burn",
+        duration: 3,
+        damage: 6,
+      },
+    ],
   },
 
   flame_burst: {
     id: "flame_burst",
     name: "Flame Burst",
     affinity: "fire",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "Explodes in a burst of fire around the target area.",
-    mpCost: 22,
-    basePower: 55,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 2,
-    effects: {
-      damage: 55,
-      burnChance: 0.35,
-      burnTurns: 3,
-    },
-  },
-
-  inferno: {
-    id: "inferno",
-    name: "Inferno",
-    affinity: "fire",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "A devastating wave of flame.",
-    mpCost: 40,
-    basePower: 95,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 4,
-    effects: {
-      damage: 95,
-      burnChance: 0.75,
-      burnTurns: 3,
-      specialSeasonBonus: "summer",
-    },
-  },
-
-  scorching_garden: {
-    id: "scorching_garden",
-    name: "Scorching Garden",
-    affinity: "fire",
-    category: SPELL_CATEGORIES.SPECIAL,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description:
-      "Creates a burning field that damages every enemy and intensifies while active.",
-    mpCost: 55,
-    basePower: 115,
-    masteryRequired: 3000,
-    tierRequired: "mastered",
-    cooldown: 8,
-    special: true,
-    effects: {
-      damage: 115,
-      burnChance: 1,
-      burnTurns: 3,
-      activeDamageBonus: 0.2,
-      seasonBurnTurns: {
-        summer: 6,
+    tier: "advanced",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 22,
+    damage: 38,
+    power: 38,
+    description: "Explodes into a wave of burning flame.",
+    effects: [
+      {
+        id: "burn",
+        duration: 3,
+        damage: 9,
       },
-    },
+    ],
+  },
+
+  inferno_lance: {
+    id: "inferno_lance",
+    name: "Inferno Lance",
+    affinity: "fire",
+    tier: "mastery",
+    type: "damage",
+    target: "enemy",
+    manaCost: 35,
+    damage: 68,
+    power: 68,
+    description: "A concentrated spear of searing fire.",
+    effects: [
+      {
+        id: "burn",
+        duration: 4,
+        damage: 14,
+      },
+    ],
+  },
+
+  phoenix_flare: {
+    id: "phoenix_flare",
+    name: "Phoenix Flare",
+    affinity: "fire",
+    tier: "kingdom",
+    type: "damage_heal",
+    target: "all_enemies",
+    manaCost: 48,
+    damage: 92,
+    power: 92,
+    healPercent: 0.12,
+    description: "A phoenix-shaped inferno that restores a portion of lost HP.",
+    effects: [
+      {
+        id: "burn",
+        duration: 4,
+        damage: 18,
+      },
+    ],
   },
 
   // ==========================================================
@@ -196,454 +200,274 @@ const SPELLS = {
     id: "ice_lance",
     name: "Ice Lance",
     affinity: "ice",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "A piercing spear of frozen magic.",
-    mpCost: 9,
-    basePower: 32,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      damage: 32,
-      slowChance: 0.25,
-      slowTurns: 2,
-    },
+    tier: "basic",
+    type: "damage",
+    target: "enemy",
+    manaCost: 9,
+    damage: 26,
+    power: 26,
+    description: "A razor-sharp spear of ice.",
+    effects: [
+      {
+        id: "slow",
+        duration: 2,
+      },
+    ],
   },
 
   frost_nova: {
     id: "frost_nova",
     name: "Frost Nova",
     affinity: "ice",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.CONTROL,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "Freezes the battlefield around the caster.",
-    mpCost: 25,
-    basePower: 45,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 3,
-    effects: {
-      damage: 45,
-      stunChance: 0.35,
-      stunTurns: 1,
-      slowTurns: 2,
-    },
+    tier: "advanced",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 24,
+    damage: 34,
+    power: 34,
+    description: "Freezes the battlefield in a burst of frost.",
+    effects: [
+      {
+        id: "slow",
+        duration: 2,
+      },
+    ],
   },
 
-  glacial_prison: {
-    id: "glacial_prison",
-    name: "Glacial Prison",
+  glacial_spike: {
+    id: "glacial_spike",
+    name: "Glacial Spike",
     affinity: "ice",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.CONTROL,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "Encases an enemy in nearly unbreakable ice.",
-    mpCost: 42,
-    basePower: 70,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 5,
-    effects: {
-      damage: 70,
-      stunTurns: 2,
-      damageReduction: 0.5,
-    },
+    tier: "mastery",
+    type: "damage",
+    target: "enemy",
+    manaCost: 38,
+    damage: 74,
+    power: 74,
+    description: "A massive spike of compressed ancient ice.",
+    effects: [
+      {
+        id: "stun",
+        duration: 1,
+      },
+    ],
   },
 
-  heaven_piercing_ice_wall: {
-    id: "heaven_piercing_ice_wall",
-    name: "Heaven Piercing Ice Wall",
+  winter_grasp: {
+    id: "winter_grasp",
+    name: "Winter's Grasp",
     affinity: "ice",
-    category: SPELL_CATEGORIES.SPECIAL,
-    type: SPELL_TYPES.SHIELD,
-    target: TARGET_TYPES.SELF,
-    description:
-      "Raises a colossal ice wall that blocks the next three damage events.",
-    mpCost: 60,
-    basePower: 0,
-    masteryRequired: 3000,
-    tierRequired: "mastered",
-    cooldown: 9,
-    special: true,
-    effects: {
-      blockedDamageEvents: 3,
-      enemyDamageMultiplier: 0.5,
-      forcedStunOnUserMoves: true,
-      winterDefenseBonus: 0.5,
-    },
+    tier: "kingdom",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 52,
+    damage: 88,
+    power: 88,
+    description: "Ancient frost locks enemies in place.",
+    effects: [
+      {
+        id: "stun",
+        duration: 1,
+      },
+      {
+        id: "slow",
+        duration: 3,
+      },
+    ],
   },
 
   // ==========================================================
   // LIGHTNING
   // ==========================================================
 
-  spark: {
-    id: "spark",
-    name: "Spark",
+  lightning_bolt: {
+    id: "lightning_bolt",
+    name: "Lightning Bolt",
     affinity: "lightning",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "A fast electrical strike.",
-    mpCost: 8,
-    basePower: 30,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      damage: 30,
-      shockChance: 0.2,
-    },
+    tier: "basic",
+    type: "damage",
+    target: "enemy",
+    manaCost: 10,
+    damage: 30,
+    power: 30,
+    description: "A fast strike of lightning.",
   },
 
-  thunder_chain: {
-    id: "thunder_chain",
-    name: "Thunder Chain",
+  chain_lightning: {
+    id: "chain_lightning",
+    name: "Chain Lightning",
     affinity: "lightning",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "Lightning jumps from one enemy to another.",
-    mpCost: 24,
-    basePower: 60,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 2,
-    effects: {
-      damage: 60,
-      chainTargets: 3,
-      shockChance: 0.3,
-    },
+    tier: "advanced",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 25,
+    damage: 40,
+    power: 40,
+    description: "Lightning jumps through every enemy.",
+    effects: [
+      {
+        id: "stun",
+        duration: 1,
+      },
+    ],
+  },
+
+  thunder_spear: {
+    id: "thunder_spear",
+    name: "Thunder Spear",
+    affinity: "lightning",
+    tier: "mastery",
+    type: "damage",
+    target: "enemy",
+    manaCost: 40,
+    damage: 82,
+    power: 82,
+    description: "A devastating spear of compressed lightning.",
   },
 
   storm_crown: {
     id: "storm_crown",
     name: "Storm Crown",
     affinity: "lightning",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "Summons a violent storm around the battlefield.",
-    mpCost: 48,
-    basePower: 105,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 5,
-    effects: {
-      damage: 105,
-      shockChance: 0.6,
-      stormBonus: 0.3,
-    },
+    tier: "kingdom",
+    type: "damage_buff",
+    target: "all_enemies",
+    manaCost: 60,
+    damage: 100,
+    power: 100,
+    description: "Summons a storm that empowers every lightning strike.",
+    effects: [
+      {
+        id: "stun",
+        duration: 1,
+      },
+    ],
   },
 
   // ==========================================================
   // NATURE
   // ==========================================================
 
-  thorn_strike: {
-    id: "thorn_strike",
-    name: "Thorn Strike",
+  entangling_roots: {
+    id: "entangling_roots",
+    name: "Entangling Roots",
     affinity: "nature",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "Sharp roots and thorns pierce the enemy.",
-    mpCost: 8,
-    basePower: 28,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      damage: 28,
-      bleedChance: 0.15,
-    },
+    tier: "basic",
+    type: "control",
+    target: "enemy",
+    manaCost: 10,
+    damage: 12,
+    power: 12,
+    description: "Roots erupt from the ground and restrain an enemy.",
+    effects: [
+      {
+        id: "root",
+        duration: 2,
+      },
+    ],
   },
 
   natures_mend: {
     id: "natures_mend",
     name: "Nature's Mend",
     affinity: "nature",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.HEAL,
-    target: TARGET_TYPES.SINGLE_ALLY,
-    description: "Living energy restores an ally's health.",
-    mpCost: 20,
-    basePower: 60,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 1,
-    effects: {
-      healing: 60,
-      overhealToDefense: true,
-    },
+    tier: "basic",
+    type: "heal",
+    target: "self",
+    manaCost: 12,
+    healPercent: 0.18,
+    power: 0.18,
+    description: "Living energy restores health.",
   },
 
-  verdant_wrath: {
-    id: "verdant_wrath",
-    name: "Verdant Wrath",
+  thorn_barrage: {
+    id: "thorn_barrage",
+    name: "Thorn Barrage",
     affinity: "nature",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "The battlefield erupts with roots and vines.",
-    mpCost: 42,
-    basePower: 90,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 4,
-    effects: {
-      damage: 90,
-      rootChance: 0.6,
-      rootTurns: 2,
-    },
+    tier: "advanced",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 25,
+    damage: 42,
+    power: 42,
+    description: "A storm of razor-sharp thorns.",
+    effects: [
+      {
+        id: "bleed",
+        duration: 3,
+        damage: 8,
+      },
+    ],
   },
 
-  // ==========================================================
-  // WATER
-  // ==========================================================
-
-  water_bolt: {
-    id: "water_bolt",
-    name: "Water Bolt",
-    affinity: "water",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "A compressed projectile of water.",
-    mpCost: 8,
-    basePower: 29,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      damage: 29,
-    },
-  },
-
-  tidal_wave: {
-    id: "tidal_wave",
-    name: "Tidal Wave",
-    affinity: "water",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "A massive wave crashes over the enemy team.",
-    mpCost: 28,
-    basePower: 68,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 3,
-    effects: {
-      damage: 68,
-      knockback: true,
-    },
-  },
-
-  abyssal_current: {
-    id: "abyssal_current",
-    name: "Abyssal Current",
-    affinity: "water",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "A crushing current tears through the battlefield.",
-    mpCost: 45,
-    basePower: 100,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 5,
-    effects: {
-      damage: 100,
-      slowTurns: 2,
-    },
-  },
-
-  // ==========================================================
-  // WIND
-  // ==========================================================
-
-  wind_blade: {
-    id: "wind_blade",
-    name: "Wind Blade",
-    affinity: "wind",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "A razor-thin blade of compressed wind.",
-    mpCost: 8,
-    basePower: 31,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      damage: 31,
-      dodgeBonus: 0.05,
-    },
-  },
-
-  gale_step: {
-    id: "gale_step",
-    name: "Gale Step",
-    affinity: "wind",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.BUFF,
-    target: TARGET_TYPES.SELF,
-    description: "Wind surrounds the caster, greatly increasing agility.",
-    mpCost: 18,
-    basePower: 0,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 2,
-    effects: {
-      agilityMultiplier: 1.25,
-      dodgeChance: 0.2,
-      duration: 3,
-    },
-  },
-
-  tempest: {
-    id: "tempest",
-    name: "Tempest",
-    affinity: "wind",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "A violent storm tears across the battlefield.",
-    mpCost: 44,
-    basePower: 98,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 5,
-    effects: {
-      damage: 98,
-      dodgeReduction: 0.15,
-      duration: 2,
-    },
-  },
-
-  // ==========================================================
-  // EARTH
-  // ==========================================================
-
-  stone_shard: {
-    id: "stone_shard",
-    name: "Stone Shard",
-    affinity: "earth",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "Launches a hardened shard of earth.",
-    mpCost: 8,
-    basePower: 30,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      damage: 30,
-      defenseIgnore: 0.05,
-    },
-  },
-
-  earthen_guard: {
-    id: "earthen_guard",
-    name: "Earthen Guard",
-    affinity: "earth",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.SHIELD,
-    target: TARGET_TYPES.SELF,
-    description: "Stone wraps around the caster as protective armor.",
-    mpCost: 20,
-    basePower: 0,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 2,
-    effects: {
-      defenseMultiplier: 1.4,
-      duration: 3,
-    },
-  },
-
-  mountain_wrath: {
-    id: "mountain_wrath",
-    name: "Mountain Wrath",
-    affinity: "earth",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "The ground fractures beneath the enemy.",
-    mpCost: 46,
-    basePower: 105,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 5,
-    effects: {
-      damage: 105,
-      stunChance: 0.25,
-      stunTurns: 1,
-    },
+  ancient_bloom: {
+    id: "ancient_bloom",
+    name: "Ancient Bloom",
+    affinity: "nature",
+    tier: "mastery",
+    type: "heal_damage",
+    target: "all",
+    manaCost: 45,
+    damage: 48,
+    power: 48,
+    healPercent: 0.25,
+    description: "Ancient life energy damages enemies and restores allies.",
   },
 
   // ==========================================================
   // LIGHT
   // ==========================================================
 
-  holy_light: {
-    id: "holy_light",
-    name: "Holy Light",
+  healing_light: {
+    id: "healing_light",
+    name: "Healing Light",
     affinity: "light",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.HEAL,
-    target: TARGET_TYPES.SINGLE_ALLY,
-    description: "A gentle radiance restores an ally.",
-    mpCost: 10,
-    basePower: 38,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      healing: 38,
-    },
+    tier: "basic",
+    type: "heal",
+    target: "self",
+    manaCost: 10,
+    healPercent: 0.20,
+    power: 0.20,
+    description: "A gentle beam of restorative light.",
   },
 
   radiant_strike: {
     id: "radiant_strike",
     name: "Radiant Strike",
     affinity: "light",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "A blade of concentrated light strikes an enemy.",
-    mpCost: 18,
-    basePower: 58,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 1,
-    effects: {
-      damage: 58,
-      blindChance: 0.2,
-    },
+    tier: "advanced",
+    type: "damage",
+    target: "enemy",
+    manaCost: 18,
+    damage: 42,
+    power: 42,
+    description: "A weapon strike infused with holy light.",
   },
 
-  celestial_ray: {
-    id: "celestial_ray",
-    name: "Celestial Ray",
+  solar_spear: {
+    id: "solar_spear",
+    name: "Solar Spear",
     affinity: "light",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "A beam of celestial light burns the battlefield.",
-    mpCost: 42,
-    basePower: 100,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 5,
-    effects: {
-      damage: 100,
-      blindChance: 0.35,
-    },
+    tier: "mastery",
+    type: "damage",
+    target: "enemy",
+    manaCost: 35,
+    damage: 80,
+    power: 80,
+    description: "A concentrated spear of sunlight.",
+  },
+
+  dawn_restoration: {
+    id: "dawn_restoration",
+    name: "Dawn Restoration",
+    affinity: "light",
+    tier: "kingdom",
+    type: "heal",
+    target: "all",
+    manaCost: 50,
+    healPercent: 0.35,
+    power: 0.35,
+    description: "Restores a large portion of lost health to the party.",
   },
 
   // ==========================================================
@@ -654,86 +478,63 @@ const SPELLS = {
     id: "divine_shield",
     name: "Divine Shield",
     affinity: "divine",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.SHIELD,
-    target: TARGET_TYPES.SELF,
-    description: "A divine barrier protects the caster.",
-    mpCost: 12,
-    basePower: 0,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 1,
-    effects: {
-      damageReduction: 0.3,
-      duration: 2,
-    },
+    tier: "basic",
+    type: "buff",
+    target: "self",
+    manaCost: 14,
+    description: "Wraps the caster in divine protection.",
+    effects: [
+      {
+        id: "divine_shield",
+        duration: 3,
+      },
+    ],
   },
 
-  blessing: {
-    id: "blessing",
-    name: "Blessing",
+  holy_smite: {
+    id: "holy_smite",
+    name: "Holy Smite",
     affinity: "divine",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.BUFF,
-    target: TARGET_TYPES.ALL_ALLIES,
-    description: "Divine power strengthens the entire allied side.",
-    mpCost: 25,
-    basePower: 0,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 3,
-    effects: {
-      damageMultiplier: 1.15,
-      defenseMultiplier: 1.15,
-      duration: 3,
-    },
+    tier: "advanced",
+    type: "damage",
+    target: "enemy",
+    manaCost: 22,
+    damage: 50,
+    power: 50,
+    description: "Calls down divine power upon an enemy.",
   },
 
-  heavenly_judgement: {
-    id: "heavenly_judgement",
-    name: "Heavenly Judgement",
+  sacred_aegis: {
+    id: "sacred_aegis",
+    name: "Sacred Aegis",
     affinity: "divine",
-    category: SPELL_CATEGORIES.SPECIAL,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description:
-      "A devastating divine strike that restores 30% of lost health to the caster and allies.",
-    mpCost: 65,
-    basePower: 180,
-    masteryRequired: 3000,
-    tierRequired: "mastered",
-    cooldown: 9,
-    special: true,
-    effects: {
-      damage: 180,
-      healAlliesLostHpPercent: 0.3,
-    },
+    tier: "mastery",
+    type: "buff_heal",
+    target: "all",
+    manaCost: 38,
+    healPercent: 0.20,
+    power: 0.20,
+    description: "Strengthens the party with divine protection.",
+    effects: [
+      {
+        id: "defense_up",
+        duration: 4,
+        amount: 0.25,
+      },
+    ],
   },
 
-  amaterasus_blessing: {
-    id: "amaterasus_blessing",
-    name: "Amaterasu's Blessing",
+  judgment_ray: {
+    id: "judgment_ray",
+    name: "Judgment Ray",
     affinity: "divine",
-    category: SPELL_CATEGORIES.SPECIAL,
-    type: SPELL_TYPES.BUFF,
-    target: TARGET_TYPES.ALL_ALLIES,
-    description:
-      "A morning blessing that calls down the sun and increases allied damage by 20%.",
-    mpCost: 60,
-    basePower: 0,
-    masteryRequired: 3000,
-    tierRequired: "mastered",
-    cooldown: 10,
-    special: true,
-    requirements: {
-      morningOnly: true,
-    },
-    effects: {
-      damageMultiplier: 1.2,
-      duration: 5,
-      morningOnly: true,
-      mode: "solar_daggers_or_laser",
-    },
+    tier: "kingdom",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 58,
+    damage: 105,
+    power: 105,
+    description: "A column of divine judgment descends upon the battlefield.",
   },
 
   // ==========================================================
@@ -744,57 +545,69 @@ const SPELLS = {
     id: "arcane_missile",
     name: "Arcane Missile",
     affinity: "arcane",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "Pure arcane energy strikes the enemy.",
-    mpCost: 8,
-    basePower: 34,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      damage: 34,
-      ignoresElementalResistance: true,
-    },
+    tier: "basic",
+    type: "damage",
+    target: "enemy",
+    manaCost: 7,
+    damage: 25,
+    power: 25,
+    description: "Pure magical force condensed into a projectile.",
+  },
+
+  arcane_barrier: {
+    id: "arcane_barrier",
+    name: "Arcane Barrier",
+    affinity: "arcane",
+    tier: "advanced",
+    type: "buff",
+    target: "self",
+    manaCost: 20,
+    description: "Creates a protective field of raw magic.",
+    effects: [
+      {
+        id: "damage_reduction",
+        duration: 3,
+        amount: 0.20,
+      },
+    ],
   },
 
   mana_surge: {
     id: "mana_surge",
     name: "Mana Surge",
     affinity: "arcane",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.BUFF,
-    target: TARGET_TYPES.SELF,
-    description: "Temporarily increases mana regeneration.",
-    mpCost: 10,
-    basePower: 0,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 3,
-    effects: {
-      manaRegenMultiplier: 2,
-      duration: 4,
-    },
+    tier: "advanced",
+    type: "mana",
+    target: "self",
+    manaCost: 0,
+    manaRestorePercent: 0.30,
+    description: "Rapidly restores a portion of maximum mana.",
   },
 
-  astral_barrage: {
-    id: "astral_barrage",
-    name: "Astral Barrage",
+  void_lance: {
+    id: "void_lance",
+    name: "Void Lance",
     affinity: "arcane",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "A barrage of raw arcane energy tears through all enemies.",
-    mpCost: 50,
-    basePower: 120,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 5,
-    effects: {
-      damage: 120,
-      ignoresElementalResistance: true,
-    },
+    tier: "mastery",
+    type: "damage",
+    target: "enemy",
+    manaCost: 40,
+    damage: 88,
+    power: 88,
+    description: "A lance of compressed dimensional energy.",
+  },
+
+  arcane_annihilation: {
+    id: "arcane_annihilation",
+    name: "Arcane Annihilation",
+    affinity: "arcane",
+    tier: "ultimate",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 85,
+    damage: 155,
+    power: 155,
+    description: "Raw arcane force tears through the battlefield.",
   },
 
   // ==========================================================
@@ -805,205 +618,397 @@ const SPELLS = {
     id: "shadow_veil",
     name: "Shadow Veil",
     affinity: "shadow",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.BUFF,
-    target: TARGET_TYPES.SELF,
-    description: "Darkness conceals the caster.",
-    mpCost: 10,
-    basePower: 0,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 1,
-    effects: {
-      dodgeChance: 0.25,
-      duration: 2,
-    },
+    tier: "basic",
+    type: "buff",
+    target: "self",
+    manaCost: 12,
+    description: "The caster disappears partially into shadow.",
+    effects: [
+      {
+        id: "dodge_up",
+        duration: 3,
+        amount: 0.25,
+      },
+    ],
   },
 
-  shadow_strike: {
-    id: "shadow_strike",
-    name: "Shadow Strike",
+  curse_of_weakness: {
+    id: "curse_of_weakness",
+    name: "Curse of Weakness",
     affinity: "shadow",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "A sudden strike from the darkness.",
-    mpCost: 18,
-    basePower: 65,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 1,
-    effects: {
-      damage: 65,
-      bonusAtNight: 0.25,
-    },
+    tier: "basic",
+    type: "debuff",
+    target: "enemy",
+    manaCost: 14,
+    description: "Weakens an enemy's ability to deal damage.",
+    effects: [
+      {
+        id: "weakness",
+        duration: 3,
+        amount: 0.20,
+      },
+    ],
   },
 
-  dark_pact: {
-    id: "dark_pact",
-    name: "Dark Pact",
+  shadow_bolt: {
+    id: "shadow_bolt",
+    name: "Shadow Bolt",
     affinity: "shadow",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.DRAIN,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "Deals damage while converting part of the damage into health.",
-    mpCost: 25,
-    basePower: 70,
-    masteryRequired: 700,
-    tierRequired: "strong",
-    cooldown: 3,
-    effects: {
-      damage: 70,
-      lifesteal: 0.3,
-    },
+    tier: "advanced",
+    type: "damage",
+    target: "enemy",
+    manaCost: 20,
+    damage: 48,
+    power: 48,
+    description: "A projectile formed from condensed darkness.",
   },
 
-  infinite_darkness: {
-    id: "infinite_darkness",
-    name: "Infinite Darkness",
+  umbral_chain: {
+    id: "umbral_chain",
+    name: "Umbral Chain",
     affinity: "shadow",
-    category: SPELL_CATEGORIES.SPECIAL,
-    type: SPELL_TYPES.CONTROL,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description:
-      "Five moves of absolute darkness. Enemies are stunned, weakened, while shadow power converts damage into healing.",
-    mpCost: 70,
-    basePower: 0,
-    masteryRequired: 3000,
-    tierRequired: "mastered",
-    cooldown: 10,
-    special: true,
-    effects: {
-      stunTurns: 5,
-      enemyDamageMultiplier: 0.8,
-      damageToHpPercent: 0.2,
-      duration: 5,
-      shadowBodyAvailable: true,
-    },
+    tier: "mastery",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 42,
+    damage: 68,
+    power: 68,
+    description: "Chains of darkness bind every enemy.",
+    effects: [
+      {
+        id: "root",
+        duration: 2,
+      },
+    ],
   },
 
   // ==========================================================
   // NECROMANCY
   // ==========================================================
 
-  bone_spear: {
-    id: "bone_spear",
-    name: "Bone Spear",
+  necrotic_touch: {
+    id: "necrotic_touch",
+    name: "Necrotic Touch",
     affinity: "necromancy",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "A spear formed from cursed bone.",
-    mpCost: 9,
-    basePower: 34,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      damage: 34,
-      curseChance: 0.2,
-    },
+    tier: "basic",
+    type: "damage",
+    target: "enemy",
+    manaCost: 12,
+    damage: 32,
+    power: 32,
+    description: "Rotting energy infects the target.",
+    effects: [
+      {
+        id: "necrotic",
+        duration: 4,
+        damage: 8,
+      },
+    ],
   },
 
-  corpse_burst: {
-    id: "corpse_burst",
-    name: "Corpse Burst",
+  corpse_drain: {
+    id: "corpse_drain",
+    name: "Corpse Drain",
     affinity: "necromancy",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.ALL_ENEMIES,
-    description: "A fallen corpse erupts with necrotic energy.",
-    mpCost: 26,
-    basePower: 62,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 3,
-    effects: {
-      damage: 62,
-      necrotic: true,
-    },
+    tier: "advanced",
+    type: "damage_heal",
+    target: "enemy",
+    manaCost: 24,
+    damage: 45,
+    power: 45,
+    healPercent: 0.15,
+    description: "Steals vitality from the target.",
   },
 
   raise_dead: {
     id: "raise_dead",
     name: "Raise Dead",
     affinity: "necromancy",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.SUMMON,
-    target: TARGET_TYPES.SELF,
-    description: "Summons a temporary undead ally.",
-    mpCost: 48,
-    basePower: 0,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 6,
-    effects: {
-      summon: "undead_guardian",
-      duration: 4,
-    },
+    tier: "mastery",
+    type: "summon",
+    target: "self",
+    manaCost: 45,
+    description: "Raises a temporary undead ally.",
+  },
+
+  death_wave: {
+    id: "death_wave",
+    name: "Death Wave",
+    affinity: "necromancy",
+    tier: "kingdom",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 65,
+    damage: 110,
+    power: 110,
+    description: "A wave of death energy sweeps across the battlefield.",
+    effects: [
+      {
+        id: "necrotic",
+        duration: 4,
+        damage: 15,
+      },
+    ],
   },
 
   // ==========================================================
   // BLOOD
   // ==========================================================
 
-  blood_bolt: {
-    id: "blood_bolt",
-    name: "Blood Bolt",
+  blood_spike: {
+    id: "blood_spike",
+    name: "Blood Spike",
     affinity: "blood",
-    category: SPELL_CATEGORIES.BASIC,
-    type: SPELL_TYPES.DRAIN,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "Condensed blood magic tears through an enemy.",
-    mpCost: 9,
-    basePower: 35,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    effects: {
-      damage: 35,
-      lifesteal: 0.15,
-    },
+    tier: "basic",
+    type: "damage",
+    target: "enemy",
+    manaCost: 8,
+    damage: 30,
+    power: 30,
+    description: "Weaponizes the caster's own blood.",
+    effects: [
+      {
+        id: "bleed",
+        duration: 3,
+        damage: 7,
+      },
+    ],
+  },
+
+  sanguine_strike: {
+    id: "sanguine_strike",
+    name: "Sanguine Strike",
+    affinity: "blood",
+    tier: "advanced",
+    type: "damage_heal",
+    target: "enemy",
+    manaCost: 18,
+    damage: 52,
+    power: 52,
+    lifestealPercent: 0.20,
+    description: "Deals damage and steals a portion as health.",
   },
 
   blood_frenzy: {
     id: "blood_frenzy",
     name: "Blood Frenzy",
     affinity: "blood",
-    category: SPELL_CATEGORIES.ADVANCED,
-    type: SPELL_TYPES.BUFF,
-    target: TARGET_TYPES.SELF,
-    description: "Sacrifices health to dramatically increase attack power.",
-    mpCost: 15,
-    basePower: 0,
-    masteryRequired: 300,
-    tierRequired: "normal",
-    cooldown: 3,
-    effects: {
-      selfHpCostPercent: 0.1,
-      damageMultiplier: 1.35,
-      lifesteal: 0.2,
-      duration: 3,
-    },
+    tier: "mastery",
+    type: "buff",
+    target: "self",
+    manaCost: 30,
+    description: "Transforms pain into offensive power.",
+    effects: [
+      {
+        id: "damage_up",
+        duration: 4,
+        amount: 0.35,
+      },
+    ],
   },
 
-  crimson_execution: {
-    id: "crimson_execution",
-    name: "Crimson Execution",
+  blood_rite: {
+    id: "blood_rite",
+    name: "Blood Rite",
     affinity: "blood",
-    category: SPELL_CATEGORIES.MASTERY,
-    type: SPELL_TYPES.DAMAGE,
-    target: TARGET_TYPES.SINGLE_ENEMY,
-    description: "Converts the caster's missing health into devastating damage.",
-    mpCost: 35,
-    basePower: 100,
-    masteryRequired: 1500,
-    tierRequired: "exceptional",
-    cooldown: 5,
-    effects: {
-      damage: 100,
-      missingHpScaling: 0.75,
-    },
+    tier: "kingdom",
+    type: "damage_heal",
+    target: "all_enemies",
+    manaCost: 55,
+    damage: 100,
+    power: 100,
+    lifestealPercent: 0.30,
+    description: "Sacrifices vitality to unleash a wave of blood magic.",
+  },
+
+  // ==========================================================
+  // WATER
+  // ==========================================================
+
+  water_bolt: {
+    id: "water_bolt",
+    name: "Water Bolt",
+    affinity: "water",
+    tier: "basic",
+    type: "damage",
+    target: "enemy",
+    manaCost: 8,
+    damage: 25,
+    power: 25,
+    description: "A compressed projectile of water.",
+  },
+
+  tidal_bind: {
+    id: "tidal_bind",
+    name: "Tidal Bind",
+    affinity: "water",
+    tier: "advanced",
+    type: "control",
+    target: "enemy",
+    manaCost: 18,
+    damage: 35,
+    power: 35,
+    description: "A violent current restrains an enemy.",
+    effects: [
+      {
+        id: "root",
+        duration: 2,
+      },
+    ],
+  },
+
+  healing_tide: {
+    id: "healing_tide",
+    name: "Healing Tide",
+    affinity: "water",
+    tier: "mastery",
+    type: "heal",
+    target: "all",
+    manaCost: 40,
+    healPercent: 0.28,
+    power: 0.28,
+    description: "A restorative wave washes over the party.",
+  },
+
+  abyssal_wave: {
+    id: "abyssal_wave",
+    name: "Abyssal Wave",
+    affinity: "water",
+    tier: "kingdom",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 60,
+    damage: 105,
+    power: 105,
+    description: "A crushing wall of oceanic force.",
+  },
+
+  // ==========================================================
+  // WIND
+  // ==========================================================
+
+  wind_blade: {
+    id: "wind_blade",
+    name: "Wind Blade",
+    affinity: "wind",
+    tier: "basic",
+    type: "damage",
+    target: "enemy",
+    manaCost: 7,
+    damage: 27,
+    power: 27,
+    description: "A blade of compressed air.",
+  },
+
+  gale_step: {
+    id: "gale_step",
+    name: "Gale Step",
+    affinity: "wind",
+    tier: "advanced",
+    type: "buff",
+    target: "self",
+    manaCost: 15,
+    description: "Wind surrounds the caster, increasing agility.",
+    effects: [
+      {
+        id: "agility_up",
+        duration: 4,
+        amount: 0.25,
+      },
+    ],
+  },
+
+  cyclone: {
+    id: "cyclone",
+    name: "Cyclone",
+    affinity: "wind",
+    tier: "mastery",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 38,
+    damage: 70,
+    power: 70,
+    description: "A violent cyclone tears through the battlefield.",
+  },
+
+  sky_breaker: {
+    id: "sky_breaker",
+    name: "Sky Breaker",
+    affinity: "wind",
+    tier: "kingdom",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 58,
+    damage: 108,
+    power: 108,
+    description: "A devastating atmospheric strike.",
+  },
+
+  // ==========================================================
+  // EARTH
+  // ==========================================================
+
+  stone_shard: {
+    id: "stone_shard",
+    name: "Stone Shard",
+    affinity: "earth",
+    tier: "basic",
+    type: "damage",
+    target: "enemy",
+    manaCost: 8,
+    damage: 28,
+    power: 28,
+    description: "A sharpened shard of earth.",
+  },
+
+  earthen_guard: {
+    id: "earthen_guard",
+    name: "Earthen Guard",
+    affinity: "earth",
+    tier: "advanced",
+    type: "buff",
+    target: "self",
+    manaCost: 18,
+    description: "Stone reinforces the caster's defenses.",
+    effects: [
+      {
+        id: "defense_up",
+        duration: 4,
+        amount: 0.30,
+      },
+    ],
+  },
+
+  seismic_crush: {
+    id: "seismic_crush",
+    name: "Seismic Crush",
+    affinity: "earth",
+    tier: "mastery",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 42,
+    damage: 75,
+    power: 75,
+    description: "The earth erupts beneath every enemy.",
+    effects: [
+      {
+        id: "stun",
+        duration: 1,
+      },
+    ],
+  },
+
+  mountain_fall: {
+    id: "mountain_fall",
+    name: "Mountain Fall",
+    affinity: "earth",
+    tier: "kingdom",
+    type: "damage",
+    target: "all_enemies",
+    manaCost: 62,
+    damage: 115,
+    power: 115,
+    description: "Summons crushing force comparable to a collapsing mountain.",
   },
 
   // ==========================================================
@@ -1014,37 +1019,92 @@ const SPELLS = {
     id: "teleport_sanctuary",
     name: "Teleport: Sanctuary",
     affinity: "arcane",
-    category: SPELL_CATEGORIES.UTILITY,
-    type: SPELL_TYPES.UTILITY,
-    target: TARGET_TYPES.SELF,
-    description: "Returns the player to a known sanctuary.",
-    mpCost: 30,
-    basePower: 0,
-    masteryRequired: 700,
-    tierRequired: "strong",
-    cooldown: 6,
-    utility: {
-      action: "teleport_sanctuary",
-    },
+    tier: "kingdom",
+    type: "utility",
+    target: "self",
+    manaCost: 35,
+    description: "Teleport to the player's current sanctuary.",
+    utility: "teleport",
   },
 
   detect_magic: {
     id: "detect_magic",
     name: "Detect Magic",
     affinity: "arcane",
-    category: SPELL_CATEGORIES.UTILITY,
-    type: SPELL_TYPES.UTILITY,
-    target: TARGET_TYPES.SELF,
-    description: "Reveals magical traces, affinities and enchanted objects.",
-    mpCost: 12,
-    basePower: 0,
-    masteryRequired: 0,
-    tierRequired: "weak",
-    cooldown: 0,
-    utility: {
-      action: "detect_magic",
-    },
+    tier: "basic",
+    type: "utility",
+    target: "self",
+    manaCost: 5,
+    description: "Reveals magical signatures in the area.",
+    utility: "detect",
   },
+
+  // Compatibility aliases used by older commands.
+  teleport: {
+    id: "teleport",
+    name: "Teleport",
+    affinity: "arcane",
+    tier: "kingdom",
+    type: "utility",
+    target: "self",
+    manaCost: 35,
+    description: "Teleport to a known sanctuary.",
+    utility: "teleport",
+  },
+
+  detect: {
+    id: "detect",
+    name: "Detect",
+    affinity: "arcane",
+    tier: "basic",
+    type: "utility",
+    target: "self",
+    manaCost: 5,
+    description: "Detect magical activity.",
+    utility: "detect",
+  },
+};
+
+// ============================================================
+// CLASS STARTING SPELLS
+// ============================================================
+
+const CLASS_STARTING_SPELLS = {
+  knight: [
+    "radiant_strike",
+  ],
+
+  bloodreaver: [
+    "blood_spike",
+    "sanguine_strike",
+  ],
+
+  arcanist: [
+    "arcane_missile",
+    "mana_surge",
+    "detect_magic",
+  ],
+
+  wraith: [
+    "shadow_veil",
+    "shadow_bolt",
+  ],
+
+  paladin: [
+    "healing_light",
+    "divine_shield",
+    "holy_smite",
+  ],
+
+  ranger: [
+    "entangling_roots",
+    "natures_mend",
+  ],
+
+  assassin: [
+    "shadow_veil",
+    "curse_of_weakness",
+  ],
 };
 
 // ============================================================
@@ -1057,17 +1117,30 @@ function normalizeSpellId(value) {
   return String(value)
     .trim()
     .toLowerCase()
-    .replace(/['’]/g, "")
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
+    .replace(/[’']/g, "")
+    .replace(/[\s-]+/g, "_");
+}
+
+function normalizeTier(value) {
+  if (!value) return null;
+
+  const key = String(value).trim().toLowerCase();
+
+  for (const tier of Object.values(SPELL_TIERS)) {
+    if (tier.key === key || String(tier.id) === key) {
+      return tier.key;
+    }
+  }
+
+  return null;
 }
 
 // ============================================================
 // LOOKUPS
 // ============================================================
 
-function getSpell(spellId) {
-  const id = normalizeSpellId(spellId);
+function getSpell(spellID) {
+  const id = normalizeSpellId(spellID);
   return id ? SPELLS[id] || null : null;
 }
 
@@ -1075,105 +1148,133 @@ function getAllSpells() {
   return Object.values(SPELLS);
 }
 
-function getSpellsByAffinity(affinityId) {
-  const id = affinities.normalizeAffinityId(affinityId);
+function getSpellsByAffinity(affinityID) {
+  const id = String(affinityID || "").toLowerCase();
 
-  if (!id) return [];
-
-  return Object.values(SPELLS).filter(
+  return getAllSpells().filter(
     (spell) => spell.affinity === id
   );
 }
 
-function getSpellsByCategory(category) {
-  const normalized = String(category || "").trim().toLowerCase();
+function getSpellsByTier(tier) {
+  const normalized = normalizeTier(tier);
 
-  return Object.values(SPELLS).filter(
-    (spell) => spell.category === normalized
+  if (!normalized) return [];
+
+  return getAllSpells().filter(
+    (spell) => spell.tier === normalized
+  );
+}
+
+function getSpellsByAffinityAndTier(affinityID, tier) {
+  const normalizedTier = normalizeTier(tier);
+  const affinity = String(affinityID || "").toLowerCase();
+
+  return getAllSpells().filter(
+    (spell) =>
+      spell.affinity === affinity &&
+      spell.tier === normalizedTier
   );
 }
 
 // ============================================================
-// SPELL REQUIREMENTS
+// PLAYER SPELL DATABASE
 // ============================================================
 
-function getSpellTier(spell) {
-  if (!spell) return null;
-
-  return affinities.getTierByKey(spell.tierRequired);
-}
-
-function getSpellMasteryRequirement(spell) {
-  return Number(spell?.masteryRequired || 0);
-}
-
-async function getPlayerAffinityState(threadID, userID, affinityId) {
-  return affinities.getPlayerAffinity(
-    threadID,
-    userID,
-    affinityId
-  );
-}
-
-/**
- * Whether a player has the required affinity tier/mastery.
- */
-async function meetsAffinityRequirement(
-  threadID,
-  userID,
-  spell
-) {
-  if (!spell) {
-    return {
-      ok: false,
-      reason: "Spell does not exist.",
-    };
-  }
-
-  const affinity = await getPlayerAffinityState(
-    threadID,
-    userID,
-    spell.affinity
+async function getLearnedSpellRows(threadID, userID) {
+  const result = await db.query(
+    `
+      SELECT
+        spell_id,
+        COALESCE(mastery, 0) AS mastery,
+        source,
+        learned_at
+      FROM rpg_player_spells
+      WHERE thread_id = $1
+        AND user_id = $2
+      ORDER BY learned_at ASC, spell_id ASC
+    `,
+    [String(threadID), String(userID)]
   );
 
-  if (!affinity) {
-    return {
-      ok: false,
-      reason: `You do not possess the ${spell.affinity} affinity.`,
-    };
-  }
+  return result.rows || [];
+}
 
-  const requiredTier = getSpellTier(spell);
+async function getLearnedSpells(threadID, userID) {
+  const rows = await getLearnedSpellRows(threadID, userID);
 
-  if (
-    requiredTier &&
-    Number(affinity.tier || 0) < Number(requiredTier.id)
-  ) {
-    return {
-      ok: false,
-      reason:
-        `Your ${spell.affinity} affinity is only ` +
-        `${affinity.tier_name || affinity.tier || "None"}. ` +
-        `Required: ${requiredTier.name}.`,
-    };
-  }
+  return rows
+    .map((row) => {
+      const spell = getSpell(row.spell_id);
 
-  if (
-    Number(affinity.mastery || 0) <
-    getSpellMasteryRequirement(spell)
-  ) {
-    return {
-      ok: false,
-      reason:
-        `${spell.name} requires ${spell.masteryRequired} ` +
-        `${spell.affinity} mastery. ` +
-        `You have ${affinity.mastery || 0}.`,
-    };
-  }
+      if (!spell) return null;
 
-  return {
-    ok: true,
-    affinity,
+      return {
+        ...spell,
+        mastery: Number(row.mastery || 0),
+        source: row.source || "unknown",
+        learnedAt: row.learned_at,
+      };
+    })
+    .filter(Boolean);
+}
+
+async function hasSpell(threadID, userID, spellID) {
+  const id = normalizeSpellId(spellID);
+
+  if (!id) return false;
+
+  const result = await db.query(
+    `
+      SELECT 1
+      FROM rpg_player_spells
+      WHERE thread_id = $1
+        AND user_id = $2
+        AND spell_id = $3
+      LIMIT 1
+    `,
+    [String(threadID), String(userID), id]
+  );
+
+  return result.rows.length > 0;
+}
+
+// ============================================================
+// PLAYER / CLASS HELPERS
+// ============================================================
+
+async function getPlayerClass(threadID, userID) {
+  const result = await db.query(
+    `
+      SELECT character_class
+      FROM rpg_players
+      WHERE thread_id = $1
+        AND user_id = $2
+      LIMIT 1
+    `,
+    [String(threadID), String(userID)]
+  );
+
+  return result.rows[0]?.character_class || "knight";
+}
+
+async function getPlayerKingdom(threadID, userID) {
+  const result = await db.query(
+    `
+      SELECT kingdom_id, kingdom_role, traitor, traitor_kingdom_id
+      FROM rpg_players
+      WHERE thread_id = $1
+        AND user_id = $2
+      LIMIT 1
+    `,
+    [String(threadID), String(userID)]
+  );
+
+  return result.rows[0] || {
+    kingdom_id: null,
+    kingdom_role: null,
+    traitor: false,
+    traitor_kingdom_id: null,
   };
 }
 
@@ -1182,399 +1283,236 @@ async function meetsAffinityRequirement(
 // ============================================================
 
 /**
- * Arcanists can access one external-affinity spell.
+ * Arcanist may learn exactly ONE spell from outside Arcane.
  *
- * Their native Arcane spells are unrestricted by this rule.
- *
- * External spell access is stored in rpg_players as:
- *   external_spell_id
- *
- * The DB migration for this field should be present before
- * using this function.
+ * Arcane spells do not count against the external slot.
  */
-
-async function getExternalSpell(threadID, userID) {
-  try {
-    const result = await db.query(
-      `
-      SELECT external_spell_id
-      FROM rpg_players
-      WHERE thread_id = $1
-        AND user_id = $2
-      LIMIT 1
-      `,
-      [threadID, userID]
-    );
-
-    return result.rows[0]?.external_spell_id || null;
-  } catch (error) {
-    /**
-     * Graceful fallback if the migration has not yet been added.
-     */
-    if (
-      String(error.message || "")
-        .toLowerCase()
-        .includes("external_spell_id")
-    ) {
-      return null;
-    }
-
-    throw error;
-  }
-}
-
-async function setExternalSpell(threadID, userID, spellId) {
-  const spell = getSpell(spellId);
-
-  if (!spell) {
-    throw new Error("Unknown spell.");
-  }
-
-  if (spell.affinity === "arcane") {
-    throw new Error(
-      "Arcane spells are already part of the Arcanist's native affinity."
-    );
-  }
-
+async function getArcanistExternalSpellCount(threadID, userID) {
   const result = await db.query(
     `
-    UPDATE rpg_players
-    SET external_spell_id = $3,
-        updated_at = NOW()
-    WHERE thread_id = $1
-      AND user_id = $2
-    RETURNING external_spell_id
-    `,
-    [threadID, userID, spell.id]
-  );
-
-  if (!result.rows.length) {
-    throw new Error("RPG player was not found.");
-  }
-
-  return spell;
-}
-
-async function clearExternalSpell(threadID, userID) {
-  try {
-    await db.query(
-      `
-      UPDATE rpg_players
-      SET external_spell_id = NULL,
-          updated_at = NOW()
-      WHERE thread_id = $1
-        AND user_id = $2
-      `,
-      [threadID, userID]
-    );
-  } catch (error) {
-    if (
-      !String(error.message || "")
-        .toLowerCase()
-        .includes("external_spell_id")
-    ) {
-      throw error;
-    }
-  }
-}
-
-// ============================================================
-// PLAYER SPELLS
-// ============================================================
-
-async function getLearnedSpells(threadID, userID) {
-  const result = await db.query(
-    `
-    SELECT
-      s.spell_id,
-      s.mastery,
-      s.source,
-      s.learned_at
-    FROM rpg_player_spells s
-    WHERE s.thread_id = $1
-      AND s.user_id = $2
-    ORDER BY s.learned_at ASC
-    `,
-    [threadID, userID]
-  );
-
-  return result.rows
-    .map((row) => ({
-      ...row,
-      spell: getSpell(row.spell_id),
-    }))
-    .filter((row) => row.spell);
-}
-
-async function hasSpell(threadID, userID, spellId) {
-  const id = normalizeSpellId(spellId);
-
-  if (!id) return false;
-
-  const result = await db.query(
-    `
-    SELECT 1
-    FROM rpg_player_spells
-    WHERE thread_id = $1
-      AND user_id = $2
-      AND spell_id = $3
-    LIMIT 1
-    `,
-    [threadID, userID, id]
-  );
-
-  return result.rows.length > 0;
-}
-
-async function grantSpell(
-  threadID,
-  userID,
-  spellId,
-  source = "system"
-) {
-  const spell = getSpell(spellId);
-
-  if (!spell) {
-    throw new Error("Unknown spell.");
-  }
-
-  await db.query(
-    `
-    INSERT INTO rpg_player_spells
-      (
-        thread_id,
-        user_id,
-        spell_id,
-        mastery,
-        source,
-        learned_at
-      )
-    VALUES
-      ($1, $2, $3, 0, $4, NOW())
-    ON CONFLICT (thread_id, user_id, spell_id)
-    DO NOTHING
+      SELECT COUNT(*)::int AS count
+      FROM rpg_player_spells ps
+      WHERE ps.thread_id = $1
+        AND ps.user_id = $2
+        AND ps.spell_id NOT IN (
+          SELECT unnest($3::text[])
+        )
     `,
     [
-      threadID,
-      userID,
-      spell.id,
-      source,
+      String(threadID),
+      String(userID),
+      getSpellsByAffinity("arcane").map((spell) => spell.id),
     ]
   );
 
-  return spell;
+  return Number(result.rows[0]?.count || 0);
 }
 
-// ============================================================
-// CLASS RESTRICTIONS
-// ============================================================
-
-const CLASS_RESTRICTIONS = {
-  knight: {
-    blockedAffinities: [
-      "necromancy",
-      "shadow",
-    ],
-  },
-
-  bloodreaver: {
-    blockedAffinities: [
-      "light",
-    ],
-  },
-
-  arcanist: {
-    blockedAffinities: [],
-  },
-
-  wraith: {
-    blockedAffinities: [
-      "divine",
-    ],
-  },
-
-  paladin: {
-    blockedAffinities: [
-      "necromancy",
-    ],
-  },
-
-  ranger: {
-    blockedAffinities: [
-      "necromancy",
-    ],
-  },
-
-  assassin: {
-    blockedAffinities: [
-      "divine",
-    ],
-  },
-};
-
-function isClassRestricted(characterClass, spell) {
-  const id = String(characterClass || "").toLowerCase();
-
-  const restrictions = CLASS_RESTRICTIONS[id];
-
-  if (!restrictions) return false;
-
-  return restrictions.blockedAffinities.includes(
-    spell.affinity
-  );
-}
-
-// ============================================================
-// CAN LEARN
-// ============================================================
-
-async function canLearnSpell(
+async function canArcanistLearnExternalSpell(
   threadID,
   userID,
-  spellId,
-  options = {}
+  spell
 ) {
-  const spell = getSpell(spellId);
+  const playerClass = await getPlayerClass(threadID, userID);
+
+  if (playerClass !== "arcanist") {
+    return true;
+  }
+
+  if (spell.affinity === "arcane") {
+    return true;
+  }
+
+  const count = await getArcanistExternalSpellCount(
+    threadID,
+    userID
+  );
+
+  return count < 1;
+}
+
+// ============================================================
+// SPELL REQUIREMENTS
+// ============================================================
+
+function getRequiredTierForSpell(spell) {
+  const tier = SPELL_TIERS[spell.tier.toUpperCase()];
+
+  return tier || SPELL_TIERS.BASIC;
+}
+
+async function getPlayerAffinityTier(threadID, userID, affinityID) {
+  const affinity = await getPlayerAffinity(
+    threadID,
+    userID,
+    affinityID
+  );
+
+  if (!affinity) {
+    return {
+      unlocked: false,
+      tier: "none",
+      tierId: 0,
+      mastery: 0,
+    };
+  }
+
+  return {
+    unlocked: true,
+    tier: affinity.tierKey || affinity.tier || "none",
+    tierId: Number(affinity.tierId || affinity.tier_id || 0),
+    mastery: Number(affinity.mastery || 0),
+  };
+}
+
+async function checkSpellRequirements(
+  threadID,
+  userID,
+  spellID
+) {
+  const spell = getSpell(spellID);
 
   if (!spell) {
     return {
       ok: false,
       reason: "That spell does not exist.",
+      code: "SPELL_NOT_FOUND",
     };
   }
 
-  if (await hasSpell(threadID, userID, spell.id)) {
-    return {
-      ok: false,
-      reason: `You already know ${spell.name}.`,
-      spell,
-    };
-  }
-
-  const playerResult = await db.query(
-    `
-    SELECT
-      character_class,
-      kingdom_id,
-      kingdom_role,
-      traitor
-    FROM rpg_players
-    WHERE thread_id = $1
-      AND user_id = $2
-    LIMIT 1
-    `,
-    [threadID, userID]
+  const alreadyKnown = await hasSpell(
+    threadID,
+    userID,
+    spell.id
   );
 
-  if (!playerResult.rows.length) {
+  if (alreadyKnown) {
     return {
       ok: false,
-      reason: "You have not started your RPG journey yet.",
+      reason: "You already know this spell.",
+      code: "ALREADY_KNOWN",
       spell,
     };
   }
 
-  const player = playerResult.rows[0];
-
-  // ----------------------------------------------------------
-  // CLASS RESTRICTION
-  // ----------------------------------------------------------
-
-  if (
-    isClassRestricted(
-      player.character_class,
-      spell
-    )
-  ) {
-    return {
-      ok: false,
-      reason:
-        `${spell.name} is incompatible with the ` +
-        `${player.character_class} class.`,
-      spell,
-    };
-  }
-
-  // ----------------------------------------------------------
-  // AFFINITY REQUIREMENT
-  // ----------------------------------------------------------
-
-  const affinityCheck =
-    await meetsAffinityRequirement(
-      threadID,
-      userID,
-      spell
-    );
-
-  if (!affinityCheck.ok) {
-    return {
-      ok: false,
-      reason: affinityCheck.reason,
-      spell,
-    };
-  }
-
-  // ----------------------------------------------------------
-  // KINGDOM REQUIREMENT
-  // ----------------------------------------------------------
-
-  const affinity = affinities.getAffinity(
+  const affinity = await getPlayerAffinityTier(
+    threadID,
+    userID,
     spell.affinity
   );
 
-  if (
-    affinity?.kingdomId &&
-    options.requireKingdom !== false
-  ) {
-    const playerKingdom =
-      player.kingdom_id;
+  const playerClass = await getPlayerClass(
+    threadID,
+    userID
+  );
 
-    /**
-     * Kingdom requirement is only enforced for
-     * Kingdom-category spells.
-     *
-     * Normal affinity spells only require affinity mastery.
-     */
-    if (
-      spell.category === SPELL_CATEGORIES.KINGDOM &&
-      playerKingdom !== affinity.kingdomId
-    ) {
+  // Arcanist exception:
+  // one external affinity spell is permitted.
+  const isArcanistExternal =
+    playerClass === "arcanist" &&
+    spell.affinity !== "arcane";
+
+  if (!affinity.unlocked && !isArcanistExternal) {
+    return {
+      ok: false,
+      reason:
+        `You have not unlocked the ${spell.affinity} affinity.`,
+      code: "AFFINITY_LOCKED",
+      spell,
+    };
+  }
+
+  if (isArcanistExternal) {
+    const allowed =
+      await canArcanistLearnExternalSpell(
+        threadID,
+        userID,
+        spell
+      );
+
+    if (!allowed) {
       return {
         ok: false,
         reason:
-          `This spell belongs to the ` +
-          `${affinity.name} kingdom path.`,
+          "Arcanists may learn only one spell from outside Arcane.",
+        code: "ARCANIST_EXTERNAL_LIMIT",
         spell,
       };
     }
   }
 
-  // ----------------------------------------------------------
-  // ARCANIST EXTERNAL SPELL RULE
-  // ----------------------------------------------------------
-
-  const playerClass =
-    String(player.character_class || "")
-      .toLowerCase();
+  const requiredTier = getRequiredTierForSpell(spell);
 
   if (
-    playerClass === "arcanist" &&
-    spell.affinity !== "arcane"
+    affinity.unlocked &&
+    affinity.tierId < requiredTier.id
   ) {
-    const externalSpell =
-      await getExternalSpell(
-        threadID,
-        userID
-      );
+    return {
+      ok: false,
+      reason:
+        `${spell.name} requires ${requiredTier.name} ${spell.affinity} affinity.`,
+      code: "AFFINITY_TIER_TOO_LOW",
+      spell,
+      requiredTier,
+      currentTier: affinity.tier,
+    };
+  }
+
+  if (
+    affinity.unlocked &&
+    affinity.mastery < requiredTier.masteryRequired
+  ) {
+    return {
+      ok: false,
+      reason:
+        `${spell.name} requires ${requiredTier.masteryRequired} ${spell.affinity} mastery.`,
+      code: "MASTERY_TOO_LOW",
+      spell,
+      requiredMastery: requiredTier.masteryRequired,
+      currentMastery: affinity.mastery,
+    };
+  }
+
+  // Kingdom spells require the affinity's associated kingdom
+  // when that kingdom exists on the player's current record.
+  if (spell.tier === "kingdom") {
+    const kingdom = await getPlayerKingdom(
+      threadID,
+      userID
+    );
+
+    const affinityDefinition = getAffinity(
+      spell.affinity
+    );
+
+    const requiredKingdom =
+      affinityDefinition?.kingdom || null;
 
     if (
-      externalSpell &&
-      externalSpell !== spell.id
+      requiredKingdom &&
+      kingdom.kingdom_id &&
+      kingdom.kingdom_id !== requiredKingdom &&
+      !isArcanistExternal
     ) {
       return {
         ok: false,
         reason:
-          "Arcanists may bind only one external-affinity spell.",
+          `${spell.name} is tied to the ${requiredKingdom} kingdom.`,
+        code: "KINGDOM_REQUIRED",
+        spell,
+        requiredKingdom,
+      };
+    }
+
+    if (
+      kingdom.traitor &&
+      kingdom.traitor_kingdom_id === requiredKingdom
+    ) {
+      return {
+        ok: false,
+        reason:
+          "Traitors cannot learn rewards belonging to the kingdom they betrayed.",
+        code: "TRAITOR_LOCKED",
         spell,
       };
     }
@@ -1583,8 +1521,60 @@ async function canLearnSpell(
   return {
     ok: true,
     spell,
-    affinity: affinityCheck.affinity,
   };
+}
+
+// ============================================================
+// GRANT SPELL
+// ============================================================
+
+async function grantSpell(
+  threadID,
+  userID,
+  spellID,
+  source = "system"
+) {
+  const spell = getSpell(spellID);
+
+  if (!spell) {
+    throw new Error(`Unknown spell: ${spellID}`);
+  }
+
+  const existing = await hasSpell(
+    threadID,
+    userID,
+    spell.id
+  );
+
+  if (existing) {
+    return false;
+  }
+
+  await db.query(
+    `
+      INSERT INTO rpg_player_spells
+        (
+          thread_id,
+          user_id,
+          spell_id,
+          mastery,
+          source,
+          learned_at
+        )
+      VALUES
+        ($1, $2, $3, 0, $4, NOW())
+      ON CONFLICT (thread_id, user_id, spell_id)
+      DO NOTHING
+    `,
+    [
+      String(threadID),
+      String(userID),
+      spell.id,
+      source,
+    ]
+  );
+
+  return true;
 }
 
 // ============================================================
@@ -1594,64 +1584,144 @@ async function canLearnSpell(
 async function learnSpell(
   threadID,
   userID,
-  spellId,
+  spellID,
   options = {}
 ) {
-  const check = await canLearnSpell(
+  const id = normalizeSpellId(spellID);
+
+  const check = await checkSpellRequirements(
     threadID,
     userID,
-    spellId,
-    options
+    id
   );
 
   if (!check.ok) {
-    return check;
+    return {
+      success: false,
+      ...check,
+    };
   }
 
   const spell = check.spell;
 
-  const playerResult = await db.query(
-    `
-    SELECT character_class
-    FROM rpg_players
-    WHERE thread_id = $1
-      AND user_id = $2
-    LIMIT 1
-    `,
-    [threadID, userID]
-  );
+  // Kingdom/reward sources may bypass coin cost.
+  const free =
+    options.free === true ||
+    options.source === "kingdom" ||
+    options.source === "quest" ||
+    options.source === "boss" ||
+    options.source === "system";
 
-  const playerClass =
-    playerResult.rows[0]?.character_class;
+  let cost = getSpellCost(spell);
 
-  // Arcanist external spell gets bound immediately.
-  if (
-    String(playerClass || "").toLowerCase() ===
-      "arcanist" &&
-    spell.affinity !== "arcane"
-  ) {
-    await setExternalSpell(
-      threadID,
-      userID,
-      spell.id
+  if (!free && cost > 0) {
+    const result = await db.query(
+      `
+        UPDATE users
+        SET balance = balance - $1
+        WHERE user_id = $2
+          AND balance >= $1
+        RETURNING balance
+      `,
+      [cost, String(userID)]
     );
+
+    if (!result.rows.length) {
+      return {
+        success: false,
+        reason:
+          `You need ${cost.toLocaleString()} coins to learn ${spell.name}.`,
+        code: "INSUFFICIENT_FUNDS",
+        spell,
+        cost,
+      };
+    }
   }
 
-  await grantSpell(
+  const granted = await grantSpell(
     threadID,
     userID,
     spell.id,
-    options.source || "affinity"
+    options.source || "learned"
   );
 
+  if (!granted) {
+    return {
+      success: false,
+      reason: "That spell is already known.",
+      code: "ALREADY_KNOWN",
+      spell,
+    };
+  }
+
   return {
-    ok: true,
+    success: true,
     spell,
-    external:
-      String(playerClass || "").toLowerCase() ===
-        "arcanist" &&
-      spell.affinity !== "arcane",
+    cost: free ? 0 : cost,
+    source: options.source || "learned",
   };
+}
+
+// ============================================================
+// SPELL COST
+// ============================================================
+
+function getSpellCost(spell) {
+  if (!spell) return 0;
+
+  const costs = {
+    basic: 150,
+    advanced: 750,
+    mastery: 2500,
+    kingdom: 5000,
+    special: 10000,
+    ultimate: 25000,
+  };
+
+  return costs[spell.tier] || 150;
+}
+
+// ============================================================
+// STARTING SPELLS
+// ============================================================
+
+function getStartingSpellIDs(classID) {
+  const key = String(classID || "knight").toLowerCase();
+
+  return [
+    ...(CLASS_STARTING_SPELLS[key] || CLASS_STARTING_SPELLS.knight),
+  ];
+}
+
+function getStartingSpells(classID) {
+  return getStartingSpellIDs(classID)
+    .map((id) => getSpell(id))
+    .filter(Boolean);
+}
+
+async function grantStartingSpells(
+  threadID,
+  userID,
+  classID
+) {
+  const spells = getStartingSpells(classID);
+
+  const granted = [];
+
+  for (const spell of spells) {
+    const wasGranted = await grantSpell(
+      threadID,
+      userID,
+      spell.id,
+      "class_start"
+    );
+
+    if (wasGranted) {
+      granted.push(spell);
+    }
+  }
+
+  return granted;
 }
 
 // ============================================================
@@ -1661,111 +1731,133 @@ async function learnSpell(
 async function getLearnableSpells(
   threadID,
   userID,
-  affinityId = null
+  affinityID = null
 ) {
-  let spells = affinityId
-    ? getSpellsByAffinity(affinityId)
+  let spells = affinityID
+    ? getSpellsByAffinity(affinityID)
     : getAllSpells();
 
-  const output = [];
+  const learned = await getLearnedSpells(
+    threadID,
+    userID
+  );
+
+  const learnedIDs = new Set(
+    learned.map((spell) => spell.id)
+  );
+
+  const results = [];
 
   for (const spell of spells) {
-    const check = await canLearnSpell(
+    if (learnedIDs.has(spell.id)) {
+      continue;
+    }
+
+    const check = await checkSpellRequirements(
       threadID,
       userID,
       spell.id
     );
 
-    output.push({
+    results.push({
       ...spell,
-      learnable: check.ok,
-      reason: check.ok
-        ? null
-        : check.reason,
+      canLearn: check.ok,
+      reason: check.ok ? null : check.reason,
+      code: check.code || null,
+      cost: getSpellCost(spell),
     });
   }
 
-  return output;
+  return results;
 }
 
 // ============================================================
-// SPELL POWER
+// SPELL MASTERY
 // ============================================================
 
-async function calculateSpellPower(
+async function getSpellMastery(
   threadID,
   userID,
-  spell,
-  context = {}
+  spellID
 ) {
-  if (!spell) return 0;
-
-  let power =
-    Number(spell.basePower || 0);
-
-  // ----------------------------------------------------------
-  // AFFINITY POWER
-  // ----------------------------------------------------------
-
-  const affinityPower =
-    await affinities.getPlayerAffinityPower(
-      threadID,
-      userID,
-      spell.affinity
-    );
-
-  if (affinityPower) {
-    power *= affinityPower;
-  }
-
-  // ----------------------------------------------------------
-  // ENVIRONMENT
-  // ----------------------------------------------------------
-
-  if (
-    context.regionId ||
-    context.season ||
-    context.weather
-  ) {
-    const environmentMultiplier =
-      affinities.getEnvironmentMultiplier(
-        spell.affinity,
-        context.regionId,
-        context.season,
-        context.weather,
-        {
-          isNight: !!context.isNight,
-          isMorning: !!context.isMorning,
-        }
-      );
-
-    power *= environmentMultiplier;
-  }
-
-  // ----------------------------------------------------------
-  // SPECIAL CONTEXT
-  // ----------------------------------------------------------
-
-  if (
-    spell.effects?.specialSeasonBonus &&
-    context.season ===
-      spell.effects.specialSeasonBonus
-  ) {
-    power *= 1.2;
-  }
-
-  if (
-    spell.effects?.bonusAtNight &&
-    context.isNight
-  ) {
-    power *=
-      1 + Number(spell.effects.bonusAtNight);
-  }
-
-  return Math.max(
-    0,
-    Math.round(power)
+  const result = await db.query(
+    `
+      SELECT
+        spell_id,
+        COALESCE(mastery, 0) AS mastery,
+        source,
+        learned_at
+      FROM rpg_player_spells
+      WHERE thread_id = $1
+        AND user_id = $2
+        AND spell_id = $3
+      LIMIT 1
+    `,
+    [
+      String(threadID),
+      String(userID),
+      normalizeSpellId(spellID),
+    ]
   );
+
+  if (!result.rows.length) {
+    return null;
+  }
+
+  return {
+    spellID: result.rows[0].spell_id,
+    mastery: Number(result.rows[0].mastery || 0),
+    source: result.rows[0].source,
+    learnedAt: result.rows[0].learned_at,
+  };
+}
+
+async function addSpellMastery(
+  threadID,
+  userID,
+  spellID,
+  amount
+) {
+  const id = normalizeSpellId(spellID);
+
+  if (!getSpell(id)) {
+    return {
+      success: false,
+      reason: "Unknown spell.",
+    };
+  }
+
+  const value = Math.max(0, Number(amount || 0));
+
+  const result = await db.query(
+    `
+      UPDATE rpg_player_spells
+      SET mastery = COALESCE(mastery, 0) + $4
+      WHERE thread_id = $1
+        AND user_id = $2
+        AND spell_id = $3
+      RETURNING mastery
+    `,
+    [
+      String(threadID),
+      String(userID),
+      id,
+      value,
+    ]
+  );
+
+  if (!result.rows.length) {
+    return {
+      success: false,
+      reason: "You have not learned that spell.",
+    };
+  }
+
+  return {
+    success: true,
+    spell: getSpell(id),
+    mastery: Number(result.rows[0].mastery || 0),
+  };
 }
 
 // ============================================================
@@ -1775,347 +1867,274 @@ async function calculateSpellPower(
 async function canCastSpell(
   threadID,
   userID,
-  spellId,
-  context = {}
+  spellID,
+  options = {}
 ) {
-  const spell = getSpell(spellId);
+  const spell = getSpell(spellID);
 
   if (!spell) {
-    return {
-      ok: false,
-      reason: "That spell does not exist.",
-    };
+    return false;
   }
 
-  const learned =
-    await hasSpell(
-      threadID,
-      userID,
-      spell.id
-    );
-
-  if (!learned) {
-    return {
-      ok: false,
-      reason:
-        `You have not learned ${spell.name}.`,
-      spell,
-    };
-  }
-
-  const playerResult = await db.query(
-    `
-    SELECT
-      character_class,
-      mp,
-      max_mp,
-      status
-    FROM rpg_players
-    WHERE thread_id = $1
-      AND user_id = $2
-    LIMIT 1
-    `,
-    [threadID, userID]
+  const known = await hasSpell(
+    threadID,
+    userID,
+    spell.id
   );
 
-  if (!playerResult.rows.length) {
-    return {
-      ok: false,
-      reason: "RPG player not found.",
-      spell,
-    };
+  if (!known) {
+    return false;
   }
 
-  const player =
-    playerResult.rows[0];
-
-  if (
-    Number(player.mp || 0) <
-    Number(spell.mpCost || 0)
-  ) {
-    return {
-      ok: false,
-      reason:
-        `Not enough MP. ` +
-        `Required ${spell.mpCost}, ` +
-        `you have ${player.mp || 0}.`,
-      spell,
-    };
+  if (options.currentMP != null) {
+    if (
+      Number(options.currentMP) <
+      Number(spell.manaCost || 0)
+    ) {
+      return false;
+    }
   }
 
-  // ----------------------------------------------------------
-  // MORNING-ONLY SPELL
-  // ----------------------------------------------------------
+  return true;
+}
 
-  if (
-    spell.requirements?.morningOnly &&
-    !context.isMorning
-  ) {
-    return {
-      ok: false,
-      reason:
-        `${spell.name} can only be used in the morning.`,
-      spell,
-    };
+// ============================================================
+// SPELL POWER
+// ============================================================
+
+async function getSpellPower(
+  threadID,
+  userID,
+  spellID
+) {
+  const spell = getSpell(spellID);
+
+  if (!spell) return 0;
+
+  const affinityID = spell.affinity;
+
+  const affinity = await getPlayerAffinity(
+    threadID,
+    userID,
+    affinityID
+  );
+
+  let multiplier = 1;
+
+  if (affinity) {
+    multiplier =
+      Number(
+        affinity.powerMultiplier ||
+        affinity.power_multiplier ||
+        1
+      );
   }
 
-  // ----------------------------------------------------------
-  // SHADOW ROUND LOCK
-  // ----------------------------------------------------------
+  return Math.round(
+    Number(spell.power || spell.damage || 0) *
+      multiplier
+  );
+}
 
-  if (
-    spell.affinity === "shadow" &&
-    context.shadowDisabled
-  ) {
-    return {
-      ok: false,
-      reason:
-        "Your shadow power is unavailable for the remainder of this round.",
-      spell,
-    };
-  }
+// ============================================================
+// SPELL EXECUTION METADATA
+// ============================================================
+
+function getSpellEffectData(spellID) {
+  const spell = getSpell(spellID);
+
+  if (!spell) return null;
 
   return {
-    ok: true,
-    spell,
-    player,
+    id: spell.id,
+    name: spell.name,
+    affinity: spell.affinity,
+    tier: spell.tier,
+    type: spell.type,
+    target: spell.target,
+    manaCost: Number(spell.manaCost || 0),
+    damage: Number(spell.damage || 0),
+    power: Number(spell.power || 0),
+    healPercent: Number(spell.healPercent || 0),
+    manaRestorePercent: Number(
+      spell.manaRestorePercent || 0
+    ),
+    lifestealPercent: Number(
+      spell.lifestealPercent || 0
+    ),
+    utility: spell.utility || null,
+    effects: Array.isArray(spell.effects)
+      ? spell.effects.map((effect) => ({
+          ...effect,
+        }))
+      : [],
   };
 }
 
 // ============================================================
-// FORMATTERS
+// FORMATTING
 // ============================================================
 
 function formatSpell(spell, options = {}) {
-  if (!spell) return "Unknown spell.";
+  if (!spell) return "Unknown spell";
+
+  const tier =
+    SPELL_TIERS[spell.tier?.toUpperCase()] ||
+    SPELL_TIERS.BASIC;
 
   const lines = [];
 
-  lines.push(`✦ ${spell.name}`);
+  lines.push(
+    `✦ ${spell.name} [${spell.affinity.toUpperCase()}]`
+  );
 
-  if (spell.affinity) {
+  lines.push(
+    `  ${tier.name} • ${spell.manaCost || 0} MP`
+  );
+
+  if (spell.damage) {
+    lines.push(`  ⚔️ Power: ${spell.damage}`);
+  }
+
+  if (spell.healPercent) {
     lines.push(
-      `Affinity: ${spell.affinity}`
+      `  ❤️ Healing: ${Math.round(
+        spell.healPercent * 100
+      )}%`
     );
   }
 
-  if (spell.category) {
-    lines.push(
-      `Category: ${spell.category}`
-    );
-  }
+  if (spell.effects?.length) {
+    const effects = spell.effects
+      .map((effect) => {
+        if (effect.duration) {
+          return `${effect.id} ${effect.duration}t`;
+        }
 
-  if (spell.type) {
-    lines.push(
-      `Type: ${spell.type}`
-    );
-  }
+        return effect.id;
+      })
+      .join(", ");
 
-  if (spell.mpCost != null) {
-    lines.push(
-      `MP: ${spell.mpCost}`
-    );
-  }
-
-  if (spell.basePower) {
-    lines.push(
-      `Power: ${spell.basePower}`
-    );
-  }
-
-  if (spell.tierRequired) {
-    lines.push(
-      `Tier: ${spell.tierRequired}`
-    );
-  }
-
-  if (spell.masteryRequired) {
-    lines.push(
-      `Mastery: ${spell.masteryRequired}`
-    );
-  }
-
-  if (spell.cooldown) {
-    lines.push(
-      `Cooldown: ${spell.cooldown} turns`
-    );
+    lines.push(`  ◈ Effects: ${effects}`);
   }
 
   if (spell.description) {
-    lines.push("");
-    lines.push(
-      spell.description
-    );
+    lines.push(`  ${spell.description}`);
   }
 
-  if (
-    options.includeEffects &&
-    spell.effects
-  ) {
-    lines.push("");
+  if (options.showCost) {
     lines.push(
-      "Effects:"
+      `  💰 Learn: ${getSpellCost(spell).toLocaleString()} coins`
     );
-
-    for (
-      const [key, value]
-      of Object.entries(spell.effects)
-    ) {
-      lines.push(
-        `• ${key}: ${JSON.stringify(value)}`
-      );
-    }
   }
 
   return lines.join("\n");
 }
 
-function formatSpellList(
-  spells,
-  options = {}
-) {
-  if (!spells?.length) {
+function formatSpellList(spells, options = {}) {
+  if (!Array.isArray(spells) || !spells.length) {
     return "No spells found.";
+  }
+
+  const groups = {};
+
+  for (const spell of spells) {
+    const affinity = spell.affinity || "unknown";
+
+    if (!groups[affinity]) {
+      groups[affinity] = [];
+    }
+
+    groups[affinity].push(spell);
   }
 
   const lines = [];
 
-  for (const spell of spells) {
-    const learned =
-      options.learnedIds?.includes(
-        spell.id
-      );
-
-    const learnable =
-      spell.learnable === true;
-
-    let marker = "○";
-
-    if (learned) {
-      marker = "✓";
-    } else if (learnable) {
-      marker = "◇";
-    }
-
+  for (const [affinity, entries] of Object.entries(groups)) {
     lines.push(
-      `${marker} ${spell.name} ` +
-      `— ${spell.affinity} · ` +
-      `${spell.category} · ` +
-      `${spell.mpCost} MP`
+      `\n━━ ${affinity.toUpperCase()} ━━`
     );
 
-    if (
-      options.showRequirements
-    ) {
-      lines.push(
-        `   ${spell.tierRequired} · ` +
-        `${spell.masteryRequired} mastery`
-      );
-    }
+    for (const spell of entries) {
+      const tier =
+        SPELL_TIERS[
+          String(spell.tier || "basic").toUpperCase()
+        ] || SPELL_TIERS.BASIC;
 
-    if (
-      options.showReasons &&
-      spell.reason
-    ) {
+      let status = "";
+
+      if (spell.canLearn === true) {
+        status = " • ✓ LEARNABLE";
+      } else if (spell.canLearn === false) {
+        status = " • 🔒";
+      }
+
       lines.push(
-        `   ↳ ${spell.reason}`
+        `✦ ${spell.name} — ${tier.name}${status}`
       );
+
+      if (options.showIDs) {
+        lines.push(`  ID: ${spell.id}`);
+      }
+
+      if (options.showReasons && spell.reason) {
+        lines.push(`  └ ${spell.reason}`);
+      }
     }
   }
 
   return lines.join("\n");
 }
 
+function formatLearnedSpellList(spells) {
+  if (!Array.isArray(spells) || !spells.length) {
+    return "You have not learned any spells yet.";
+  }
+
+  return spells
+    .map((spell) => {
+      const mastery =
+        spell.mastery != null
+          ? ` • ${spell.mastery} mastery`
+          : "";
+
+      return (
+        `✦ ${spell.name} [${spell.affinity}]` +
+        ` • ${spell.tier}` +
+        mastery
+      );
+    })
+    .join("\n");
+}
+
 // ============================================================
-// SPELL SUMMARY
+// AFFINITY SUMMARY
 // ============================================================
 
 async function getSpellbook(
   threadID,
   userID
 ) {
-  const learned =
-    await getLearnedSpells(
-      threadID,
-      userID
-    );
+  const learned = await getLearnedSpells(
+    threadID,
+    userID
+  );
 
-  const learnedIds =
-    learned.map(
-      (entry) => entry.spell_id
-    );
+  const byAffinity = {};
+
+  for (const spell of learned) {
+    if (!byAffinity[spell.affinity]) {
+      byAffinity[spell.affinity] = [];
+    }
+
+    byAffinity[spell.affinity].push(spell);
+  }
 
   return {
+    total: learned.length,
     learned,
-    learnedIds,
-    spells:
-      learned
-        .map((entry) => entry.spell)
-        .filter(Boolean),
+    byAffinity,
   };
-}
-
-// ============================================================
-// STARTING SPELLS
-// ============================================================
-
-async function getStartingSpells(
-  characterClass
-) {
-  const id =
-    String(characterClass || "")
-      .trim()
-      .toLowerCase();
-
-  const starting = {
-    knight: [
-      "holy_light",
-    ],
-
-    bloodreaver: [
-      "blood_bolt",
-    ],
-
-    arcanist: [
-      "arcane_missile",
-      "detect_magic",
-    ],
-
-    wraith: [
-      "shadow_veil",
-    ],
-
-    paladin: [
-      "holy_light",
-      "divine_shield",
-    ],
-
-    ranger: [
-      "thorn_strike",
-    ],
-
-    assassin: [
-      "shadow_veil",
-    ],
-  };
-
-  return starting[id] || [];
-}
-
-// ============================================================
-// SPELL STATISTICS
-// ============================================================
-
-function getSpellCount() {
-  return Object.keys(SPELLS).length;
-}
-
-function getAffinitySpellCount(
-  affinityId
-) {
-  return getSpellsByAffinity(
-    affinityId
-  ).length;
 }
 
 // ============================================================
@@ -2123,53 +2142,55 @@ function getAffinitySpellCount(
 // ============================================================
 
 module.exports = {
-  // Constants
-  SPELL_CATEGORIES,
-  SPELL_TYPES,
-  TARGET_TYPES,
-  ELEMENTS,
-
   // Definitions
   SPELLS,
+  SPELL_TIERS,
+  SPELL_SCHOOLS,
+  CLASS_STARTING_SPELLS,
 
-  // Lookups
+  // Lookup
   normalizeSpellId,
   getSpell,
   getAllSpells,
   getSpellsByAffinity,
-  getSpellsByCategory,
-
-  // Requirements
-  getSpellTier,
-  getSpellMasteryRequirement,
-  meetsAffinityRequirement,
-  canLearnSpell,
+  getSpellsByTier,
+  getSpellsByAffinityAndTier,
 
   // Player spells
+  getLearnedSpellRows,
   getLearnedSpells,
-  getLearnableSpells,
+  getSpellbook,
   hasSpell,
+
+  // Learning
   grantSpell,
   learnSpell,
-  getSpellbook,
+  getLearnableSpells,
+  checkSpellRequirements,
 
-  // Arcanist
-  getExternalSpell,
-  setExternalSpell,
-  clearExternalSpell,
+  // Starting spells
+  getStartingSpellIDs,
+  getStartingSpells,
+  grantStartingSpells,
+
+  // Costs
+  getSpellCost,
+
+  // Mastery
+  getSpellMastery,
+  addSpellMastery,
 
   // Casting
   canCastSpell,
-  calculateSpellPower,
+  getSpellPower,
+  getSpellEffectData,
 
-  // Starting spells
-  getStartingSpells,
+  // Arcanist
+  getArcanistExternalSpellCount,
+  canArcanistLearnExternalSpell,
 
   // Formatting
   formatSpell,
   formatSpellList,
-
-  // Statistics
-  getSpellCount,
-  getAffinitySpellCount,
+  formatLearnedSpellList,
 };
