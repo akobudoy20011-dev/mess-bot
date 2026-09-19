@@ -988,7 +988,7 @@ async function resolveTrivia(api, event, answer) {
     ].join("\n");
 
     // EDIT #1: final result
-    await updateGameMessage(api, threadID, session.messageID, finalText);
+    await sendResult(api, threadID, finalText);
   } catch (error) {
     console.error("[games] trivia reward:", error);
   }
@@ -1982,7 +1982,7 @@ async function resolveGuess(api, event, guessText) {
         .filter((line) => line !== "")
         .join("\n");
 
-      await updateGameMessage(api, threadID, session.messageID, finalText);
+      await sendResult(api, threadID, finalText);
     } catch (error) {
       console.error("[games] guess reward:", error);
 
@@ -2010,7 +2010,7 @@ async function resolveGuess(api, event, guessText) {
       "try again ♡",
     ].join("\n");
 
-    await updateGameMessage(api, threadID, session.messageID, text);
+    await sendResult(api, threadID, text);
   }
 
   return true;
@@ -2720,7 +2720,7 @@ async function settleBlackjack(api, event, session) {
     balanceText,
   ].join("\n");
 
-  await updateGameMessage(api, threadID, session.messageID, finalText);
+  await sendResult(api, threadID, finalText);
 }
 
 async function settleBlackjackBust(api, event, session) {
@@ -2755,7 +2755,7 @@ async function settleBlackjackBust(api, event, session) {
     balanceText,
   ].join("\n");
 
-  await updateGameMessage(api, threadID, session.messageID, finalText);
+  await sendResult(api, threadID, finalText);
 }
 
 async function resolveBlackjack(api, event, action) {
@@ -2874,7 +2874,7 @@ async function resolveBlackjack(api, event, action) {
         blackjackActionsFooter(session),
       ].join("\n");
 
-      await updateGameMessage(api, threadID, session.messageID, text);
+      await sendResult(api, threadID, text);
 
       return true;
     }
@@ -3259,7 +3259,7 @@ async function resolveMath(api, event, answerText) {
     ].join("\n");
 
     // EDIT #1: final result
-    await updateGameMessage(api, threadID, session.messageID, finalText);
+    await sendResult(api, threadID, finalText);
   } catch (error) {
     console.error("[games] math reward:", error);
   }
@@ -3378,7 +3378,7 @@ async function resolveRiddle(api, event, answerText) {
     ].join("\n");
 
     // EDIT #1: final result
-    await updateGameMessage(api, threadID, session.messageID, finalText);
+    await sendResult(api, threadID, finalText);
   } catch (error) {
     console.error("[games] riddle reward:", error);
   }
@@ -3744,6 +3744,20 @@ async function safeReply(api, event, text) {
 }
 
 // ============================================================
+// ACTION WORDS (open-game replies typed as !commands)
+// ============================================================
+
+const SESSION_ACTIONS = {
+  blackjack: ["hit", "stand", "double"],
+  roll_ladder: ["cashout", "doubledown", "double", "keep"],
+  coinflip_ladder: ["cashout", "doubledown", "double", "keep"],
+  claim_gamble: ["gamble", "keep"],
+  guess: ["doubledown", "double"],
+};
+
+const ACTION_COMMANDS = new Set(Object.values(SESSION_ACTIONS).flat());
+
+// ============================================================
 // MAIN GAME COMMAND DISPATCHER
 // ============================================================
 
@@ -3751,6 +3765,33 @@ async function handleGameCommand(api, event, command, args) {
   const cmd = String(command || "").trim().toLowerCase();
 
   const normalizedArgs = normalizeArgs(args);
+
+  // Action words typed like commands (the prompts show "!hit", "!stand"...)
+  // are routed to the open game, but only when that game accepts them.
+  if (ACTION_COMMANDS.has(cmd)) {
+    const session = getSession(
+      String(event.threadID),
+      String(event.senderID)
+    );
+
+    if (session && (SESSION_ACTIONS[session.type] || []).includes(cmd)) {
+      return handleGameResponse(api, event, cmd, cmd);
+    }
+
+    await safeReply(
+      api,
+      event,
+      [
+        "♡ ECLIPSE",
+        "",
+        "nothing is waiting for that.",
+        "",
+        "try !games to see what you can play ♡",
+      ].join("\n")
+    );
+
+    return true;
+  }
 
   if (cmd === "games") {
     const subcommand = String(normalizedArgs[0] || "")
