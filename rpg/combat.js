@@ -1,5 +1,3 @@
-combat.js
-
 "use strict";
 
 /**
