@@ -1,5 +1,3 @@
-player.js
-
 "use strict";
 
 const db = require("../db");
