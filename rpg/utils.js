@@ -21,20 +21,47 @@ function statLine(icon, label, value, maximum, length = 10) {
     value
   )}/${formatNumber(maximum)}`;
 }
+
+/* =========================================================
+   AESTHETIC BOX
+   ---------------------------------------------------------
+   ⎡───────────⎤ 🎀
+        TITLE
+   ⎣───────────⎦ 🎀
+
+   <content lines>
+
+   🎀 ⎡───────────⎤
+      ⎣───────────⎦ 🎀
+========================================================= */
+
+const BOX_BAR = "───────────────────";
+
+function centerTitle(title) {
+  const clean = String(title || "").trim();
+  const pad = Math.max(0, Math.floor((BOX_BAR.length - clean.length) / 2));
+  return " ".repeat(pad) + clean;
+}
+
 function box(title, lines = []) {
+  const content = Array.isArray(lines) ? lines : [lines];
+
   return [
-    "╭━━━━━━━━━━━━━━━━━━━━╮",
-    `        ${title}`,
-    "╰━━━━━━━━━━━━━━━━━━━━╯",
+    `⎡${BOX_BAR}⎤ 🎀`,
+    centerTitle(title),
+    `⎣${BOX_BAR}⎦ 🎀`,
     "",
-    ...lines,
+    ...content,
     "",
-    "━━━━━━━━━━━━━━━━━━━━━━",
+    `🎀 ⎡${BOX_BAR}⎤`,
+    `   ⎣${BOX_BAR}⎦ 🎀`,
   ].join("\n");
 }
+
 function errorBox(message) {
-  return box("❌ ECLIPSE RPG", [message]);
+  return box("❌ ECLIPSE RPG", Array.isArray(message) ? message : [message]);
 }
+
 function parsePositiveInt(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
