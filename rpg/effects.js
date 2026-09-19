@@ -6,26 +6,27 @@
  *
  * Central persistent combat-effect system.
  *
- * This file handles:
- *   - buffs
- *   - debuffs
- *   - damage-over-time
- *   - healing-over-time
- *   - stun
- *   - slow
- *   - poison
- *   - burn
- *   - bleed
+ * Responsibilities:
+ *   - persistent buffs/debuffs
+ *   - DoT / HoT
+ *   - crowd control
  *   - shields
  *   - Ice Wall
+ *   - Infinite Darkness
  *   - Shadow Body
  *   - lifesteal
- *   - defense health / Bark Skin
+ *   - Defense Health
+ *   - Bark Skin / overheal conversion
  *   - damage modifiers
- *   - seasonal/environmental modifiers
+ *   - combat-effect state
  *
- * combat.js should use this engine rather than implementing
- * individual effects itself.
+ * combat.js remains responsible for:
+ *   - turns
+ *   - HP/MP/stamina changes
+ *   - actions
+ *   - enemy AI
+ *   - victory/defeat
+ *   - rewards
  */
 
 const db = require("../db");
@@ -103,7 +104,7 @@ const STACK_RULES = Object.freeze({
 });
 
 // ============================================================
-// DEFAULT EFFECTS
+// DEFAULT EFFECT DEFINITIONS
 // ============================================================
 
 const DEFAULTS = {
@@ -238,6 +239,18 @@ const DEFAULTS = {
     stackRule: STACK_RULES.STRONGEST,
     maxStacks: 1,
   },
+
+  [EFFECT_IDS.DEFENSE_HEALTH]: {
+    type: EFFECT_TYPES.SHIELD,
+    stackRule: STACK_RULES.REPLACE,
+    maxStacks: 1,
+  },
+
+  [EFFECT_IDS.SHADOW_DISABLED]: {
+    type: EFFECT_TYPES.DEBUFF,
+    stackRule: STACK_RULES.REPLACE,
+    maxStacks: 1,
+  },
 };
 
 // ============================================================
@@ -253,6 +266,41 @@ function normalizeEffectId(value) {
     .replace(/['’]/g, "")
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
+}
+
+// ============================================================
+// BASIC HELPERS
+// ============================================================
+
+function safeNumber(value, fallback = 0) {
+  const number = Number(value);
+
+  return Number.isFinite(number)
+    ? number
+    : fallback;
+}
+
+function safeJsonParse(value, fallback = {}) {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+
+  if (typeof value === "object") {
+    return value;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function clamp(value, min, max) {
+  return Math.min(
+    max,
+    Math.max(min, value)
+  );
 }
 
 // ============================================================
@@ -281,30 +329,49 @@ function createEffect({
       maxStacks: 1,
     };
 
+  const normalizedDuration = Math.max(
+    0,
+    safeNumber(duration, 0)
+  );
+
+  const maxStacks =
+    Math.max(
+      1,
+      safeNumber(defaults.maxStacks, 1)
+    );
+
   return {
     id: effectId,
+
     type: defaults.type,
     stackRule: defaults.stackRule,
 
-    source,
-    sourceType,
+    source:
+      source === null || source === undefined
+        ? null
+        : String(source),
 
-    duration: Math.max(0, Number(duration) || 0),
-    remainingTurns: Math.max(0, Number(duration) || 0),
+    sourceType:
+      String(sourceType || "system"),
 
-    magnitude: Number(magnitude) || 0,
+    duration: normalizedDuration,
 
-    stacks: Math.max(
+    remainingTurns:
+      normalizedDuration,
+
+    magnitude:
+      safeNumber(magnitude, 0),
+
+    stacks: clamp(
+      Math.floor(safeNumber(stacks, 1)),
       1,
-      Math.min(
-        Number(stacks) || 1,
-        defaults.maxStacks || 1
-      )
+      maxStacks
     ),
 
-    data: {
-      ...data,
-    },
+    data:
+      data && typeof data === "object"
+        ? { ...data }
+        : {},
   };
 }
 
@@ -312,7 +379,11 @@ function createEffect({
 // DATABASE HELPERS
 // ============================================================
 
-async function getEffects(threadID, combatID, targetID) {
+async function getEffects(
+  threadID,
+  combatID,
+  targetID
+) {
   const result = await db.query(
     `
       SELECT
@@ -342,26 +413,13 @@ async function getEffects(threadID, combatID, targetID) {
     ]
   );
 
-  return result.rows.map((row) => ({
-    dbId: row.id,
-    id: row.effect_id,
-    targetId: row.target_id,
-    source: row.source_id,
-    sourceType: row.source_type,
-    type: row.effect_type,
-    stacks: Number(row.stacks || 1),
-    magnitude: Number(row.magnitude || 0),
-    duration: Number(row.duration || 0),
-    remainingTurns: Number(row.remaining_turns || 0),
-    data:
-      typeof row.data === "string"
-        ? safeJsonParse(row.data, {})
-        : row.data || {},
-    createdAt: row.created_at,
-  }));
+  return result.rows.map(normalizeDbEffect);
 }
 
-async function getAllCombatEffects(threadID, combatID) {
+async function getAllCombatEffects(
+  threadID,
+  combatID
+) {
   const result = await db.query(
     `
       SELECT
@@ -389,23 +447,7 @@ async function getAllCombatEffects(threadID, combatID) {
     ]
   );
 
-  return result.rows.map((row) => ({
-    dbId: row.id,
-    id: row.effect_id,
-    targetId: row.target_id,
-    source: row.source_id,
-    sourceType: row.source_type,
-    type: row.effect_type,
-    stacks: Number(row.stacks || 1),
-    magnitude: Number(row.magnitude || 0),
-    duration: Number(row.duration || 0),
-    remainingTurns: Number(row.remaining_turns || 0),
-    data:
-      typeof row.data === "string"
-        ? safeJsonParse(row.data, {})
-        : row.data || {},
-    createdAt: row.created_at,
-  }));
+  return result.rows.map(normalizeDbEffect);
 }
 
 // ============================================================
@@ -420,10 +462,23 @@ async function applyEffect(
 ) {
   const normalized = createEffect(effect);
 
+  if (normalized.duration <= 0) {
+    return {
+      created: false,
+      refreshed: false,
+      stacked: false,
+      effect: null,
+      ignored: true,
+    };
+  }
+
   const existingResult = await db.query(
     `
       SELECT
         id,
+        source_id,
+        source_type,
+        effect_type,
         stacks,
         magnitude,
         duration,
@@ -468,7 +523,8 @@ async function applyEffect(
         )
         VALUES (
           $1, $2, $3, $4, $5,
-          $6, $7, $8, $9, $10, $11, $12, NOW()
+          $6, $7, $8, $9, $10, $11, $12,
+          NOW()
         )
         RETURNING *
       `,
@@ -476,16 +532,19 @@ async function applyEffect(
         String(threadID),
         String(combatID),
         String(targetID),
-        normalized.source
-          ? String(normalized.source)
-          : null,
+
+        normalized.source,
+
         normalized.sourceType,
+
         normalized.id,
         normalized.type,
+
         normalized.stacks,
         normalized.magnitude,
         normalized.duration,
         normalized.remainingTurns,
+
         JSON.stringify(normalized.data),
       ]
     );
@@ -494,31 +553,55 @@ async function applyEffect(
       created: true,
       refreshed: false,
       stacked: false,
-      effect: normalizeDbEffect(result.rows[0]),
+      effect: normalizeDbEffect(
+        result.rows[0]
+      ),
     };
   }
 
   const defaults =
     DEFAULTS[normalized.id] || {};
 
-  let stacks = Number(existing.stacks || 1);
-  let magnitude = Number(existing.magnitude || 0);
-  let duration = Number(existing.duration || 0);
+  let stacks =
+    safeNumber(existing.stacks, 1);
+
+  let magnitude =
+    safeNumber(existing.magnitude, 0);
+
+  let duration =
+    safeNumber(existing.duration, 0);
+
   let remainingTurns =
-    Number(existing.remaining_turns || 0);
+    safeNumber(
+      existing.remaining_turns,
+      0
+    );
 
   const maxStacks =
-    Number(defaults.maxStacks || 1);
+    Math.max(
+      1,
+      safeNumber(
+        defaults.maxStacks,
+        1
+      )
+    );
 
   switch (defaults.stackRule) {
-    case STACK_RULES.STACK:
+    case STACK_RULES.STACK: {
       stacks = Math.min(
         maxStacks,
         stacks + normalized.stacks
       );
 
-      magnitude =
-        Math.max(magnitude, normalized.magnitude);
+      magnitude = Math.max(
+        magnitude,
+        normalized.magnitude
+      );
+
+      duration = Math.max(
+        duration,
+        normalized.duration
+      );
 
       remainingTurns = Math.max(
         remainingTurns,
@@ -526,26 +609,45 @@ async function applyEffect(
       );
 
       break;
+    }
 
-    case STACK_RULES.EXTEND:
-      magnitude =
-        Math.max(magnitude, normalized.magnitude);
+    case STACK_RULES.EXTEND: {
+      magnitude = Math.max(
+        magnitude,
+        normalized.magnitude
+      );
 
-      remainingTurns =
-        Math.min(
-          duration || normalized.duration,
-          remainingTurns +
-            normalized.remainingTurns
+      duration = Math.max(
+        duration,
+        normalized.duration
+      );
+
+      const maximumDuration =
+        Math.max(
+          duration,
+          normalized.duration
         );
 
-      break;
+      remainingTurns = Math.min(
+        maximumDuration,
+        remainingTurns +
+          normalized.remainingTurns
+      );
 
-    case STACK_RULES.STRONGEST:
+      break;
+    }
+
+    case STACK_RULES.STRONGEST: {
       if (
-        normalized.magnitude > magnitude
+        normalized.magnitude >
+        magnitude
       ) {
-        magnitude = normalized.magnitude;
-        duration = normalized.duration;
+        magnitude =
+          normalized.magnitude;
+
+        duration =
+          normalized.duration;
+
         remainingTurns =
           normalized.remainingTurns;
       } else {
@@ -554,43 +656,62 @@ async function applyEffect(
             remainingTurns,
             normalized.remainingTurns
           );
+
+        duration =
+          Math.max(
+            duration,
+            normalized.duration
+          );
       }
 
       break;
+    }
 
-    case STACK_RULES.REFRESH:
-      magnitude =
-        Math.max(
-          magnitude,
-          normalized.magnitude
-        );
+    case STACK_RULES.REFRESH: {
+      magnitude = Math.max(
+        magnitude,
+        normalized.magnitude
+      );
 
-      duration =
-        Math.max(
-          duration,
-          normalized.duration
-        );
+      duration = Math.max(
+        duration,
+        normalized.duration
+      );
 
-      remainingTurns =
-        Math.max(
-          remainingTurns,
-          normalized.remainingTurns
-        );
+      remainingTurns = Math.max(
+        remainingTurns,
+        normalized.remainingTurns
+      );
 
       break;
+    }
 
     case STACK_RULES.REPLACE:
-    default:
-      stacks = normalized.stacks;
-      magnitude = normalized.magnitude;
-      duration = normalized.duration;
+    default: {
+      stacks =
+        normalized.stacks;
+
+      magnitude =
+        normalized.magnitude;
+
+      duration =
+        normalized.duration;
+
       remainingTurns =
         normalized.remainingTurns;
+
       break;
+    }
   }
 
+  const existingData =
+    safeJsonParse(
+      existing.data,
+      {}
+    );
+
   const mergedData = {
-    ...safeJsonParse(existing.data, {}),
+    ...existingData,
     ...normalized.data,
   };
 
@@ -598,11 +719,14 @@ async function applyEffect(
     `
       UPDATE rpg_combat_effects
       SET
-        stacks = $4,
-        magnitude = $5,
-        duration = $6,
-        remaining_turns = $7,
-        data = $8
+        source_id = $4,
+        source_type = $5,
+        effect_type = $6,
+        stacks = $7,
+        magnitude = $8,
+        duration = $9,
+        remaining_turns = $10,
+        data = $11
       WHERE id = $1
         AND thread_id = $2
         AND combat_session_id = $3
@@ -610,12 +734,19 @@ async function applyEffect(
     `,
     [
       existing.id,
+
       String(threadID),
       String(combatID),
+
+      normalized.source,
+      normalized.sourceType,
+      normalized.type,
+
       stacks,
       magnitude,
       duration,
       remainingTurns,
+
       JSON.stringify(mergedData),
     ]
   );
@@ -624,8 +755,13 @@ async function applyEffect(
     created: false,
     refreshed: true,
     stacked:
-      defaults.stackRule === STACK_RULES.STACK,
-    effect: normalizeDbEffect(result.rows[0]),
+      defaults.stackRule ===
+      STACK_RULES.STACK,
+
+    effect:
+      normalizeDbEffect(
+        result.rows[0]
+      ),
   };
 }
 
@@ -639,7 +775,8 @@ async function removeEffect(
   targetID,
   effectID
 ) {
-  const id = normalizeEffectId(effectID);
+  const id =
+    normalizeEffectId(effectID);
 
   if (!id) return false;
 
@@ -716,7 +853,8 @@ async function hasEffect(
   targetID,
   effectID
 ) {
-  const id = normalizeEffectId(effectID);
+  const id =
+    normalizeEffectId(effectID);
 
   if (!id) return false;
 
@@ -748,7 +886,8 @@ async function getEffect(
   targetID,
   effectID
 ) {
-  const id = normalizeEffectId(effectID);
+  const id =
+    normalizeEffectId(effectID);
 
   if (!id) return null;
 
@@ -785,7 +924,9 @@ async function getEffect(
   );
 
   return result.rows.length
-    ? normalizeDbEffect(result.rows[0])
+    ? normalizeDbEffect(
+        result.rows[0]
+      )
     : null;
 }
 
@@ -793,24 +934,18 @@ async function getEffect(
 // TURN PROCESSING
 // ============================================================
 
-/**
- * Process effects at the beginning of a target's turn.
- *
- * Returns damage/healing/events.
- *
- * Combat.js is responsible for actually applying HP changes.
- */
 async function processStartOfTurn(
   threadID,
   combatID,
   targetID,
   context = {}
 ) {
-  const effects = await getEffects(
-    threadID,
-    combatID,
-    targetID
-  );
+  const effects =
+    await getEffects(
+      threadID,
+      combatID,
+      targetID
+    );
 
   const result = {
     damage: 0,
@@ -826,36 +961,52 @@ async function processStartOfTurn(
   };
 
   for (const effect of effects) {
-    const stacks =
-      Math.max(1, Number(effect.stacks || 1));
+    const stacks = Math.max(
+      1,
+      safeNumber(
+        effect.stacks,
+        1
+      )
+    );
 
     // --------------------------------------------------------
     // BURN
     // --------------------------------------------------------
 
-    if (effect.id === EFFECT_IDS.BURN) {
-      const base =
-        Number(effect.magnitude || 0);
-
+    if (
+      effect.id ===
+      EFFECT_IDS.BURN
+    ) {
       let damage =
-        base * stacks;
+        safeNumber(
+          effect.magnitude,
+          0
+        ) * stacks;
 
       if (
-        context.season === "summer" ||
-        context.weather === "heat"
+        String(
+          context.season || ""
+        ).toLowerCase() ===
+          "summer" ||
+        String(
+          context.weather || ""
+        ).toLowerCase() ===
+          "heat"
       ) {
         damage *= 1.25;
       }
 
-      result.damage += Math.max(
+      damage = Math.max(
         0,
         Math.round(damage)
       );
 
+      result.damage += damage;
+
       result.events.push({
         type: "burn",
         effect,
-        damage: Math.round(damage),
+        damage,
       });
     }
 
@@ -864,14 +1015,17 @@ async function processStartOfTurn(
     // --------------------------------------------------------
 
     else if (
-      effect.id === EFFECT_IDS.POISON
+      effect.id ===
+      EFFECT_IDS.POISON
     ) {
       const damage =
         Math.max(
           1,
           Math.round(
-            Number(effect.magnitude || 0) *
-              stacks
+            safeNumber(
+              effect.magnitude,
+              0
+            ) * stacks
           )
         );
 
@@ -889,14 +1043,17 @@ async function processStartOfTurn(
     // --------------------------------------------------------
 
     else if (
-      effect.id === EFFECT_IDS.BLEED
+      effect.id ===
+      EFFECT_IDS.BLEED
     ) {
       const damage =
         Math.max(
           1,
           Math.round(
-            Number(effect.magnitude || 0) *
-              stacks
+            safeNumber(
+              effect.magnitude,
+              0
+            ) * stacks
           )
         );
 
@@ -914,13 +1071,17 @@ async function processStartOfTurn(
     // --------------------------------------------------------
 
     else if (
-      effect.id === EFFECT_IDS.NECROTIC
+      effect.id ===
+      EFFECT_IDS.NECROTIC
     ) {
       const damage =
         Math.max(
           1,
           Math.round(
-            Number(effect.magnitude || 0)
+            safeNumber(
+              effect.magnitude,
+              0
+            )
           )
         );
 
@@ -938,7 +1099,8 @@ async function processStartOfTurn(
     // --------------------------------------------------------
 
     else if (
-      effect.id === EFFECT_IDS.STUN
+      effect.id ===
+      EFFECT_IDS.STUN
     ) {
       result.stunned = true;
 
@@ -953,7 +1115,8 @@ async function processStartOfTurn(
     // --------------------------------------------------------
 
     else if (
-      effect.id === EFFECT_IDS.ROOT
+      effect.id ===
+      EFFECT_IDS.ROOT
     ) {
       result.rooted = true;
 
@@ -964,14 +1127,33 @@ async function processStartOfTurn(
     }
 
     // --------------------------------------------------------
+    // SILENCE
+    // --------------------------------------------------------
+
+    else if (
+      effect.id === "silence"
+    ) {
+      result.silenced = true;
+
+      result.events.push({
+        type: "silence",
+        effect,
+      });
+    }
+
+    // --------------------------------------------------------
     // MANA REGEN
     // --------------------------------------------------------
 
     else if (
-      effect.id === EFFECT_IDS.MANA_REGEN_UP
+      effect.id ===
+      EFFECT_IDS.MANA_REGEN_UP
     ) {
       const maxMp =
-        Number(context.maxMp || 0);
+        safeNumber(
+          context.maxMp,
+          0
+        );
 
       if (maxMp > 0) {
         const mana =
@@ -979,27 +1161,39 @@ async function processStartOfTurn(
             1,
             Math.round(
               maxMp *
-                Number(effect.magnitude || 0)
+                safeNumber(
+                  effect.magnitude,
+                  0
+                )
             )
           );
 
         result.mana += mana;
+
+        result.events.push({
+          type: "mana_regeneration",
+          effect,
+          mana,
+        });
       }
     }
 
     // --------------------------------------------------------
-    // HOT
+    // GENERIC HOT
     // --------------------------------------------------------
 
     else if (
-      effect.type === EFFECT_TYPES.HOT
+      effect.type ===
+      EFFECT_TYPES.HOT
     ) {
       const healing =
         Math.max(
           0,
           Math.round(
-            Number(effect.magnitude || 0) *
-              stacks
+            safeNumber(
+              effect.magnitude,
+              0
+            ) * stacks
           )
         );
 
@@ -1016,11 +1210,6 @@ async function processStartOfTurn(
   return result;
 }
 
-/**
- * Decrements effects after a turn.
- *
- * Effects reaching zero are removed.
- */
 async function processEndOfTurn(
   threadID,
   combatID,
@@ -1029,7 +1218,8 @@ async function processEndOfTurn(
   const result = await db.query(
     `
       UPDATE rpg_combat_effects
-      SET remaining_turns = remaining_turns - 1
+      SET remaining_turns =
+        GREATEST(remaining_turns - 1, 0)
       WHERE thread_id = $1
         AND combat_session_id = $2
         AND target_id = $3
@@ -1047,7 +1237,10 @@ async function processEndOfTurn(
 
   for (const row of result.rows) {
     if (
-      Number(row.remaining_turns) <= 0
+      safeNumber(
+        row.remaining_turns,
+        0
+      ) <= 0
     ) {
       expired.push(
         normalizeDbEffect(row)
@@ -1088,14 +1281,17 @@ async function calculateIncomingDamage(
   damage,
   context = {}
 ) {
-  let finalDamage =
-    Math.max(0, Number(damage) || 0);
-
-  const effects = await getEffects(
-    threadID,
-    combatID,
-    targetID
+  let finalDamage = Math.max(
+    0,
+    safeNumber(damage, 0)
   );
+
+  const effects =
+    await getEffects(
+      threadID,
+      combatID,
+      targetID
+    );
 
   const modifiers = {
     reduction: 0,
@@ -1108,21 +1304,21 @@ async function calculateIncomingDamage(
   // ICE WALL
   // ----------------------------------------------------------
 
-  const iceWall = effects.find(
-    (effect) =>
-      effect.id === EFFECT_IDS.ICE_WALL
-  );
+  const iceWall =
+    effects.find(
+      (effect) =>
+        effect.id ===
+        EFFECT_IDS.ICE_WALL
+    );
 
   if (iceWall) {
-    if (
-      Number(iceWall.data.blockDamageEvents || 0) >
-      0
-    ) {
-      finalDamage = 0;
+    const blocks =
+      safeNumber(
+        iceWall.data?.blockDamageEvents,
+        0
+      );
 
-      modifiers.blocked = true;
-      modifiers.iceWallTriggered = true;
-
+    if (blocks > 0) {
       await consumeIceWallBlock(
         threadID,
         combatID,
@@ -1131,22 +1327,34 @@ async function calculateIncomingDamage(
 
       return {
         damage: 0,
-        modifiers,
+
+        modifiers: {
+          ...modifiers,
+          blocked: true,
+          iceWallTriggered: true,
+        },
       };
     }
 
-    if (
-      iceWall.data.enemyDamageMultiplier
-    ) {
-      finalDamage *= Number(
-        iceWall.data.enemyDamageMultiplier
+    const wallMultiplier =
+      safeNumber(
+        iceWall.data
+          ?.enemyDamageMultiplier,
+        1
       );
+
+    if (
+      wallMultiplier > 0 &&
+      wallMultiplier !== 1
+    ) {
+      finalDamage *=
+        wallMultiplier;
     }
   }
 
   // ----------------------------------------------------------
-  // GENERIC DAMAGE REDUCTION
-  // --------------------------------------------------------
+  // DAMAGE REDUCTION
+  // ----------------------------------------------------------
 
   for (const effect of effects) {
     if (
@@ -1156,39 +1364,65 @@ async function calculateIncomingDamage(
       modifiers.reduction =
         Math.max(
           modifiers.reduction,
-          Number(effect.magnitude || 0)
+          clamp(
+            safeNumber(
+              effect.magnitude,
+              0
+            ),
+            0,
+            1
+          )
         );
     }
 
     if (
-      effect.id === EFFECT_IDS.INFINITE_DARKNESS
+      effect.id ===
+      EFFECT_IDS.INFINITE_DARKNESS
     ) {
-      if (
-        effect.data.enemyDamageMultiplier
-      ) {
-        finalDamage *= Number(
-          effect.data.enemyDamageMultiplier
+      const multiplier =
+        safeNumber(
+          effect.data
+            ?.enemyDamageMultiplier,
+          1
         );
+
+      if (
+        multiplier > 0 &&
+        multiplier !== 1
+      ) {
+        finalDamage *=
+          multiplier;
       }
     }
 
     if (
-      effect.id === EFFECT_IDS.WEAKNESS
+      effect.id ===
+      EFFECT_IDS.WEAKNESS
     ) {
       modifiers.increase =
         Math.max(
           modifiers.increase,
-          Number(effect.magnitude || 0)
+          Math.max(
+            0,
+            safeNumber(
+              effect.magnitude,
+              0
+            )
+          )
         );
     }
   }
 
-  if (modifiers.reduction > 0) {
+  if (
+    modifiers.reduction > 0
+  ) {
     finalDamage *=
       1 - modifiers.reduction;
   }
 
-  if (modifiers.increase > 0) {
+  if (
+    modifiers.increase > 0
+  ) {
     finalDamage *=
       1 + modifiers.increase;
   }
@@ -1197,21 +1431,24 @@ async function calculateIncomingDamage(
   // SHADOW BODY
   // ----------------------------------------------------------
 
-  const shadowBody = effects.find(
-    (effect) =>
-      effect.id === EFFECT_IDS.SHADOW_BODY
-  );
+  const shadowBody =
+    effects.find(
+      (effect) =>
+        effect.id ===
+        EFFECT_IDS.SHADOW_BODY
+    );
 
-  if (shadowBody && context.targetIsShadow) {
-    finalDamage =
+  if (
+    shadowBody &&
+    context.targetIsShadow === true
+  ) {
+    finalDamage *=
       Math.max(
         0,
-        Math.round(
-          finalDamage *
-            Number(
-              shadowBody.data.reflectedDamageMultiplier ||
-                1.25
-            )
+        safeNumber(
+          shadowBody.data
+            ?.reflectedDamageMultiplier,
+          1.25
         )
       );
   }
@@ -1221,6 +1458,7 @@ async function calculateIncomingDamage(
       0,
       Math.round(finalDamage)
     ),
+
     modifiers,
   };
 }
@@ -1238,13 +1476,17 @@ async function calculateOutgoingDamage(
   context = {}
 ) {
   let finalDamage =
-    Math.max(0, Number(damage) || 0);
+    Math.max(
+      0,
+      safeNumber(damage, 0)
+    );
 
-  const effects = await getEffects(
-    threadID,
-    combatID,
-    sourceID
-  );
+  const effects =
+    await getEffects(
+      threadID,
+      combatID,
+      sourceID
+    );
 
   const modifiers = {
     multiplier: 1,
@@ -1252,48 +1494,84 @@ async function calculateOutgoingDamage(
   };
 
   for (const effect of effects) {
-    if (
-      effect.id === EFFECT_IDS.DAMAGE_UP
-    ) {
-      modifiers.multiplier *=
-        Math.max(
-          0,
-          Number(effect.magnitude || 1)
-        );
-    }
+    // --------------------------------------------------------
+    // DAMAGE UP
+    // --------------------------------------------------------
 
     if (
-      effect.id === EFFECT_IDS.INFINITE_DARKNESS
+      effect.id ===
+      EFFECT_IDS.DAMAGE_UP
     ) {
+      const multiplier =
+        Math.max(
+          0,
+          safeNumber(
+            effect.magnitude,
+            1
+          )
+        );
+
+      modifiers.multiplier *=
+        multiplier;
+    }
+
+    // --------------------------------------------------------
+    // INFINITE DARKNESS
+    // --------------------------------------------------------
+
+    if (
+      effect.id ===
+      EFFECT_IDS.INFINITE_DARKNESS
+    ) {
+      const multiplier =
+        safeNumber(
+          effect.data
+            ?.damageMultiplier,
+          1
+        );
+
       if (
-        effect.data.damageMultiplier
+        multiplier > 0
       ) {
         modifiers.multiplier *=
-          Number(
-            effect.data.damageMultiplier
+          multiplier;
+      }
+
+      const healingRatio =
+        safeNumber(
+          effect.data
+            ?.damageToHealing,
+          0
+        );
+
+      if (
+        healingRatio > 0
+      ) {
+        modifiers.lifesteal =
+          Math.max(
+            modifiers.lifesteal,
+            healingRatio
           );
       }
     }
 
-    if (
-      effect.id === EFFECT_IDS.LIFESTEAL
-    ) {
-      modifiers.lifesteal =
-        Math.max(
-          modifiers.lifesteal,
-          Number(effect.magnitude || 0)
-        );
-    }
+    // --------------------------------------------------------
+    // LIFESTEAL
+    // --------------------------------------------------------
 
     if (
-      effect.id === EFFECT_IDS.INFINITE_DARKNESS &&
-      effect.data.damageToHealing
+      effect.id ===
+      EFFECT_IDS.LIFESTEAL
     ) {
       modifiers.lifesteal =
         Math.max(
           modifiers.lifesteal,
-          Number(
-            effect.data.damageToHealing
+          Math.max(
+            0,
+            safeNumber(
+              effect.magnitude,
+              0
+            )
           )
         );
     }
@@ -1302,16 +1580,15 @@ async function calculateOutgoingDamage(
   finalDamage *=
     modifiers.multiplier;
 
-  // Target defense-break can be accounted for by combat
-  // before base damage enters this function.
-
   return {
     damage: Math.max(
       0,
       Math.round(finalDamage)
     ),
+
     lifesteal:
       modifiers.lifesteal,
+
     modifiers,
   };
 }
@@ -1331,7 +1608,8 @@ async function createIceWall(
     combatID,
     targetID,
     {
-      id: EFFECT_IDS.ICE_WALL,
+      id:
+        EFFECT_IDS.ICE_WALL,
 
       source: sourceID,
       sourceType: "special",
@@ -1354,12 +1632,13 @@ async function consumeIceWallBlock(
   combatID,
   targetID
 ) {
-  const effect = await getEffect(
-    threadID,
-    combatID,
-    targetID,
-    EFFECT_IDS.ICE_WALL
-  );
+  const effect =
+    await getEffect(
+      threadID,
+      combatID,
+      targetID,
+      EFFECT_IDS.ICE_WALL
+    );
 
   if (!effect) {
     return {
@@ -1368,12 +1647,20 @@ async function consumeIceWallBlock(
     };
   }
 
+  const currentBlocks =
+    Math.max(
+      0,
+      safeNumber(
+        effect.data
+          ?.blockDamageEvents,
+        0
+      )
+    );
+
   const remaining =
     Math.max(
       0,
-      Number(
-        effect.data.blockDamageEvents || 0
-      ) - 1
+      currentBlocks - 1
     );
 
   if (remaining <= 0) {
@@ -1398,15 +1685,19 @@ async function consumeIceWallBlock(
         AND combat_session_id = $2
         AND target_id = $3
         AND effect_id = $5
+        AND remaining_turns > 0
     `,
     [
       String(threadID),
       String(combatID),
       String(targetID),
+
       JSON.stringify({
         ...effect.data,
-        blockDamageEvents: remaining,
+        blockDamageEvents:
+          remaining,
       }),
+
       EFFECT_IDS.ICE_WALL,
     ]
   );
@@ -1432,7 +1723,8 @@ async function createShadowBody(
     combatID,
     targetID,
     {
-      id: EFFECT_IDS.SHADOW_BODY,
+      id:
+        EFFECT_IDS.SHADOW_BODY,
 
       source: sourceID,
       sourceType: "special",
@@ -1473,11 +1765,19 @@ async function destroyShadowBody(
       combatID,
       targetID,
       {
-        id: EFFECT_IDS.SHADOW_DISABLED,
+        id:
+          EFFECT_IDS.SHADOW_DISABLED,
+
         duration:
-          Number(
-            options.duration || 1
+          Math.max(
+            1,
+            safeNumber(
+              options.duration,
+              1
+            )
           ),
+
+        sourceType: "system",
 
         data: {
           reason:
@@ -1501,26 +1801,57 @@ async function createInfiniteDarkness(
   options = {}
 ) {
   const duration =
-    Number(options.duration || 5);
+    Math.max(
+      1,
+      safeNumber(
+        options.duration,
+        5
+      )
+    );
+
+  const enemyDamageMultiplier =
+    safeNumber(
+      options.enemyDamageMultiplier,
+      0.8
+    );
+
+  const damageToHealing =
+    safeNumber(
+      options.damageToHealing,
+      0.2
+    );
 
   await applyEffect(
     threadID,
     combatID,
     sourceID,
     {
-      id: EFFECT_IDS.INFINITE_DARKNESS,
+      id:
+        EFFECT_IDS.INFINITE_DARKNESS,
 
       source: sourceID,
       sourceType: "special",
 
       duration,
 
-      magnitude: 0.2,
+      magnitude:
+        damageToHealing,
 
       data: {
-        stunAllEnemies: true,
-        enemyDamageMultiplier: 0.8,
-        damageToHealing: 0.2,
+        stunAllEnemies:
+          options.stunAllEnemies !==
+          false,
+
+        enemyDamageMultiplier,
+
+        damageToHealing,
+
+        damageMultiplier:
+          safeNumber(
+            options.damageMultiplier,
+            1
+          ),
+
         duration,
       },
     }
@@ -1528,8 +1859,12 @@ async function createInfiniteDarkness(
 
   return {
     duration,
-    enemyDamageMultiplier: 0.8,
-    damageToHealing: 0.2,
+    enemyDamageMultiplier,
+    damageToHealing,
+
+    stunAllEnemies:
+      options.stunAllEnemies !==
+      false,
   };
 }
 
@@ -1576,6 +1911,122 @@ async function isShadowDisabled(
   );
 }
 
+async function isSilenced(
+  threadID,
+  combatID,
+  targetID
+) {
+  return hasEffect(
+    threadID,
+    combatID,
+    targetID,
+    "silence"
+  );
+}
+
+// ============================================================
+// COMBAT STAT HELPERS
+// ============================================================
+
+async function getDefenseBreak(
+  threadID,
+  combatID,
+  targetID
+) {
+  const effect =
+    await getEffect(
+      threadID,
+      combatID,
+      targetID,
+      EFFECT_IDS.DEFENSE_BREAK
+    );
+
+  if (!effect) return 0;
+
+  return clamp(
+    safeNumber(
+      effect.magnitude,
+      0
+    ),
+    0,
+    1
+  );
+}
+
+async function getDodgeBonus(
+  threadID,
+  combatID,
+  targetID
+) {
+  const effect =
+    await getEffect(
+      threadID,
+      combatID,
+      targetID,
+      EFFECT_IDS.DODGE_UP
+    );
+
+  if (!effect) return 0;
+
+  return clamp(
+    safeNumber(
+      effect.magnitude,
+      0
+    ),
+    0,
+    1
+  );
+}
+
+async function getDamageMultiplier(
+  threadID,
+  combatID,
+  targetID
+) {
+  const effect =
+    await getEffect(
+      threadID,
+      combatID,
+      targetID,
+      EFFECT_IDS.DAMAGE_UP
+    );
+
+  if (!effect) return 1;
+
+  return Math.max(
+    0,
+    safeNumber(
+      effect.magnitude,
+      1
+    )
+  );
+}
+
+async function getDamageReduction(
+  threadID,
+  combatID,
+  targetID
+) {
+  const effect =
+    await getEffect(
+      threadID,
+      combatID,
+      targetID,
+      EFFECT_IDS.DAMAGE_REDUCTION
+    );
+
+  if (!effect) return 0;
+
+  return clamp(
+    safeNumber(
+      effect.magnitude,
+      0
+    ),
+    0,
+    1
+  );
+}
+
 // ============================================================
 // DEFENSE HEALTH / BARK SKIN
 // ============================================================
@@ -1589,44 +2040,49 @@ async function addDefenseHealth(
   const value =
     Math.max(
       0,
-      Math.round(Number(amount) || 0)
+      Math.round(
+        safeNumber(amount, 0)
+      )
+    );
+
+  const current =
+    await getDefenseHealth(
+      threadID,
+      combatID,
+      targetID
     );
 
   if (!value) {
     return {
       amount: 0,
-      total: await getDefenseHealth(
-        threadID,
-        combatID,
-        targetID
-      ),
+      total: current,
     };
   }
+
+  const total =
+    current + value;
 
   await applyEffect(
     threadID,
     combatID,
     targetID,
     {
-      id: EFFECT_IDS.DEFENSE_HEALTH,
+      id:
+        EFFECT_IDS.DEFENSE_HEALTH,
 
       duration: 999,
 
-      magnitude: value,
+      magnitude: total,
 
       data: {
-        defenseHealth: value,
+        defenseHealth: total,
       },
     }
   );
 
   return {
     amount: value,
-    total: await getDefenseHealth(
-      threadID,
-      combatID,
-      targetID
-    ),
+    total,
   };
 }
 
@@ -1647,27 +2103,30 @@ async function getDefenseHealth(
 
   return Math.max(
     0,
-    Number(
-      effect.data.defenseHealth ??
-        effect.magnitude ??
-        0
+    safeNumber(
+      effect.data
+        ?.defenseHealth ??
+        effect.magnitude,
+      0
     )
   );
 }
 
-/**
- * Defense Health absorbs incoming damage before HP.
- */
 async function absorbDefenseHealth(
   threadID,
   combatID,
   targetID,
   damage
 ) {
-  let incoming =
+  const incoming =
     Math.max(
       0,
-      Math.round(Number(damage) || 0)
+      Math.round(
+        safeNumber(
+          damage,
+          0
+        )
+      )
     );
 
   const current =
@@ -1677,16 +2136,23 @@ async function absorbDefenseHealth(
       targetID
     );
 
-  if (!current || !incoming) {
+  if (
+    current <= 0 ||
+    incoming <= 0
+  ) {
     return {
       absorbed: 0,
       remainingDamage: incoming,
-      remainingDefenseHealth: current,
+      remainingDefenseHealth:
+        current,
     };
   }
 
   const absorbed =
-    Math.min(current, incoming);
+    Math.min(
+      current,
+      incoming
+    );
 
   const remaining =
     current - absorbed;
@@ -1704,11 +2170,16 @@ async function absorbDefenseHealth(
       combatID,
       targetID,
       {
-        id: EFFECT_IDS.DEFENSE_HEALTH,
+        id:
+          EFFECT_IDS.DEFENSE_HEALTH,
+
         duration: 999,
+
         magnitude: remaining,
+
         data: {
-          defenseHealth: remaining,
+          defenseHealth:
+            remaining,
         },
       }
     );
@@ -1718,15 +2189,12 @@ async function absorbDefenseHealth(
     absorbed,
     remainingDamage:
       incoming - absorbed,
+
     remainingDefenseHealth:
       remaining,
   };
 }
 
-/**
- * Converts overhealing into Defense Health when Bark Skin
- * is active.
- */
 async function convertOverheal(
   threadID,
   combatID,
@@ -1738,25 +2206,44 @@ async function convertOverheal(
   const amount =
     Math.max(
       0,
-      Number(healing) || 0
+      safeNumber(
+        healing,
+        0
+      )
     );
 
   const hp =
     Math.max(
       0,
-      Number(currentHp) || 0
+      safeNumber(
+        currentHp,
+        0
+      )
     );
 
   const max =
     Math.max(
       0,
-      Number(maxHp) || 0
+      safeNumber(
+        maxHp,
+        0
+      )
+    );
+
+  const actualHealing =
+    Math.min(
+      amount,
+      Math.max(
+        0,
+        max - hp
+      )
     );
 
   const overheal =
     Math.max(
       0,
-      hp + amount - max
+      amount -
+        actualHealing
     );
 
   const barkSkin =
@@ -1767,22 +2254,16 @@ async function convertOverheal(
       EFFECT_IDS.BARK_SKIN
     );
 
-  if (!barkSkin || overheal <= 0) {
+  if (
+    !barkSkin ||
+    overheal <= 0
+  ) {
     return {
-      actualHealing:
-        Math.min(amount, Math.max(0, max - hp)),
-      overheal: barkSkin
-        ? overheal
-        : 0,
+      actualHealing,
+      overheal,
       defenseHealth: 0,
     };
   }
-
-  const actualHealing =
-    Math.min(
-      amount,
-      Math.max(0, max - hp)
-    );
 
   await addDefenseHealth(
     threadID,
@@ -1794,7 +2275,8 @@ async function convertOverheal(
   return {
     actualHealing,
     overheal,
-    defenseHealth: overheal,
+    defenseHealth:
+      overheal,
   };
 }
 
@@ -1809,13 +2291,19 @@ function calculateLifesteal(
   const dealt =
     Math.max(
       0,
-      Number(damage) || 0
+      safeNumber(
+        damage,
+        0
+      )
     );
 
   const percent =
     Math.max(
       0,
-      Number(ratio) || 0
+      safeNumber(
+        ratio,
+        0
+      )
     );
 
   return Math.max(
@@ -1831,52 +2319,118 @@ function calculateLifesteal(
 // ============================================================
 
 function describeEffect(effect) {
-  if (!effect) return "Unknown effect.";
+  if (!effect) {
+    return "Unknown effect.";
+  }
 
   const labels = {
-    [EFFECT_IDS.BURN]: "Burning",
-    [EFFECT_IDS.POISON]: "Poisoned",
-    [EFFECT_IDS.BLEED]: "Bleeding",
-    [EFFECT_IDS.NECROTIC]: "Necrotic",
-    [EFFECT_IDS.STUN]: "Stunned",
-    [EFFECT_IDS.ROOT]: "Rooted",
-    [EFFECT_IDS.SLOW]: "Slowed",
-    [EFFECT_IDS.BLIND]: "Blinded",
-    [EFFECT_IDS.DIVINE_SHIELD]: "Divine Shield",
-    [EFFECT_IDS.ICE_WALL]: "Heaven Piercing Ice Wall",
-    [EFFECT_IDS.INFINITE_DARKNESS]: "Infinite Darkness",
-    [EFFECT_IDS.SHADOW_BODY]: "Shadow Body",
-    [EFFECT_IDS.DAMAGE_UP]: "Damage Up",
-    [EFFECT_IDS.DEFENSE_UP]: "Defense Up",
-    [EFFECT_IDS.AGILITY_UP]: "Agility Up",
-    [EFFECT_IDS.MANA_REGEN_UP]: "Mana Regeneration",
-    [EFFECT_IDS.LIFESTEAL]: "Lifesteal",
-    [EFFECT_IDS.BARK_SKIN]: "Bark Skin",
-    [EFFECT_IDS.DAMAGE_REDUCTION]: "Damage Reduction",
-    [EFFECT_IDS.DODGE_UP]: "Dodge Up",
-    [EFFECT_IDS.DEFENSE_BREAK]: "Defense Break",
-    [EFFECT_IDS.WEAKNESS]: "Weakened",
-    [EFFECT_IDS.DEFENSE_HEALTH]: "Defense Health",
-    [EFFECT_IDS.SHADOW_DISABLED]: "Shadow Disabled",
+    [EFFECT_IDS.BURN]:
+      "Burning",
+
+    [EFFECT_IDS.POISON]:
+      "Poisoned",
+
+    [EFFECT_IDS.BLEED]:
+      "Bleeding",
+
+    [EFFECT_IDS.NECROTIC]:
+      "Necrotic",
+
+    [EFFECT_IDS.STUN]:
+      "Stunned",
+
+    [EFFECT_IDS.ROOT]:
+      "Rooted",
+
+    [EFFECT_IDS.SLOW]:
+      "Slowed",
+
+    [EFFECT_IDS.BLIND]:
+      "Blinded",
+
+    [EFFECT_IDS.DIVINE_SHIELD]:
+      "Divine Shield",
+
+    [EFFECT_IDS.ICE_WALL]:
+      "Heaven Piercing Ice Wall",
+
+    [EFFECT_IDS.INFINITE_DARKNESS]:
+      "Infinite Darkness",
+
+    [EFFECT_IDS.SHADOW_BODY]:
+      "Shadow Body",
+
+    [EFFECT_IDS.DAMAGE_UP]:
+      "Damage Up",
+
+    [EFFECT_IDS.DEFENSE_UP]:
+      "Defense Up",
+
+    [EFFECT_IDS.AGILITY_UP]:
+      "Agility Up",
+
+    [EFFECT_IDS.MANA_REGEN_UP]:
+      "Mana Regeneration",
+
+    [EFFECT_IDS.LIFESTEAL]:
+      "Lifesteal",
+
+    [EFFECT_IDS.BARK_SKIN]:
+      "Bark Skin",
+
+    [EFFECT_IDS.DAMAGE_REDUCTION]:
+      "Damage Reduction",
+
+    [EFFECT_IDS.DODGE_UP]:
+      "Dodge Up",
+
+    [EFFECT_IDS.DEFENSE_BREAK]:
+      "Defense Break",
+
+    [EFFECT_IDS.WEAKNESS]:
+      "Weakened",
+
+    [EFFECT_IDS.DEFENSE_HEALTH]:
+      "Defense Health",
+
+    [EFFECT_IDS.SHADOW_DISABLED]:
+      "Shadow Disabled",
   };
 
   const name =
     labels[effect.id] ||
-    effect.id;
+    effect.id ||
+    "Unknown Effect";
 
   const parts = [name];
 
-  if (effect.stacks > 1) {
-    parts.push(`x${effect.stacks}`);
+  if (
+    safeNumber(
+      effect.stacks,
+      1
+    ) > 1
+  ) {
+    parts.push(
+      `x${effect.stacks}`
+    );
   }
 
   if (
     effect.remainingTurns != null &&
-    effect.remainingTurns < 900
+    safeNumber(
+      effect.remainingTurns,
+      0
+    ) < 900
   ) {
+    const turns =
+      safeNumber(
+        effect.remainingTurns,
+        0
+      );
+
     parts.push(
-      `${effect.remainingTurns} turn${
-        effect.remainingTurns === 1
+      `${turns} turn${
+        turns === 1
           ? ""
           : "s"
       }`
@@ -1884,11 +2438,14 @@ function describeEffect(effect) {
   }
 
   if (
-    effect.id === EFFECT_IDS.ICE_WALL
+    effect.id ===
+    EFFECT_IDS.ICE_WALL
   ) {
     const blocks =
-      Number(
-        effect.data?.blockDamageEvents || 0
+      safeNumber(
+        effect.data
+          ?.blockDamageEvents,
+        0
       );
 
     if (blocks > 0) {
@@ -1899,68 +2456,84 @@ function describeEffect(effect) {
   }
 
   if (
-    effect.id === EFFECT_IDS.DEFENSE_HEALTH
+    effect.id ===
+    EFFECT_IDS.DEFENSE_HEALTH
   ) {
     const defense =
-      Number(
-        effect.data?.defenseHealth ||
-          effect.magnitude ||
-          0
+      safeNumber(
+        effect.data
+          ?.defenseHealth ??
+          effect.magnitude,
+        0
       );
 
     parts.push(
-      `${Math.round(defense)} HP`
+      `${Math.round(
+        defense
+      )} HP`
     );
   }
 
-  return parts.join(" · ");
+  return parts.join(
+    " · "
+  );
 }
 
 // ============================================================
-// INTERNAL HELPERS
+// INTERNAL NORMALIZATION
 // ============================================================
 
 function normalizeDbEffect(row) {
   return {
     dbId: row.id,
+
     id: row.effect_id,
-    targetId: row.target_id,
-    source: row.source_id,
-    sourceType: row.source_type,
-    type: row.effect_type,
-    stacks: Number(row.stacks || 1),
-    magnitude: Number(row.magnitude || 0),
-    duration: Number(row.duration || 0),
-    remainingTurns: Number(
-      row.remaining_turns || 0
-    ),
+
+    targetId:
+      row.target_id,
+
+    source:
+      row.source_id,
+
+    sourceType:
+      row.source_type,
+
+    type:
+      row.effect_type,
+
+    stacks:
+      safeNumber(
+        row.stacks,
+        1
+      ),
+
+    magnitude:
+      safeNumber(
+        row.magnitude,
+        0
+      ),
+
+    duration:
+      safeNumber(
+        row.duration,
+        0
+      ),
+
+    remainingTurns:
+      safeNumber(
+        row.remaining_turns,
+        0
+      ),
+
     data:
-      typeof row.data === "string"
-        ? safeJsonParse(row.data, {})
-        : row.data || {},
-    createdAt: row.created_at,
+      safeJsonParse(
+        row.data,
+        {}
+      ),
+
+    createdAt:
+      row.created_at,
   };
-}
-
-function safeJsonParse(value, fallback) {
-  if (
-    value === null ||
-    value === undefined
-  ) {
-    return fallback;
-  }
-
-  if (
-    typeof value === "object"
-  ) {
-    return value;
-  }
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
-  }
 }
 
 // ============================================================
@@ -2003,7 +2576,13 @@ module.exports = {
 
   isStunned,
   isRooted,
+  isSilenced,
   isShadowDisabled,
+
+  getDefenseBreak,
+  getDodgeBonus,
+  getDamageMultiplier,
+  getDamageReduction,
 
   addDefenseHealth,
   getDefenseHealth,
