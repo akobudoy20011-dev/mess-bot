@@ -3161,252 +3161,241 @@ async function handleAmbush(
 
 
 /* =========================================================
-   HELP
+   HELP CATEGORIES
 ========================================================= */
+
+const HELP_CATEGORIES = {
+  character: {
+    emoji: "👤",
+    title: "👤 CHARACTER",
+    summary: "Profile, class, skills, inventory, equipment.",
+    lines: [
+      "▶ !rpg profile — View your character and stats.",
+      "▶ !rpg class — View available classes.",
+      "▶ !rpg class <name> — Choose your class.",
+      "▶ !rpg skills — View your class skills.",
+      "▶ !rpg inventory — View your RPG inventory.",
+      "▶ !rpg equipment — View equipped items.",
+    ],
+  },
+
+  affinities: {
+    emoji: "🌟",
+    title: "🌟 AFFINITIES",
+    summary: "Your elemental/affinity path and mastery.",
+    lines: [
+      "▶ !rpg affinity — View your affinities and mastery.",
+      "▶ !rpg affinity list — View every affinity in Eclipse.",
+      "▶ !rpg affinity <name> — Inspect an affinity.",
+      "▶ !rpg affinity learn <name> — Unlock an affinity.",
+      "▶ !rpg affinity mastery <name> — View mastery progression.",
+    ],
+  },
+
+  magic: {
+    emoji: "🔮",
+    title: "🔮 MAGIC",
+    summary: "Spells, spellbook, and utility casting.",
+    lines: [
+      "▶ !rpg magic — View your magic overview.",
+      "▶ !rpg spells — View your spellbook.",
+      "▶ !rpg spells <affinity> — View spells for an affinity.",
+      "▶ !rpg spell <name> — Cast a spell during combat.",
+      "▶ !rpg learn <spell> — Learn a spell.",
+      "▶ !rpg cast <spell> — Cast a utility spell.",
+    ],
+  },
+
+  specials: {
+    emoji: "🌟",
+    title: "🌟 SPECIAL MOVES",
+    summary: "Unlocked and available special moves.",
+    lines: [
+      "▶ !rpg special — View your unlocked special moves.",
+      "▶ !rpg special all — View every special move.",
+      "▶ !rpg special <name> — Inspect or cast a special move.",
+    ],
+  },
+
+  adventure: {
+    emoji: "⚔️",
+    title: "⚔️ ADVENTURE",
+    summary: "Hunting, exploring, and combat actions.",
+    lines: [
+      "▶ !rpg hunt — Start a battle.",
+      "▶ !rpg explore — Explore the current region.",
+      "▶ !rpg attack — Attack during combat.",
+      "▶ !rpg skill <name> — Use a combat skill.",
+      "▶ !rpg spell <name> — Use a spell during combat.",
+      "▶ !rpg special <name> — Use a special move during combat.",
+      "▶ !rpg defend — Defend against the next attack.",
+      "▶ !rpg item <name> — Use an item during combat.",
+      "▶ !rpg rest — Restore HP, MP, and stamina.",
+    ],
+  },
+
+  world: {
+    emoji: "🌍",
+    title: "🌍 WORLD",
+    summary: "Map, regions, season, weather, travel.",
+    lines: [
+      "▶ !rpg map — View world regions.",
+      "▶ !rpg locations <region> — View locations in a region.",
+      "▶ !rpg world — View season, weather, and world conditions.",
+      "▶ !rpg season — View the current season.",
+      "▶ !rpg weather — View the current weather.",
+      "▶ !rpg march <location> — Travel to another location.",
+      "▶ !rpg march status — Check your march.",
+    ],
+  },
+
+  domain: {
+    emoji: "🏰",
+    title: "🏰 DOMAIN",
+    summary: "Property, buildings, and defenses.",
+    lines: [
+      "▶ !rpg property — View your domain.",
+      "▶ !rpg domain — Alias for !rpg property.",
+      "▶ !rpg property buy <tier> — Purchase or upgrade property.",
+      "▶ !rpg build <building> — Build or upgrade a building.",
+      "▶ !rpg defense <part> — Improve defenses.",
+    ],
+  },
+
+  kingdoms: {
+    emoji: "🏰",
+    title: "🏰 KINGDOMS & DIPLOMACY",
+    summary: "Kingdom lore, pledging, wars, and reputation.",
+    lines: [
+      "▶ !rpg kingdom — View the kingdoms of Eclipse.",
+      "▶ !rpg kingdom <name> — View kingdom information.",
+      "▶ !rpg kingdom pledge <name> — Pledge allegiance.",
+      "▶ !rpg kingdoms — View kingdom quests and your reputation.",
+      "▶ !rpg pledge <name> — Pledge allegiance (reputation track).",
+      "▶ !rpg diplomacy war <a> <b> — Declare kingdom war.",
+      "▶ !rpg diplomacy peace <a> <b> — Offer peace.",
+    ],
+  },
+
+  army: {
+    emoji: "⚔️",
+    title: "⚔️ ARMY",
+    summary: "Troops, training, formations, regiments.",
+    lines: [
+      "▶ !rpg army — View your army.",
+      "▶ !rpg army train <unit> <amount> — Train troops.",
+      "▶ !rpg army formation <name> — Change formation.",
+      "▶ !rpg army regiment — View regiments.",
+      "▶ !rpg army regiment create <name> <unit> <amount> — Form a regiment.",
+    ],
+  },
+
+  scouting: {
+    emoji: "🔭",
+    title: "🔭 SCOUTING & WARFARE",
+    summary: "Scouting, raiding, and ambushing other players.",
+    lines: [
+      "▶ !rpg scout <location> — Scout a location.",
+      "▶ !rpg raid <location> — Raid a location.",
+      "▶ !rpg ambush <userID> — Ambush another player's army.",
+    ],
+  },
+
+  quests: {
+    emoji: "📜",
+    title: "📜 QUESTS",
+    summary: "Track and claim your current quest.",
+    lines: [
+      "▶ !rpg quest — View your current quest.",
+      "▶ !rpg quest claim — Claim a completed quest.",
+    ],
+  },
+
+  dungeons: {
+    emoji: "🏰",
+    title: "🏰 DUNGEONS",
+    summary: "Enter and advance through dungeons.",
+    lines: [
+      "▶ !rpg dungeon — View dungeon status.",
+      "▶ !rpg dungeon enter <key> — Enter a dungeon.",
+      "▶ !rpg dungeon advance — Advance through a dungeon.",
+    ],
+  },
+};
 
 async function handleHelp(
   api,
-  event
+  event,
+  args = []
 ) {
+  const category =
+    normalizeKey(
+      args[0] || ""
+    );
+
+  if (
+    category &&
+    HELP_CATEGORIES[category]
+  ) {
+    const section =
+      HELP_CATEGORIES[category];
+
+    await send(
+      api,
+      event.threadID,
+      box(
+        section.title,
+        [
+          ...section.lines,
+          "",
+          "◀ Back to categories: !rpg help",
+        ]
+      )
+    );
+
+    return;
+  }
+
+  if (category) {
+    await send(
+      api,
+      event.threadID,
+      errorBox([
+        "Unknown help category: " +
+          category,
+
+        "",
+
+        "Use !rpg help to see all categories.",
+      ])
+    );
+
+    return;
+  }
+
+  const lines =
+    Object.entries(
+      HELP_CATEGORIES
+    ).map(
+      ([key, section]) =>
+        section.emoji +
+        " !rpg help " +
+        key +
+        " — " +
+        section.summary
+    );
+
+  lines.push(
+    "",
+    "Use !rpg help <category> to view its commands."
+  );
+
   await send(
     api,
     event.threadID,
     box(
-      "🌑 ECLIPSE RPG",
-      [
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "👤 CHARACTER",
-
-        "▶ !rpg profile",
-        "View your character and stats.",
-
-        "▶ !rpg class",
-        "View available classes.",
-
-        "▶ !rpg class <name>",
-        "Choose your class.",
-
-        "▶ !rpg skills",
-        "View your class skills.",
-
-        "▶ !rpg inventory",
-        "View your RPG inventory.",
-
-        "▶ !rpg equipment",
-        "View equipped items.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "🌟 AFFINITIES",
-
-        "▶ !rpg affinity",
-        "View your affinities and mastery.",
-
-        "▶ !rpg affinity list",
-        "View every affinity in Eclipse.",
-
-        "▶ !rpg affinity <name>",
-        "Inspect an affinity.",
-
-        "▶ !rpg affinity learn <name>",
-        "Unlock an affinity.",
-
-        "▶ !rpg affinity mastery <name>",
-        "View affinity mastery progression.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "🔮 MAGIC",
-
-        "▶ !rpg magic",
-        "View your magic overview.",
-
-        "▶ !rpg spells",
-        "View your spellbook.",
-
-        "▶ !rpg spells <affinity>",
-        "View spells for an affinity.",
-
-        "▶ !rpg spell <name>",
-        "Cast a spell during combat.",
-
-        "▶ !rpg learn <spell>",
-        "Learn a spell.",
-
-        "▶ !rpg cast <spell>",
-        "Cast a utility spell.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "🌟 SPECIAL MOVES",
-
-        "▶ !rpg special",
-        "View your unlocked special moves.",
-
-        "▶ !rpg special all",
-        "View every special move.",
-
-        "▶ !rpg special <name>",
-        "Inspect a special move.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "⚔️ ADVENTURE",
-
-        "▶ !rpg hunt",
-        "Start a battle.",
-
-        "▶ !rpg explore",
-        "Explore the current region.",
-
-        "▶ !rpg attack",
-        "Attack during combat.",
-
-        "▶ !rpg skill <name>",
-        "Use a combat skill.",
-
-        "▶ !rpg spell <name>",
-        "Use a spell during combat.",
-
-        "▶ !rpg special <name>",
-        "Use a special move during combat.",
-
-        "▶ !rpg defend",
-        "Defend against the next attack.",
-
-        "▶ !rpg item <name>",
-        "Use an item during combat.",
-
-        "▶ !rpg rest",
-        "Restore HP, MP, and stamina.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "🌍 WORLD",
-
-        "▶ !rpg map",
-        "View world regions.",
-
-        "▶ !rpg locations <region>",
-        "View locations in a region.",
-
-        "▶ !rpg world",
-        "View current season, weather, and world conditions.",
-
-        "▶ !rpg season",
-        "View the current season.",
-
-        "▶ !rpg weather",
-        "View the current weather.",
-
-        "▶ !rpg march <location>",
-        "Travel to another location.",
-
-        "▶ !rpg march status",
-        "Check your march.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "🏰 DOMAIN",
-
-        "▶ !rpg property",
-        "View your domain.",
-
-        "▶ !rpg domain",
-        "Alias for !rpg property.",
-
-        "▶ !rpg property buy <tier>",
-        "Purchase or upgrade property.",
-
-        "▶ !rpg build <building>",
-        "Build or upgrade a building.",
-
-        "▶ !rpg defense <part>",
-        "Improve defenses.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "🏰 KINGDOMS & DIPLOMACY",
-
-        "▶ !rpg kingdom",
-        "View the kingdoms of Eclipse.",
-
-        "▶ !rpg kingdom <name>",
-        "View kingdom information.",
-
-        "▶ !rpg kingdom pledge <name>",
-        "Pledge allegiance.",
-
-        "▶ !rpg kingdoms",
-        "View kingdom quests and your reputation.",
-
-        "▶ !rpg pledge <name>",
-        "Pledge allegiance (kingdom-quest reputation track).",
-
-        "▶ !rpg diplomacy war <a> <b>",
-        "Declare kingdom war.",
-
-        "▶ !rpg diplomacy peace <a> <b>",
-        "Offer peace.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "⚔️ ARMY",
-
-        "▶ !rpg army",
-        "View your army.",
-
-        "▶ !rpg army train <unit> <amount>",
-        "Train troops.",
-
-        "▶ !rpg army formation <name>",
-        "Change formation.",
-
-        "▶ !rpg army regiment",
-        "View regiments.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "🔭 SCOUTING & WARFARE",
-
-        "▶ !rpg scout <location>",
-        "Scout a location.",
-
-        "▶ !rpg raid <location>",
-        "Raid a location.",
-
-        "▶ !rpg ambush <userID>",
-        "Ambush another player's army.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "📜 QUESTS",
-
-        "▶ !rpg quest",
-        "View your current quest.",
-
-        "▶ !rpg quest claim",
-        "Claim a completed quest.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "🏰 DUNGEONS",
-
-        "▶ !rpg dungeon",
-        "View dungeon status.",
-
-        "▶ !rpg dungeon enter <key>",
-        "Enter a dungeon.",
-
-        "▶ !rpg dungeon advance",
-        "Advance through a dungeon.",
-
-        "━━━━━━━━━━━━━━━━━━━━━━",
-
-        "Use !rpg help anytime to see this guide.",
-      ]
+      "🌑 ECLIPSE RPG — HELP",
+      lines
     )
   );
 }
@@ -3543,7 +3532,8 @@ async function handleRpgCommand(
     ) {
       await handleHelp(
         api,
-        event
+        event,
+        args
       );
     }
 
