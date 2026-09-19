@@ -191,7 +191,9 @@ const WEATHER = {
 // ============================================================
 
 function normalizeWeather(value) {
-  if (!value) return "clear";
+  if (!value) {
+    return "clear";
+  }
 
   const id = String(value)
     .trim()
@@ -206,9 +208,7 @@ function normalizeWeather(value) {
 // ============================================================
 
 function getWeather(weatherID) {
-  return WEATHER[
-    normalizeWeather(weatherID)
-  ];
+  return WEATHER[normalizeWeather(weatherID)];
 }
 
 function getAllWeather() {
@@ -219,13 +219,16 @@ function getWeatherAffinityMultiplier(
   weatherID,
   affinityID
 ) {
-  const weather =
-    getWeather(weatherID);
+  const weather = getWeather(weatherID);
+
+  const affinityKey = String(
+    affinityID || ""
+  )
+    .trim()
+    .toLowerCase();
 
   return Number(
-    weather.affinities?.[
-      String(affinityID || "").toLowerCase()
-    ] || 1
+    weather.affinities?.[affinityKey] ?? 1
   );
 }
 
@@ -234,13 +237,13 @@ function getWeatherAffinityMultiplier(
 // ============================================================
 
 function weightedRandom(weights) {
-  const entries =
-    Object.entries(weights || {})
-      .filter(
-        ([weather, weight]) =>
-          WEATHER[weather] &&
-          Number(weight) > 0
-      );
+  const entries = Object.entries(
+    weights || {}
+  ).filter(
+    ([weather, weight]) =>
+      WEATHER[weather] &&
+      Number(weight) > 0
+  );
 
   if (!entries.length) {
     return "clear";
@@ -313,8 +316,19 @@ async function setWorldWeather(
   weatherID,
   options = {}
 ) {
+  const threadKey = String(threadID);
   const weather =
     normalizeWeather(weatherID);
+
+  /*
+   * Use the current world season when creating
+   * the world-state row instead of always inserting
+   * "spring".
+   */
+  const currentSeason =
+    await getWorldSeason(threadKey);
+
+  const now = Date.now();
 
   const result = await db.query(
     `
@@ -326,16 +340,18 @@ async function setWorldWeather(
           updated_at
         )
       VALUES
-        ($1, 'spring', $2, NOW())
+        ($1, $2, $3, $4)
       ON CONFLICT (thread_id)
       DO UPDATE SET
         weather = EXCLUDED.weather,
-        updated_at = NOW()
+        updated_at = EXCLUDED.updated_at
       RETURNING *
     `,
     [
-      String(threadID),
+      threadKey,
+      currentSeason,
       weather,
+      now,
     ]
   );
 
@@ -344,7 +360,8 @@ async function setWorldWeather(
     weather,
     changedByNature:
       options.changedByNature === true,
-    reason: options.reason || null,
+    reason:
+      options.reason || null,
   };
 }
 
@@ -386,22 +403,27 @@ async function getWorldAffinityMultiplier(
   const weather =
     await getWorldWeather(threadID);
 
+  const affinityKey = String(
+    affinityID || ""
+  )
+    .trim()
+    .toLowerCase();
+
   const seasonMultiplier =
-    getSeason(
-      season
-    )?.affinities?.[
-      String(affinityID || "").toLowerCase()
-    ] || 1;
+    Number(
+      getSeason(season)?.affinities?.[
+        affinityKey
+      ] ?? 1
+    );
 
   const weatherMultiplier =
     getWeatherAffinityMultiplier(
       weather,
-      affinityID
+      affinityKey
     );
 
-  return Number(
-    seasonMultiplier
-  ) * Number(
+  return (
+    seasonMultiplier *
     weatherMultiplier
   );
 }
@@ -481,16 +503,34 @@ async function formatWorldConditions(
       threadID
     );
 
+  const seasonData =
+    state.seasonData ||
+    getSeason(state.season);
+
+  const weatherData =
+    state.weatherData ||
+    getWeather(state.weather);
+
   return [
     "╔══════════════════════╗",
     "      ECLIPSE WORLD",
     "╚══════════════════════╝",
     "",
-    `${state.seasonData.symbol} Season: ${state.seasonData.name}`,
-    `${state.weatherData.symbol} Weather: ${state.weatherData.name}`,
+    `${seasonData?.symbol || "🌍"} Season: ${
+      seasonData?.name ||
+      state.season ||
+      "Unknown"
+    }`,
+    `${weatherData?.symbol || "🌤️"} Weather: ${
+      weatherData?.name ||
+      state.weather ||
+      "Unknown"
+    }`,
     "",
-    state.seasonData.description,
-    state.weatherData.description,
+    seasonData?.description ||
+      "The world's seasonal conditions are shifting.",
+    weatherData?.description ||
+      "The weather is difficult to read.",
   ].join("\n");
 }
 
