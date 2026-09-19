@@ -1,4 +1,3 @@
-index v.2
 "use strict";
 
 const { reply } = require("../util");
