@@ -56,7 +56,7 @@ const {
   getPlayerKingdom,
   getKingdomReputation,
   canPledgeToKingdom,
-} = require("./kingdom-quests");
+} = require("./kingdom-quest");
 
 const kingdoms = require("./kingdoms");
 const affinities = require("./affinities");
