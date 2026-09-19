@@ -1,3 +1,5 @@
+"use strict";
+
 const { reply } = require("../util");
 
 const {
@@ -77,14 +79,68 @@ const {
   raidLocation,
 } = require("./warfare");
 
+/* =========================================================
+   LEGACY / COMPATIBILITY MAGIC
+========================================================= */
+
 const {
   AFFINITY_TIERS,
   SCHOOLS,
-  getAffinity,
+  getAffinity: getLegacyAffinity,
   getLearnedSpells,
   getSpell,
   learnSpell,
 } = require("./magic");
+
+/* =========================================================
+   NEW AFFINITY SYSTEM
+========================================================= */
+
+const {
+  AFFINITY_TIERS: NEW_AFFINITY_TIERS,
+  getAffinity,
+  getAllAffinities,
+  getPlayerAffinity,
+  getPlayerAffinities,
+  getPrimaryAffinity,
+  addAffinityMastery,
+  unlockAffinity,
+  formatAffinity,
+} = require("./affinities");
+
+/* =========================================================
+   SPECIAL MOVES
+========================================================= */
+
+const {
+  getSpecial,
+  getAllSpecials,
+  getSpecialsByAffinity,
+  getPlayerSpecials,
+  hasSpecial,
+  formatSpecial,
+} = require("./specials");
+
+/* =========================================================
+   SEASONS
+========================================================= */
+
+const {
+  getWorldSeason,
+  getSeason,
+  getAllSeasons,
+  formatSeason,
+} = require("./seasons");
+
+/* =========================================================
+   WEATHER
+========================================================= */
+
+const {
+  getWorldWeather,
+  getWorldConditions,
+  formatWorldConditions,
+} = require("./weather");
 
 /* =========================================================
    KINGDOMS / DIPLOMACY
@@ -105,6 +161,10 @@ const {
   offerPeace,
 } = require("./diplomacy");
 
+/* =========================================================
+   UTILS
+========================================================= */
+
 const {
   box,
   errorBox,
@@ -121,17 +181,44 @@ const {
 ========================================================= */
 
 function playerName(state) {
-  return state.user.display_name || "Player " + state.user.user_id;
+  return (
+    state.user.display_name ||
+    "Player " + state.user.user_id
+  );
 }
 
 function classLine(player) {
-  const definition = getClass(player.character_class);
+  const definition =
+    getClass(player.character_class);
 
-  return definition.emoji + " " + definition.name;
+  return (
+    definition.emoji +
+    " " +
+    definition.name
+  );
 }
 
 function xpForNextLevel(level) {
-  return Math.max(100, Number(level || 1) * 100);
+  return Math.max(
+    100,
+    Number(level || 1) * 100
+  );
+}
+
+function safeNumber(value, fallback = 0) {
+  const number = Number(value);
+
+  return Number.isFinite(number)
+    ? number
+    : fallback;
+}
+
+function prettyName(value) {
+  return String(value || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, char =>
+      char.toUpperCase()
+    );
 }
 
 
@@ -139,61 +226,191 @@ function xpForNextLevel(level) {
    PROFILE
 ========================================================= */
 
-function profileText(state, property) {
+async function profileText(state, property) {
   const player = state.player;
 
-  const level = Number(state.user.level || 1);
-  const xp = Number(state.user.xp || 0);
-  const nextXp = xpForNextLevel(level);
+  const level =
+    Number(state.user.level || 1);
 
-  const tier = propertyTier(player.property_tier);
+  const xp =
+    Number(state.user.xp || 0);
+
+  const nextXp =
+    xpForNextLevel(level);
+
+  const tier =
+    propertyTier(
+      player.property_tier
+    );
+
+  let affinityLine =
+    "✨ Affinity: Unknown";
+
+  try {
+    const primary =
+      await getPrimaryAffinity(
+        state.player.thread_id ||
+          state.threadID ||
+          null,
+        state.user.user_id
+      );
+
+    if (primary) {
+      affinityLine =
+        "✨ Affinity: " +
+        (
+          primary.name ||
+          primary.affinity_name ||
+          prettyName(
+            primary.affinity_id
+          )
+        ) +
+        " · " +
+        (
+          primary.tier_name ||
+          primary.tier ||
+          "None"
+        );
+    }
+  } catch {
+    /*
+     * Profile must still work if the
+     * affinity tables have not initialized yet.
+     */
+  }
 
   return box("🌑 ECLIPSE PROFILE", [
     "👤 " + playerName(state),
 
-    classLine(player) + " · Level " + level,
+    classLine(player) +
+      " · Level " +
+      level,
 
-    statLine("✨", "XP", xp % nextXp, nextXp),
-    statLine("❤️", "HP", player.hp, player.max_hp),
-    statLine("🔷", "MP", player.mp, player.max_mp),
-    statLine("⚡", "STA", player.stamina, player.max_stamina),
+    statLine(
+      "✨",
+      "XP",
+      xp % nextXp,
+      nextXp
+    ),
+
+    statLine(
+      "❤️",
+      "HP",
+      player.hp,
+      player.max_hp
+    ),
+
+    statLine(
+      "🔷",
+      "MP",
+      player.mp,
+      player.max_mp
+    ),
+
+    statLine(
+      "⚡",
+      "STA",
+      player.stamina,
+      player.max_stamina
+    ),
 
     "",
 
-    "⚔️ STR " + player.strength +
-      " · 🛡️ DEF " + player.defense,
+    "⚔️ STR " +
+      player.strength +
+      " · 🛡️ DEF " +
+      player.defense,
 
-    "🏃 AGI " + player.agility +
-      " · 🧠 INT " + player.intelligence,
+    "🏃 AGI " +
+      player.agility +
+      " · 🧠 INT " +
+      player.intelligence,
 
-    "🍀 LUCK " + player.luck +
-      " · ✨ Renown " + player.renown,
+    "🍀 LUCK " +
+      player.luck +
+      " · ✨ Renown " +
+      player.renown,
+
+    "",
+
+    affinityLine,
 
     "",
 
     "🗺️ " +
-      (REGIONS[player.region_id]?.emoji || "🗺️") +
+      (
+        REGIONS[
+          player.region_id
+        ]?.emoji ||
+        "🗺️"
+      ) +
       " " +
-      (REGIONS[player.region_id]?.name || player.region_id),
+      (
+        REGIONS[
+          player.region_id
+        ]?.name ||
+        player.region_id
+      ),
 
     "📍 Location: " +
-      (player.location_id || "unknown"),
+      (
+        player.location_id ||
+        "unknown"
+      ),
 
-    "🏰 Domain: " + tier.name,
+    "🏰 Domain: " +
+      tier.name,
 
     "💰 Wallet: " +
-      formatNumber(state.user.balance) +
+      formatNumber(
+        state.user.balance
+      ) +
       " coins",
+
+    ...(player.kingdom_id
+      ? [
+          "",
+          "🏰 Kingdom: " +
+            (
+              KINGDOMS[
+                player.kingdom_id
+              ]?.name ||
+              player.kingdom_id
+            ),
+        ]
+      : []),
+
+    ...(player.traitor
+      ? [
+          "⚠️ STATUS: TRAITOR",
+          "☠️ Former allegiance: " +
+            (
+              KINGDOMS[
+                player.traitor_kingdom_id
+              ]?.name ||
+              player.traitor_kingdom_id ||
+              "Unknown"
+            ),
+        ]
+      : []),
   ]);
 }
 
 
 /* =========================================================
-   MESSAGE HELPERS
+   MESSAGE HELPER
 ========================================================= */
 
-async function send(api, threadID, text) {
-  await reply(api, threadID, text);
+async function send(
+  api,
+  threadID,
+  text
+) {
+  await reply(
+    api,
+    threadID,
+    text
+  );
 }
 
 
@@ -201,55 +418,79 @@ async function send(api, threadID, text) {
    PROFILE COMMAND
 ========================================================= */
 
-async function handleProfile(api, event) {
-  const state = await getUserState(
-    event.threadID,
-    event.senderID
-  );
+async function handleProfile(
+  api,
+  event
+) {
+  const state =
+    await getUserState(
+      event.threadID,
+      event.senderID
+    );
 
-  const property = await getProperty(
-    event.threadID,
-    event.senderID
-  );
+  const property =
+    await getProperty(
+      event.threadID,
+      event.senderID
+    );
 
   await send(
     api,
     event.threadID,
-    profileText(state, property)
+    await profileText(
+      state,
+      property
+    )
   );
 }
 
 
 /* =========================================================
-   CLASS COMMAND
+   CLASS
 ========================================================= */
 
-async function handleClass(api, event, args) {
+async function handleClass(
+  api,
+  event,
+  args
+) {
   if (!args[0]) {
-    const lines = Object.entries(CLASSES).map(
-      ([key, definition]) =>
-        definition.emoji +
-        " " +
-        key +
-        " — " +
-        definition.style
-    );
+    const lines =
+      Object.entries(CLASSES)
+        .map(
+          ([key, definition]) =>
+            definition.emoji +
+            " " +
+            key +
+            " — " +
+            definition.style
+        );
 
     lines.push("");
-    lines.push("⚔️ Choose your class:");
-    lines.push("!rpg class <name>");
+    lines.push(
+      "⚔️ Choose your class:"
+    );
+    lines.push(
+      "!rpg class <name>"
+    );
 
     await send(
       api,
       event.threadID,
-      box("⚔️ ECLIPSE CLASSES", lines)
+      box(
+        "⚔️ ECLIPSE CLASSES",
+        lines
+      )
     );
 
     return;
   }
 
-  const key = getClassKey(args[0]);
-  const definition = getClass(key);
+  const key =
+    getClassKey(args[0]);
+
+  const definition =
+    getClass(key);
 
   await setClass(
     event.threadID,
@@ -260,32 +501,41 @@ async function handleClass(api, event, args) {
   await send(
     api,
     event.threadID,
-    box("⚔️ CLASS CHOSEN", [
-      definition.emoji +
-        " " +
-        definition.name,
+    box(
+      "⚔️ CLASS CHOSEN",
+      [
+        definition.emoji +
+          " " +
+          definition.name,
 
-      "",
+        "",
 
-      definition.style,
+        definition.style,
 
-      "",
+        "",
 
-      "💪 Strengths: " +
-        definition.strengths,
+        "💪 Strengths: " +
+          definition.strengths,
 
-      "⚠️ Weaknesses: " +
-        definition.weaknesses,
+        "⚠️ Weaknesses: " +
+          definition.weaknesses,
 
-      "",
+        "",
 
-      "✨ Skills:",
-      definition.skills.join(", "),
+        "✨ Skills:",
+        definition.skills.join(", "),
 
-      "",
+        "",
 
-      "Use !rpg skills to view your abilities.",
-    ])
+        "🌟 Your starting affinity has been initialized.",
+
+        "Use !rpg affinity to view it.",
+
+        "",
+
+        "Use !rpg skills to view your abilities.",
+      ]
+    )
   );
 }
 
@@ -294,15 +544,20 @@ async function handleClass(api, event, args) {
    SKILLS
 ========================================================= */
 
-async function handleSkills(api, event) {
-  const state = await getUserState(
-    event.threadID,
-    event.senderID
-  );
+async function handleSkills(
+  api,
+  event
+) {
+  const state =
+    await getUserState(
+      event.threadID,
+      event.senderID
+    );
 
-  const skills = getSkillsForClass(
-    state.player.character_class
-  );
+  const skills =
+    getSkillsForClass(
+      state.player.character_class
+    );
 
   const lines = [];
 
@@ -336,27 +591,37 @@ async function handleSkills(api, event) {
   await send(
     api,
     event.threadID,
-    box("✨ YOUR SKILLS", lines)
+    box(
+      "✨ YOUR SKILLS",
+      lines
+    )
   );
 }
 
 
 /* =========================================================
-   MAGIC
+   MAGIC / LEGACY SPELL VIEW
 ========================================================= */
 
-async function handleMagic(api, event) {
-  const state = await getUserState(
-    event.threadID,
-    event.senderID
-  );
+async function handleMagic(
+  api,
+  event
+) {
+  const state =
+    await getUserState(
+      event.threadID,
+      event.senderID
+    );
 
-  const affinity = getAffinity(
-    state.player.character_class
-  );
+  const legacyAffinity =
+    getLegacyAffinity(
+      state.player.character_class
+    );
 
-  const tier =
-    AFFINITY_TIERS[affinity.tier];
+  const legacyTier =
+    AFFINITY_TIERS[
+      legacyAffinity.tier
+    ];
 
   const learned =
     await getLearnedSpells(
@@ -364,25 +629,60 @@ async function handleMagic(api, event) {
       event.senderID
     );
 
-  const lines = [
-    SCHOOLS[affinity.school].emoji +
-      " Affinity: " +
-      SCHOOLS[affinity.school].name +
-      " (" +
-      tier.label +
-      ")",
+  const lines = [];
 
+  try {
+    const primary =
+      await getPrimaryAffinity(
+        event.threadID,
+        event.senderID
+      );
+
+    if (primary) {
+      lines.push(
+        "🌟 PRIMARY AFFINITY"
+      );
+
+      lines.push(
+        formatAffinity(primary)
+      );
+
+      lines.push("");
+    }
+  } catch {
+    lines.push(
+      "✨ Affinity: " +
+        (
+          SCHOOLS[
+            legacyAffinity.school
+          ]?.name ||
+          legacyAffinity.school
+        ) +
+        " (" +
+        (
+          legacyTier?.label ||
+          "Unknown"
+        ) +
+        ")"
+    );
+
+    lines.push("");
+  }
+
+  lines.push(
     statLine(
       "🔷",
       "MP",
       state.player.mp,
       state.player.max_mp
-    ),
+    )
+  );
 
-    "",
+  lines.push("");
 
-    "✨ KNOWN SPELLS",
-  ];
+  lines.push(
+    "✨ KNOWN SPELLS"
+  );
 
   if (!learned.length) {
     lines.push(
@@ -390,74 +690,1129 @@ async function handleMagic(api, event) {
     );
   } else {
     for (const spellId of learned) {
-      const spell = getSpell(spellId);
+      const spell =
+        getSpell(spellId);
 
       if (!spell) continue;
 
       lines.push(
         spell.emoji +
           " " +
-          spell.name +
-          " — " +
-          Math.ceil(
-            spell.manaCost *
-              tier.costMultiplier
+          spell.name
+      );
+    }
+  }
+
+  lines.push("");
+
+  lines.push(
+    "🔮 New system:"
+  );
+
+  lines.push(
+    "!rpg spells"
+  );
+
+  lines.push(
+    "!rpg affinity"
+  );
+
+  lines.push(
+    "!rpg special"
+  );
+
+  lines.push("");
+
+  lines.push(
+    "Cast in combat:",
+    "!rpg spell <name>"
+  );
+
+  lines.push(
+    "Utility:",
+    "!rpg cast <spell>"
+  );
+
+  await send(
+    api,
+    event.threadID,
+    box(
+      "🔮 MAGIC",
+      lines
+    )
+  );
+}
+
+
+/* =========================================================
+   AFFINITY
+========================================================= */
+
+async function handleAffinity(
+  api,
+  event,
+  args
+) {
+  const threadID =
+    event.threadID;
+
+  const userID =
+    event.senderID;
+
+  await ensurePlayer(
+    threadID,
+    userID
+  );
+
+  const action =
+    normalizeKey(
+      args[0] || "status"
+    );
+
+  /* -------------------------------------------------------
+     LIST ALL
+  ------------------------------------------------------- */
+
+  if (
+    action === "list" ||
+    action === "all"
+  ) {
+    const affinities =
+      getAllAffinities();
+
+    const lines = [
+      "🌟 AVAILABLE AFFINITIES",
+      "",
+    ];
+
+    for (const affinity of affinities) {
+      lines.push(
+        (
+          affinity.emoji ||
+          "✨"
+        ) +
+        " " +
+        affinity.name
+      );
+
+      lines.push(
+        "   Kingdom: " +
+          (
+            affinity.kingdom
+              ? (
+                  KINGDOMS[
+                    affinity.kingdom
+                  ]?.name ||
+                  prettyName(
+                    affinity.kingdom
+                  )
+                )
+              : "Unknown"
+          )
+      );
+
+      lines.push("");
+    }
+
+    lines.push(
+      "Use !rpg affinity <name> for details."
+    );
+
+    await send(
+      api,
+      threadID,
+      box(
+        "🌟 AFFINITIES",
+        lines
+      )
+    );
+
+    return;
+  }
+
+  /* -------------------------------------------------------
+     LEARN / UNLOCK
+  ------------------------------------------------------- */
+
+  if (
+    action === "learn" ||
+    action === "unlock"
+  ) {
+    if (!args[1]) {
+      throw new Error(
+        "Choose an affinity to learn. Example: !rpg affinity learn fire"
+      );
+    }
+
+    const affinityID =
+      normalizeKey(args[1]);
+
+    const affinity =
+      getAffinity(
+        affinityID
+      );
+
+    if (!affinity) {
+      throw new Error(
+        "Unknown affinity: " +
+          args[1]
+      );
+    }
+
+    const result =
+      await unlockAffinity(
+        threadID,
+        userID,
+        affinityID,
+        {
+          source: "command",
+        }
+      );
+
+    await send(
+      api,
+      threadID,
+      box(
+        "🌟 AFFINITY UNLOCKED",
+        [
+          (
+            affinity.emoji ||
+            "✨"
           ) +
-          " MP"
+            " " +
+            affinity.name,
+
+          "",
+
+          "Tier: " +
+            (
+              result?.tier_name ||
+              result?.tier ||
+              "Weak"
+            ),
+
+          "",
+
+          "Your new affinity is now available.",
+        ]
+      )
+    );
+
+    return;
+  }
+
+  /* -------------------------------------------------------
+     MASTERY
+  ------------------------------------------------------- */
+
+  if (
+    action === "mastery"
+  ) {
+    if (!args[1]) {
+      throw new Error(
+        "Choose an affinity. Example: !rpg affinity mastery shadow"
+      );
+    }
+
+    const affinityID =
+      normalizeKey(args[1]);
+
+    const affinity =
+      getAffinity(
+        affinityID
+      );
+
+    if (!affinity) {
+      throw new Error(
+        "Unknown affinity."
+      );
+    }
+
+    const row =
+      await getPlayerAffinity(
+        threadID,
+        userID,
+        affinityID
+      );
+
+    if (!row) {
+      throw new Error(
+        "You have not unlocked " +
+          affinity.name +
+          "."
+      );
+    }
+
+    const mastery =
+      safeNumber(
+        row.mastery ??
+        row.mastery_points
+      );
+
+    const tier =
+      row.tier_name ||
+      row.tier ||
+      "Weak";
+
+    const tierData =
+      Object.values(
+        NEW_AFFINITY_TIERS
+      ).find(
+        value =>
+          value.key ===
+          String(tier).toLowerCase()
+      );
+
+    const next =
+      tierData
+        ? Object.values(
+            NEW_AFFINITY_TIERS
+          ).find(
+            value =>
+              value.id ===
+              tierData.id + 1
+          )
+        : null;
+
+    await send(
+      api,
+      threadID,
+      box(
+        "🌟 AFFINITY MASTERY",
+        [
+          (
+            affinity.emoji ||
+            "✨"
+          ) +
+            " " +
+            affinity.name,
+
+          "📊 Tier: " +
+            tier,
+
+          "✨ Mastery: " +
+            formatNumber(
+              mastery
+            ),
+
+          ...(next
+            ? [
+                "⬆️ Next: " +
+                  next.name,
+
+                "🎯 Required: " +
+                  formatNumber(
+                    next.masteryRequired
+                  ),
+              ]
+            : [
+                "👑 This affinity has reached its highest tier.",
+              ]),
+        ]
+      )
+    );
+
+    return;
+  }
+
+  /* -------------------------------------------------------
+     SPECIFIC AFFINITY
+  ------------------------------------------------------- */
+
+  if (args[0]) {
+    const affinityID =
+      normalizeKey(
+        args.join("_")
+      );
+
+    const affinity =
+      getAffinity(
+        affinityID
+      );
+
+    if (affinity) {
+      const row =
+        await getPlayerAffinity(
+          threadID,
+          userID,
+          affinityID
+        );
+
+      const lines = [
+        (
+          affinity.emoji ||
+          "✨"
+        ) +
+          " " +
+          affinity.name,
+
+        "",
+
+        "🌍 Kingdom: " +
+          (
+            KINGDOMS[
+              affinity.kingdom
+            ]?.name ||
+            prettyName(
+              affinity.kingdom
+            )
+          ),
+
+        "📊 Status: " +
+          (
+            row
+              ? (
+                  row.tier_name ||
+                  row.tier ||
+                  "Weak"
+                )
+              : "Locked"
+          ),
+
+        "✨ Mastery: " +
+          formatNumber(
+            row
+              ? (
+                  row.mastery ??
+                  row.mastery_points ??
+                  0
+                )
+              : 0
+          ),
+
+        "",
+      ];
+
+      if (affinity.environment) {
+        lines.push(
+          "🌎 Environmental bonuses:"
+        );
+
+        for (
+          const [
+            region,
+            multiplier,
+          ] of Object.entries(
+            affinity.environment
+          )
+        ) {
+          lines.push(
+            "   " +
+              prettyName(region) +
+              " x" +
+              multiplier
+          );
+        }
+
+        lines.push("");
+      }
+
+      lines.push(
+        row
+          ? "🔓 This affinity is unlocked."
+          : "🔒 This affinity is locked."
+      );
+
+      if (!row) {
+        lines.push(
+          "",
+          "Unlock through quests, trials, bosses, dungeons, or special story rewards."
+        );
+      }
+
+      await send(
+        api,
+        threadID,
+        box(
+          "🌟 AFFINITY",
+          lines
+        )
+      );
+
+      return;
+    }
+  }
+
+  /* -------------------------------------------------------
+     PLAYER AFFINITIES
+  ------------------------------------------------------- */
+
+  const affinities =
+    await getPlayerAffinities(
+      threadID,
+      userID
+    );
+
+  const primary =
+    await getPrimaryAffinity(
+      threadID,
+      userID
+    );
+
+  const lines = [
+    "🌟 YOUR AFFINITIES",
+    "",
+  ];
+
+  if (
+    primary
+  ) {
+    lines.push(
+      "👑 PRIMARY"
+    );
+
+    lines.push(
+      formatAffinity(primary)
+    );
+
+    lines.push("");
+  }
+
+  if (
+    !affinities ||
+    !affinities.length
+  ) {
+    lines.push(
+      "No secondary affinities unlocked yet."
+    );
+  } else {
+    lines.push(
+      "✨ UNLOCKED"
+    );
+
+    for (
+      const row of affinities
+    ) {
+      const id =
+        row.affinity_id ||
+        row.id;
+
+      const definition =
+        getAffinity(id);
+
+      if (!definition) continue;
+
+      lines.push(
+        (
+          definition.emoji ||
+          "✨"
+        ) +
+          " " +
+          definition.name +
+          " — " +
+          (
+            row.tier_name ||
+            row.tier ||
+            "Weak"
+          ) +
+          " · " +
+          formatNumber(
+            row.mastery ??
+            row.mastery_points ??
+            0
+          ) +
+          " mastery"
       );
     }
   }
 
   lines.push(
     "",
-    "Cast in combat: !rpg spell <name>",
-    "Learn new spells: !rpg learn <spell>",
-    "Utility casting: !rpg cast <spell>"
+    "See every affinity: !rpg affinity list",
+    "View mastery: !rpg affinity mastery <affinity>",
+    "Learn an affinity: !rpg affinity learn <affinity>"
   );
 
   await send(
     api,
-    event.threadID,
-    box("🔮 MAGIC", lines)
+    threadID,
+    box(
+      "🌟 AFFINITY SYSTEM",
+      lines
+    )
   );
 }
 
 
 /* =========================================================
-   LEARN SPELL
+   SPELLS
 ========================================================= */
 
-async function handleLearnSpell(api, event, args) {
-  if (!args[0]) {
-    throw new Error(
-      "Choose a spell to learn. Example: !rpg learn firebolt"
-    );
-  }
+async function handleSpells(
+  api,
+  event,
+  args
+) {
+  const threadID =
+    event.threadID;
 
-  const state = await getUserState(
-    event.threadID,
-    event.senderID
+  const userID =
+    event.senderID;
+
+  await ensurePlayer(
+    threadID,
+    userID
   );
 
-  const result = await learnSpell(
-    event.threadID,
-    event.senderID,
-    state.player.character_class,
-    normalizeKey(args[0])
+  const learned =
+    await getLearnedSpells(
+      threadID,
+      userID
+    );
+
+  const filter =
+    args[0]
+      ? normalizeKey(args[0])
+      : null;
+
+  const lines = [];
+
+  if (filter) {
+    const affinity =
+      getAffinity(filter);
+
+    if (!affinity) {
+      throw new Error(
+        "Unknown affinity: " +
+          args[0]
+      );
+    }
+
+    lines.push(
+      (
+        affinity.emoji ||
+        "✨"
+      ) +
+        " " +
+        affinity.name +
+        " SPELLS"
+    );
+
+    lines.push("");
+
+    /*
+     * The legacy magic registry is still used
+     * here until the dedicated spells registry
+     * is fully switched over.
+     */
+    for (
+      const spellID of learned
+    ) {
+      const spell =
+        getSpell(spellID);
+
+      if (!spell) continue;
+
+      const spellSchool =
+        normalizeKey(
+          spell.school ||
+          spell.affinity ||
+          ""
+        );
+
+      if (
+        spellSchool !==
+        normalizeKey(
+          affinity.name
+        ) &&
+        spellSchool !==
+        filter
+      ) {
+        continue;
+      }
+
+      lines.push(
+        (
+          spell.emoji ||
+          "🔮"
+        ) +
+          " " +
+          spell.name
+      );
+    }
+
+    if (
+      lines.length === 2
+    ) {
+      lines.push(
+        "No known spells from this affinity."
+      );
+    }
+
+    lines.push(
+      "",
+      "Learn spells through affinity mastery, kingdom quests, dungeons, bosses, and special rewards."
+    );
+
+    await send(
+      api,
+      threadID,
+      box(
+        "🔮 SPELLS",
+        lines
+      )
+    );
+
+    return;
+  }
+
+  lines.push(
+    "🔮 KNOWN SPELLS"
+  );
+
+  lines.push("");
+
+  if (!learned.length) {
+    lines.push(
+      "No spells learned yet."
+    );
+  } else {
+    for (
+      const spellID of learned
+    ) {
+      const spell =
+        getSpell(spellID);
+
+      if (!spell) continue;
+
+      lines.push(
+        (
+          spell.emoji ||
+          "🔮"
+        ) +
+          " " +
+          spell.name
+      );
+
+      lines.push(
+        "   " +
+          prettyName(
+            spell.school ||
+            spell.affinity ||
+            "Unknown affinity"
+          )
+      );
+
+      if (
+        spell.manaCost !== undefined
+      ) {
+        lines.push(
+          "   🔷 " +
+            spell.manaCost +
+            " MP"
+        );
+      }
+
+      lines.push("");
+    }
+  }
+
+  lines.push(
+    "━━━━━━━━━━━━━━━━━━━━━━",
+    "Filter by affinity:",
+    "!rpg spells shadow",
+    "!rpg spells fire",
+    "!rpg spells arcane",
+    "!rpg spells divine"
   );
 
   await send(
     api,
-    event.threadID,
-    box("📖 SPELL LEARNED", [
-      result.spell.emoji +
-        " " +
-        result.spell.name,
+    threadID,
+    box(
+      "🔮 SPELLBOOK",
+      lines
+    )
+  );
+}
 
-      "💰 Cost: " +
-        formatNumber(result.cost) +
-        " coins",
-    ])
+
+/* =========================================================
+   SPECIAL MOVES
+========================================================= */
+
+async function handleSpecial(
+  api,
+  event,
+  args
+) {
+  const threadID =
+    event.threadID;
+
+  const userID =
+    event.senderID;
+
+  await ensurePlayer(
+    threadID,
+    userID
+  );
+
+  const action =
+    normalizeKey(
+      args[0] || "list"
+    );
+
+  /* -------------------------------------------------------
+     SPECIFIC SPECIAL
+  ------------------------------------------------------- */
+
+  if (
+    action !== "list" &&
+    action !== "all"
+  ) {
+    const special =
+      getSpecial(
+        args.join("_")
+      );
+
+    if (!special) {
+      throw new Error(
+        "Unknown special move: " +
+          args.join(" ")
+      );
+    }
+
+    const owned =
+      await hasSpecial(
+        threadID,
+        userID,
+        special.id
+      );
+
+    const lines = [
+      (
+        special.emoji ||
+        "🌟"
+      ) +
+        " " +
+        special.name,
+
+      "",
+
+      special.description ||
+        "A unique special technique.",
+
+      "",
+
+      "📂 Category: " +
+        prettyName(
+          special.category
+        ),
+
+      "🌟 Affinity: " +
+        prettyName(
+          special.affinity
+        ),
+
+      "🔓 Status: " +
+        (
+          owned
+            ? "Unlocked"
+            : "Locked"
+        ),
+    ];
+
+    if (
+      special.cooldown
+    ) {
+      lines.push(
+        "⏳ Cooldown: " +
+          special.cooldown
+      );
+    }
+
+    if (
+      special.requirements
+    ) {
+      lines.push(
+        "",
+        "📜 REQUIREMENTS"
+      );
+
+      for (
+        const [
+          key,
+          value,
+        ] of Object.entries(
+          special.requirements
+        )
+      ) {
+        lines.push(
+          "• " +
+            prettyName(key) +
+            ": " +
+            (
+              typeof value ===
+              "object"
+                ? JSON.stringify(value)
+                : String(value)
+            )
+        );
+      }
+    }
+
+    lines.push(
+      "",
+      "Use during combat with:",
+      "!rpg special " +
+        special.id
+    );
+
+    await send(
+      api,
+      threadID,
+      box(
+        "🌟 SPECIAL MOVE",
+        lines
+      )
+    );
+
+    return;
+  }
+
+  /* -------------------------------------------------------
+     PLAYER SPECIALS
+  ------------------------------------------------------- */
+
+  const owned =
+    await getPlayerSpecials(
+      threadID,
+      userID
+    );
+
+  const lines = [
+    "🌟 YOUR SPECIAL MOVES",
+    "",
+  ];
+
+  if (
+    !owned ||
+    !owned.length
+  ) {
+    lines.push(
+      "No special moves unlocked yet."
+    );
+  } else {
+    for (
+      const row of owned
+    ) {
+      const id =
+        row.special_id ||
+        row.id;
+
+      const special =
+        getSpecial(id);
+
+      if (!special) continue;
+
+      lines.push(
+        formatSpecial(
+          special
+        )
+      );
+
+      lines.push("");
+    }
+  }
+
+  lines.push(
+    "━━━━━━━━━━━━━━━━━━━━━━",
+    "Special moves are earned through mastery, kingdom quests, bosses, dungeons, and major story events.",
+    "",
+    "View every special:",
+    "!rpg special all"
+  );
+
+  if (
+    action === "all" ||
+    action === "list"
+  ) {
+    lines.push(
+      "",
+      "🌌 AVAILABLE SPECIALS"
+    );
+
+    for (
+      const special of
+      getAllSpecials()
+    ) {
+      lines.push(
+        (
+          special.emoji ||
+          "🌟"
+        ) +
+          " " +
+          special.name +
+          " — " +
+          prettyName(
+            special.category
+          )
+      );
+    }
+  }
+
+  await send(
+    api,
+    threadID,
+    box(
+      "🌟 SPECIALS",
+      lines
+    )
+  );
+}
+
+
+/* =========================================================
+   WORLD CONDITIONS
+========================================================= */
+
+async function handleWorldConditions(
+  api,
+  event
+) {
+  const threadID =
+    event.threadID;
+
+  const conditions =
+    await getWorldConditions(
+      threadID
+    );
+
+  await send(
+    api,
+    threadID,
+    box(
+      "🌍 WORLD CONDITIONS",
+      [
+        formatWorldConditions(
+          conditions
+        ),
+
+        "",
+
+        "🌟 Affinity effects change with the world.",
+        "Nature users may influence weather and seasons.",
+      ]
+    )
+  );
+}
+
+
+/* =========================================================
+   SEASON
+========================================================= */
+
+async function handleSeason(
+  api,
+  event
+) {
+  const threadID =
+    event.threadID;
+
+  const season =
+    await getWorldSeason(
+      threadID
+    );
+
+  const definition =
+    getSeason(
+      season
+    );
+
+  const lines = [
+    (
+      definition?.emoji ||
+      definition?.symbol ||
+      "🌍"
+    ) +
+      " Current season: " +
+      (
+        definition?.name ||
+        season
+      ),
+  ];
+
+  if (
+    definition?.description
+  ) {
+    lines.push(
+      "",
+      definition.description
+    );
+  }
+
+  lines.push(
+    "",
+    "🌱 Seasons affect affinity power, weather probabilities, monsters, and certain abilities.",
+    "",
+    "Available seasons:"
+  );
+
+  for (
+    const entry of
+    getAllSeasons()
+  ) {
+    lines.push(
+      (
+        entry.emoji ||
+        entry.symbol ||
+        "🌍"
+      ) +
+        " " +
+        entry.name
+    );
+  }
+
+  await send(
+    api,
+    threadID,
+    box(
+      "🌍 SEASONS",
+      lines
+    )
+  );
+}
+
+
+/* =========================================================
+   WEATHER
+========================================================= */
+
+async function handleWeather(
+  api,
+  event
+) {
+  const threadID =
+    event.threadID;
+
+  const weather =
+    await getWorldWeather(
+      threadID
+    );
+
+  await send(
+    api,
+    threadID,
+    box(
+      "🌦️ WEATHER",
+      [
+        "Current weather: " +
+          prettyName(
+            weather
+          ),
+
+        "",
+
+        "Weather modifies affinity power, encounters, and certain special abilities.",
+
+        "",
+
+        "View full conditions:",
+        "!rpg world",
+
+        "Nature abilities can influence the weather.",
+      ]
+    )
   );
 }
 
@@ -466,15 +1821,22 @@ async function handleLearnSpell(api, event, args) {
    UTILITY SPELL CASTING
 ========================================================= */
 
-async function handleCast(api, event, args) {
+async function handleCast(
+  api,
+  event,
+  args
+) {
   if (!args[0]) {
     throw new Error(
       "Choose a utility spell. Example: !rpg cast detect_magic"
     );
   }
 
-  const threadID = event.threadID;
-  const userID = event.senderID;
+  const threadID =
+    event.threadID;
+
+  const userID =
+    event.senderID;
 
   const spellKey =
     normalizeKey(args[0]);
@@ -484,7 +1846,8 @@ async function handleCast(api, event, args) {
 
   if (
     !spell ||
-    spell.target !== "utility"
+    spell.target !==
+      "utility"
   ) {
     throw new Error(
       "That is not a utility spell. Use !rpg magic to view your spells."
@@ -497,7 +1860,11 @@ async function handleCast(api, event, args) {
       userID
     );
 
-  if (!learned.includes(spellKey)) {
+  if (
+    !learned.includes(
+      spellKey
+    )
+  ) {
     throw new Error(
       "You have not learned " +
         spell.name +
@@ -512,7 +1879,7 @@ async function handleCast(api, event, args) {
     );
 
   const affinity =
-    getAffinity(
+    getLegacyAffinity(
       state.player.character_class
     );
 
@@ -538,27 +1905,27 @@ async function handleCast(api, event, args) {
     );
 
   if (
-    Number(state.player.mp) <
-    manaCost
+    Number(
+      state.player.mp
+    ) < manaCost
   ) {
     throw new Error(
       "Not enough mana."
     );
   }
 
-  /* -------------------------------------------------------
-     TELEPORT
-  ------------------------------------------------------- */
-
   if (
-    spell.effect === "teleport"
+    spell.effect ===
+    "teleport"
   ) {
     await updateVitals(
       threadID,
       userID,
       {
         mp:
-          Number(state.player.mp) -
+          Number(
+            state.player.mp
+          ) -
           manaCost,
 
         location_id:
@@ -572,32 +1939,34 @@ async function handleCast(api, event, args) {
     await send(
       api,
       threadID,
-      box("🌀 TELEPORTED", [
-        spell.emoji +
-          " You are pulled back to Eclipse Castle.",
+      box(
+        "🌀 TELEPORTED",
+        [
+          spell.emoji +
+            " You are pulled back to Eclipse Castle.",
 
-        "🔷 -" +
-          manaCost +
-          " MP",
-      ])
+          "🔷 -" +
+            manaCost +
+            " MP",
+        ]
+      )
     );
 
     return;
   }
 
-  /* -------------------------------------------------------
-     DETECT MAGIC
-  ------------------------------------------------------- */
-
   if (
-    spell.effect === "detect"
+    spell.effect ===
+    "detect"
   ) {
     await updateVitals(
       threadID,
       userID,
       {
         mp:
-          Number(state.player.mp) -
+          Number(
+            state.player.mp
+          ) -
           manaCost,
       }
     );
@@ -610,41 +1979,44 @@ async function handleCast(api, event, args) {
     await send(
       api,
       threadID,
-      box("🔍 MAGIC DETECTED", [
-        spell.emoji +
-          " You sense the magical currents of " +
-          (
-            region?.name ||
-            state.player.region_id
-          ) +
-          ".",
+      box(
+        "🔍 MAGIC DETECTED",
+        [
+          spell.emoji +
+            " You sense the magical currents of " +
+            (
+              region?.name ||
+              state.player.region_id
+            ) +
+            ".",
 
-        "🌿 Resources: " +
-          (
-            region?.resources ||
-            []
-          ).join(", "),
+          "🌿 Resources: " +
+            (
+              region?.resources ||
+              []
+            ).join(", "),
 
-        "⚔️ Combat modifiers: " +
-          (
-            Object.entries(
-              region?.combat ||
-                {}
-            )
-              .map(
-                ([k, v]) =>
-                  k +
-                  " x" +
-                  v
+          "⚔️ Combat modifiers: " +
+            (
+              Object.entries(
+                region?.combat ||
+                  {}
               )
-              .join(", ") ||
-            "none"
-          ),
+                .map(
+                  ([k, v]) =>
+                    k +
+                    " x" +
+                    v
+                )
+                .join(", ") ||
+              "none"
+            ),
 
-        "🔷 -" +
-          manaCost +
-          " MP",
-      ])
+          "🔷 -" +
+            manaCost +
+            " MP",
+        ]
+      )
     );
 
     return;
@@ -657,39 +2029,104 @@ async function handleCast(api, event, args) {
 
 
 /* =========================================================
-   INVENTORY
+   LEARN SPELL
 ========================================================= */
 
-async function handleInventory(api, event) {
-  const state = await getUserState(
-    event.threadID,
-    event.senderID
-  );
+async function handleLearnSpell(
+  api,
+  event,
+  args
+) {
+  if (!args[0]) {
+    throw new Error(
+      "Choose a spell to learn. Example: !rpg learn firebolt"
+    );
+  }
 
-  const lines = state.inventory.length
-    ? state.inventory.map(
-        (entry) =>
-          (entry.item?.emoji || "🎁") +
-          " " +
-          (entry.item?.name ||
-            entry.item_id) +
-          " x" +
-          entry.quantity +
-          " · " +
-          (entry.item?.rarity ||
-            "Unknown")
-      )
-    : [
-        "🎒 Your inventory is empty.",
-        "",
-        "Complete hunts, quests, and dungeons",
-        "to discover new items.",
-      ];
+  const state =
+    await getUserState(
+      event.threadID,
+      event.senderID
+    );
+
+  const result =
+    await learnSpell(
+      event.threadID,
+      event.senderID,
+      state.player.character_class,
+      normalizeKey(args[0])
+    );
 
   await send(
     api,
     event.threadID,
-    box("🎒 INVENTORY", lines)
+    box(
+      "📖 SPELL LEARNED",
+      [
+        result.spell.emoji +
+          " " +
+          result.spell.name,
+
+        "💰 Cost: " +
+          formatNumber(
+            result.cost
+          ) +
+          " coins",
+      ]
+    )
+  );
+}
+
+
+/* =========================================================
+   INVENTORY
+========================================================= */
+
+async function handleInventory(
+  api,
+  event
+) {
+  const state =
+    await getUserState(
+      event.threadID,
+      event.senderID
+    );
+
+  const lines =
+    state.inventory.length
+      ? state.inventory.map(
+          entry =>
+            (
+              entry.item?.emoji ||
+              "🎁"
+            ) +
+            " " +
+            (
+              entry.item?.name ||
+              entry.item_id
+            ) +
+            " x" +
+            entry.quantity +
+            " · " +
+            (
+              entry.item?.rarity ||
+              "Unknown"
+            )
+        )
+      : [
+          "🎒 Your inventory is empty.",
+          "",
+          "Complete hunts, quests, and dungeons",
+          "to discover new items.",
+        ];
+
+  await send(
+    api,
+    event.threadID,
+    box(
+      "🎒 INVENTORY",
+      lines
+    )
   );
 }
 
@@ -698,52 +2135,70 @@ async function handleInventory(api, event) {
    EQUIPMENT
 ========================================================= */
 
-async function handleEquipment(api, event) {
-  const state = await getUserState(
-    event.threadID,
-    event.senderID
-  );
+async function handleEquipment(
+  api,
+  event
+) {
+  const state =
+    await getUserState(
+      event.threadID,
+      event.senderID
+    );
 
-  const lines = state.equipment.length
-    ? state.equipment.map(
-        (entry) =>
-          "🧩 " +
-          entry.slot +
-          ": " +
-          (entry.item?.name ||
-            entry.item_id)
-      )
-    : [
-        "🛡️ No equipment equipped yet.",
-        "",
-        "Find equipment through",
-        "hunts, quests, and dungeons.",
-      ];
+  const lines =
+    state.equipment.length
+      ? state.equipment.map(
+          entry =>
+            "🧩 " +
+            entry.slot +
+            ": " +
+            (
+              entry.item?.name ||
+              entry.item_id
+            )
+        )
+      : [
+          "🛡️ No equipment equipped yet.",
+          "",
+          "Find equipment through",
+          "hunts, quests, and dungeons.",
+        ];
 
   await send(
     api,
     event.threadID,
-    box("🛡️ EQUIPMENT", lines)
+    box(
+      "🛡️ EQUIPMENT",
+      lines
+    )
   );
 }
 
 
 /* =========================================================
-   WORLD / MAP
+   MAP / WORLD
 ========================================================= */
 
-async function handleMap(api, event, args) {
+async function handleMap(
+  api,
+  event,
+  args
+) {
   if (
     args[0] &&
     normalizeKey(args[0]) ===
       "locations"
   ) {
-    args = args.slice(1);
+    args =
+      args.slice(1);
   }
 
-  const region = args.length
-    ? resolveRegion(args.join(" "))
-    : null;
+  const region =
+    args.length
+      ? resolveRegion(
+          args.join(" ")
+        )
+      : null;
 
   if (region) {
     const locations =
@@ -770,7 +2225,7 @@ async function handleMap(api, event, args) {
           "📍 LOCATIONS",
 
           ...locations.map(
-            (location) =>
+            location =>
               "• " +
               location.name +
               " [" +
@@ -815,6 +2270,17 @@ async function handleMap(api, event, args) {
 
         "",
 
+        "🌍 Current world:",
+        "!rpg world",
+
+        "🌦️ Weather:",
+        "!rpg weather",
+
+        "🌱 Season:",
+        "!rpg season",
+
+        "",
+
         "📍 View locations:",
         "!rpg locations <region>",
 
@@ -832,27 +2298,39 @@ async function handleMap(api, event, args) {
    PROPERTY / DOMAIN
 ========================================================= */
 
-async function handleProperty(api, event, args) {
-  const threadID = event.threadID;
-  const userID = event.senderID;
+async function handleProperty(
+  api,
+  event,
+  args
+) {
+  const threadID =
+    event.threadID;
+
+  const userID =
+    event.senderID;
 
   await ensurePlayer(
     threadID,
     userID
   );
 
-  args = Array.isArray(args)
-    ? args
-    : [];
+  args =
+    Array.isArray(args)
+      ? args
+      : [];
 
-  const action = normalizeKey(
-    args[0] || "info"
-  );
-
-  if (action === "buy") {
-    const target = normalizeKey(
-      args[1]
+  const action =
+    normalizeKey(
+      args[0] || "info"
     );
+
+  if (
+    action === "buy"
+  ) {
+    const target =
+      normalizeKey(
+        args[1]
+      );
 
     const result =
       await buyProperty(
@@ -864,33 +2342,38 @@ async function handleProperty(api, event, args) {
     await send(
       api,
       threadID,
-      box("🏰 DOMAIN EXPANDED", [
-        "👑 You now control a " +
-          result.name +
-          ".",
+      box(
+        "🏰 DOMAIN EXPANDED",
+        [
+          "👑 You now control a " +
+            result.name +
+            ".",
 
-        "",
+          "",
 
-        "💰 Cost: " +
-          formatNumber(
-            result.cost
-          ) +
-          " coins",
+          "💰 Cost: " +
+            formatNumber(
+              result.cost
+            ) +
+            " coins",
 
-        "",
+          "",
 
-        "🏗️ Develop your domain:",
-        "!rpg build farm",
+          "🏗️ Develop your domain:",
+          "!rpg build farm",
 
-        "🛡️ Improve defenses:",
-        "!rpg defense walls",
-      ])
+          "🛡️ Improve defenses:",
+          "!rpg defense walls",
+        ]
+      )
     );
 
     return;
   }
 
-  if (action === "build") {
+  if (
+    action === "build"
+  ) {
     const result =
       await build(
         threadID,
@@ -923,7 +2406,9 @@ async function handleProperty(api, event, args) {
     return;
   }
 
-  if (action === "defense") {
+  if (
+    action === "defense"
+  ) {
     const result =
       await improveDefense(
         threadID,
@@ -964,7 +2449,9 @@ async function handleProperty(api, event, args) {
     );
 
   const summary =
-    propertySummary(property);
+    propertySummary(
+      property
+    );
 
   const buildings =
     await getBuildings(
@@ -975,7 +2462,7 @@ async function handleProperty(api, event, args) {
   const buildingLines =
     buildings.length
       ? buildings.map(
-          (entry) =>
+          entry =>
             "🏗️ " +
             entry.building_key +
             " Lv." +
@@ -989,50 +2476,59 @@ async function handleProperty(api, event, args) {
   await send(
     api,
     threadID,
-    box("🏰 YOUR DOMAIN", [
-      "🏰 Tier: " +
-        summary.tier.name,
+    box(
+      "🏰 YOUR DOMAIN",
+      [
+        "🏰 Tier: " +
+          summary.tier.name,
 
-      "💰 Maintenance: " +
-        summary.maintenanceText,
+        "💰 Maintenance: " +
+          summary.maintenanceText,
 
-      "",
+        "",
 
-      "🛡️ DEFENSE",
+        "🛡️ DEFENSE",
 
-      ...Object.entries(
-        summary.defense
-      ).map(
-        ([key, value]) =>
-          (DEFENSE_PARTS[key]?.emoji ||
-            "🛡️") +
-          " " +
-          key +
-          " " +
-          value +
-          "%"
-      ),
+        ...Object.entries(
+          summary.defense
+        ).map(
+          ([key, value]) =>
+            (
+              DEFENSE_PARTS[key]?.emoji ||
+              "🛡️"
+            ) +
+            " " +
+            key +
+            " " +
+            value +
+            "%"
+        ),
 
-      "",
+        "",
 
-      "🏗️ BUILDINGS",
+        "🏗️ BUILDINGS",
 
-      ...buildingLines,
+        ...buildingLines,
 
-      "",
+        "",
 
-      "⬆️ Upgrade property:",
-      "!rpg property buy <tier>",
-    ])
+        "⬆️ Upgrade property:",
+        "!rpg property buy <tier>",
+      ]
+    )
   );
 }
 
 
 /* =========================================================
-   KINGDOM INFO
+   KINGDOM
 ========================================================= */
 
-async function handleKingdomInfo(api, event, args) {
+async function handleKingdomInfo(
+  api,
+  event,
+  args
+) {
   await ensurePlayer(
     event.threadID,
     event.senderID
@@ -1051,7 +2547,7 @@ async function handleKingdomInfo(api, event, args) {
         "🏰 KINGDOMS OF ECLIPSE",
         kingdoms
           .flatMap(
-            (kingdom) => [
+            kingdom => [
               (
                 KINGDOMS[
                   kingdom.kingdom_id
@@ -1083,7 +2579,7 @@ async function handleKingdomInfo(api, event, args) {
   ) {
     if (!args[1]) {
       throw new Error(
-        "Choose a kingdom to pledge to. Example: !rpg kingdom pledge ironspine_hold"
+        "Choose a kingdom to pledge to."
       );
     }
 
@@ -1119,7 +2615,9 @@ async function handleKingdomInfo(api, event, args) {
   if (!kingdom) {
     throw new Error(
       "Choose a kingdom: " +
-        Object.keys(KINGDOMS).join(", ") +
+        Object.keys(
+          KINGDOMS
+        ).join(", ") +
         "."
     );
   }
@@ -1155,7 +2653,7 @@ async function handleKingdomInfo(api, event, args) {
         ...(
           relations.length
             ? relations.map(
-                (r) =>
+                r =>
                   r.kingdom.name +
                   ": " +
                   r.status
@@ -1174,7 +2672,11 @@ async function handleKingdomInfo(api, event, args) {
    DIPLOMACY
 ========================================================= */
 
-async function handleDiplomacy(api, event, args) {
+async function handleDiplomacy(
+  api,
+  event,
+  args
+) {
   const action =
     normalizeKey(
       args[0] || ""
@@ -1258,7 +2760,7 @@ async function handleDiplomacy(api, event, args) {
   }
 
   throw new Error(
-    "Usage: !rpg diplomacy war <kingdomA> <kingdomB> | !rpg diplomacy peace <kingdomA> <kingdomB>"
+    "Usage: !rpg diplomacy war <a> <b> | !rpg diplomacy peace <a> <b>"
   );
 }
 
@@ -1267,9 +2769,16 @@ async function handleDiplomacy(api, event, args) {
    ARMY
 ========================================================= */
 
-async function handleArmy(api, event, args) {
-  const threadID = event.threadID;
-  const userID = event.senderID;
+async function handleArmy(
+  api,
+  event,
+  args
+) {
+  const threadID =
+    event.threadID;
+
+  const userID =
+    event.senderID;
 
   await ensurePlayer(
     threadID,
@@ -1292,26 +2801,29 @@ async function handleArmy(api, event, args) {
     await send(
       api,
       threadID,
-      box("⚔️ TRAINING COMPLETE", [
-        result.unit.emoji +
-          " " +
-          result.unit.name +
-          ": +" +
-          formatNumber(
-            result.count
-          ),
+      box(
+        "⚔️ TRAINING COMPLETE",
+        [
+          result.unit.emoji +
+            " " +
+            result.unit.name +
+            ": +" +
+            formatNumber(
+              result.count
+            ),
 
-        "💰 Cost: " +
-          formatNumber(
-            result.cost
-          ) +
-          " coins",
+          "💰 Cost: " +
+            formatNumber(
+              result.cost
+            ) +
+            " coins",
 
-        "",
+          "",
 
-        "View your army with:",
-        "!rpg army",
-      ])
+          "View your army with:",
+          "!rpg army",
+        ]
+      )
     );
 
     return;
@@ -1389,7 +2901,7 @@ async function handleArmy(api, event, args) {
   ) {
     if (
       normalizeKey(args[1]) ===
-        "create"
+      "create"
     ) {
       const result =
         await require("./army")
@@ -1437,7 +2949,7 @@ async function handleArmy(api, event, args) {
         "🪖 REGIMENTS",
         regiments.length
           ? regiments.map(
-              (entry) =>
+              entry =>
                 entry.name +
                 " — " +
                 entry.unit_type +
@@ -1462,98 +2974,104 @@ async function handleArmy(api, event, args) {
       userID
     );
 
-  const unitLines = [
-    "⚔️ Infantry: " +
-      formatNumber(
-        army.infantry
-      ),
-
-    "🔱 Spearmen: " +
-      formatNumber(
-        army.spearmen
-      ),
-
-    "🛡️ Heavy Swordsmen: " +
-      formatNumber(
-        army.heavy_swordsmen
-      ),
-
-    "🏹 Archers: " +
-      formatNumber(
-        army.archers
-      ),
-
-    "🐎 Cavalry: " +
-      formatNumber(
-        army.cavalry
-      ),
-
-    "🔷 Mages: " +
-      formatNumber(
-        army.mages
-      ),
-
-    "🗡️ Assassins: " +
-      formatNumber(
-        army.assassins
-      ),
-
-    "🛡️ Shielders: " +
-      formatNumber(
-        army.shielders
-      ),
-  ];
-
   await send(
     api,
     threadID,
-    box("⚔️ YOUR ARMY", [
-      "👥 Total troops: " +
-        formatNumber(
-          totalUnits(army)
-        ),
+    box(
+      "⚔️ YOUR ARMY",
+      [
+        "👥 Total troops: " +
+          formatNumber(
+            totalUnits(army)
+          ),
 
-      "📍 Region: " +
-        army.region_id,
+        "📍 Region: " +
+          army.region_id,
 
-      "⚔️ Formation: " +
-        army.formation,
+        "⚔️ Formation: " +
+          army.formation,
 
-      "📦 Supplies: " +
-        army.supplies +
-        "%",
+        "📦 Supplies: " +
+          army.supplies +
+          "%",
 
-      "",
+        "",
 
-      ...unitLines,
+        "⚔️ Infantry: " +
+          formatNumber(
+            army.infantry
+          ),
 
-      "",
+        "🔱 Spearmen: " +
+          formatNumber(
+            army.spearmen
+          ),
 
-      "⚔️ Train troops:",
-      "!rpg army train <unit> <amount>",
+        "🛡️ Heavy Swordsmen: " +
+          formatNumber(
+            army.heavy_swordsmen
+          ),
 
-      "🛡️ Change formation:",
-      "!rpg army formation <name>",
-    ])
+        "🏹 Archers: " +
+          formatNumber(
+            army.archers
+          ),
+
+        "🐎 Cavalry: " +
+          formatNumber(
+            army.cavalry
+          ),
+
+        "🔷 Mages: " +
+          formatNumber(
+            army.mages
+          ),
+
+        "🗡️ Assassins: " +
+          formatNumber(
+            army.assassins
+          ),
+
+        "🛡️ Shielders: " +
+          formatNumber(
+            army.shielders
+          ),
+
+        "",
+
+        "⚔️ Train troops:",
+        "!rpg army train <unit> <amount>",
+
+        "🛡️ Change formation:",
+        "!rpg army formation <name>",
+      ]
+    )
   );
 }
 
 
 /* =========================================================
-   MARCH / TRAVEL
+   MARCH
 ========================================================= */
 
-async function handleMarch(api, event, args) {
+async function handleMarch(
+  api,
+  event,
+  args
+) {
   await ensurePlayer(
     event.threadID,
     event.senderID
   );
 
-  const action = normalizeKey(
-    args[0] || "status"
-  );
+  const action =
+    normalizeKey(
+      args[0] || "status"
+    );
 
-  if (action === "status") {
+  if (
+    action === "status"
+  ) {
     const status =
       await marchStatus(
         event.threadID,
@@ -1582,42 +3100,41 @@ async function handleMarch(api, event, args) {
   await send(
     api,
     event.threadID,
-    box("🚶 ARMY MARCH", [
-      "📍 " +
-        (
-          result.origin.name ||
-          result.origin.id
-        ) +
-        " → " +
-        (
-          result.destination.name ||
-          result.destination.id
-        ),
+    box(
+      "🚶 ARMY MARCH",
+      [
+        "📍 " +
+          (
+            result.origin.name ||
+            result.origin.id
+          ) +
+          " → " +
+          (
+            result.destination.name ||
+            result.destination.id
+          ),
 
-      "🛤️ Distance: " +
-        result.distance +
-        " map steps",
+        "🛤️ Distance: " +
+          result.distance +
+          " map steps",
 
-      "⏳ Travel time: " +
-        formatDuration(
-          result.duration
-        ),
+        "⏳ Travel time: " +
+          formatDuration(
+            result.duration
+          ),
 
-      "👥 Army: " +
-        formatNumber(
-          result.armySize
-        ) +
-        " soldiers",
+        "👥 Army: " +
+          formatNumber(
+            result.armySize
+          ) +
+          " soldiers",
 
-      "",
+        "",
 
-      "⏱️ Maximum travel time: 2 minutes",
-
-      "",
-
-      "Check progress with:",
-      "!rpg march status",
-    ])
+        "Check progress with:",
+        "!rpg march status",
+      ]
+    )
   );
 }
 
@@ -1632,10 +3149,15 @@ async function handleCombat(
   action,
   args
 ) {
-  const threadID = event.threadID;
-  const userID = event.senderID;
+  const threadID =
+    event.threadID;
 
-  if (action === "hunt") {
+  const userID =
+    event.senderID;
+
+  if (
+    action === "hunt"
+  ) {
     const result =
       await createHunt(
         threadID,
@@ -1669,7 +3191,8 @@ async function handleCombat(
     );
 
   if (
-    result.result === "active"
+    result.result ===
+    "active"
   ) {
     const session =
       await getCombat(
@@ -1696,20 +3219,18 @@ async function handleCombat(
     return;
   }
 
-  /*
-   * IMPORTANT:
-   * Spell is included here so a spell kill
-   * counts toward hunt/quest progress.
-   */
   if (
-    action === "attack" ||
-    action === "skill" ||
-    action === "spell" ||
-    action === "item" ||
-    action === "defend"
+    [
+      "attack",
+      "skill",
+      "spell",
+      "item",
+      "defend",
+    ].includes(action)
   ) {
     if (
-      result.result === "victory"
+      result.result ===
+      "victory"
     ) {
       await registerHuntProgress(
         threadID,
@@ -1722,7 +3243,8 @@ async function handleCombat(
     api,
     threadID,
     box(
-      result.result === "victory"
+      result.result ===
+      "victory"
         ? "🏆 VICTORY"
         : "💀 DEFEAT",
       result.message
@@ -1732,52 +3254,105 @@ async function handleCombat(
 
 
 /* =========================================================
-   EXPLORE
-
-   New: wraps rpg/exploration.js. Reuses combat.js's existing
-   hunt system for encounter outcomes rather than duplicating
-   combat logic. Dorian's flavor line is deterministic
-   (picked in exploration.js) — no AI call per explore.
+   SPECIAL COMBAT COMMAND
 ========================================================= */
 
-async function handleExplore(api, event) {
-  const threadID = event.threadID;
-  const userID = event.senderID;
+async function handleSpecialCombat(
+  api,
+  event,
+  args
+) {
+  if (!args.length) {
+    await handleSpecial(
+      api,
+      event,
+      ["list"]
+    );
 
-  await ensurePlayer(threadID, userID);
+    return;
+  }
+
+  /*
+   * Specials are executed by the combat engine.
+   */
+  await handleCombat(
+    api,
+    event,
+    "special",
+    args
+  );
+}
+
+
+/* =========================================================
+   EXPLORE
+========================================================= */
+
+async function handleExplore(
+  api,
+  event
+) {
+  const threadID =
+    event.threadID;
+
+  const userID =
+    event.senderID;
+
+  await ensurePlayer(
+    threadID,
+    userID
+  );
 
   let result;
 
   try {
-    result = await explore(threadID, userID);
+    result =
+      await explore(
+        threadID,
+        userID
+      );
   } catch (error) {
     const lines = [
       error.message ||
         "You couldn't explore right now.",
     ];
 
-    if (error.dorianLine) {
-      lines.push("", "🧑‍🏫 Dorian: " + error.dorianLine);
+    if (
+      error.dorianLine
+    ) {
+      lines.push(
+        "",
+        "🧑‍🏫 Dorian: " +
+          error.dorianLine
+      );
     }
 
     await send(
       api,
       threadID,
-      errorBox(lines.join("\n"))
+      errorBox(
+        lines.join("\n")
+      )
     );
 
     return;
   }
 
   if (
-    result.outcomeType === "encounter" ||
-    result.outcomeType === "elite_encounter"
+    result.outcomeType ===
+      "encounter" ||
+    result.outcomeType ===
+      "elite_encounter"
   ) {
     const state =
-      await getUserState(threadID, userID);
+      await getUserState(
+        threadID,
+        userID
+      );
 
     const heading =
-      result.outcomeType === "elite_encounter"
+      result.outcomeType ===
+      "elite_encounter"
         ? "👹 AN ELITE MONSTER APPEARED!"
         : "🌲 YOU ENCOUNTERED SOMETHING!";
 
@@ -1790,7 +3365,8 @@ async function handleExplore(api, event) {
         [
           heading,
           "",
-          "🧑‍🏫 Dorian: " + result.dorianLine,
+          "🧑‍🏫 Dorian: " +
+            result.dorianLine,
         ]
       )
     );
@@ -1798,39 +3374,61 @@ async function handleExplore(api, event) {
     return;
   }
 
-  if (result.outcomeType === "gold") {
+  if (
+    result.outcomeType ===
+    "gold"
+  ) {
     await send(
       api,
       threadID,
-      box("🌲 EXPLORATION", [
-        "💰 You discovered " +
-          formatNumber(result.gold) +
-          " coins.",
+      box(
+        "🌲 EXPLORATION",
+        [
+          "💰 You discovered " +
+            formatNumber(
+              result.gold
+            ) +
+            " coins.",
 
-        "",
+          "",
 
-        "🧑‍🏫 Dorian: " + result.dorianLine,
-      ])
+          "🧑‍🏫 Dorian: " +
+            result.dorianLine,
+        ]
+      )
     );
 
     return;
   }
 
-  if (result.outcomeType === "item") {
+  if (
+    result.outcomeType ===
+    "item"
+  ) {
     await send(
       api,
       threadID,
-      box("🌲 EXPLORATION", [
-        "💎 You found " +
-          (result.item?.emoji || "🎁") +
-          " " +
-          (result.item?.name || "a rare material") +
-          ".",
+      box(
+        "🌲 EXPLORATION",
+        [
+          "💎 You found " +
+            (
+              result.item?.emoji ||
+              "🎁"
+            ) +
+            " " +
+            (
+              result.item?.name ||
+              "a rare material"
+            ) +
+            ".",
 
-        "",
+          "",
 
-        "🧑‍🏫 Dorian: " + result.dorianLine,
-      ])
+          "🧑‍🏫 Dorian: " +
+            result.dorianLine,
+        ]
+      )
     );
 
     return;
@@ -1839,13 +3437,17 @@ async function handleExplore(api, event) {
   await send(
     api,
     threadID,
-    box("🌲 EXPLORATION", [
-      "Nothing but wind and old footprints.",
+    box(
+      "🌲 EXPLORATION",
+      [
+        "Nothing but wind and old footprints.",
 
-      "",
+        "",
 
-      "🧑‍🏫 Dorian: " + result.dorianLine,
-    ])
+        "🧑‍🏫 Dorian: " +
+          result.dorianLine,
+      ]
+    )
   );
 }
 
@@ -1877,7 +3479,9 @@ async function handleQuest(
     event.threadID,
     box(
       "📜 QUESTS",
-      questSummary(quest)
+      questSummary(
+        quest
+      )
     )
   );
 }
@@ -1897,11 +3501,14 @@ async function handleDungeon(
     event.senderID
   );
 
-  const action = normalizeKey(
-    args[0] || "status"
-  );
+  const action =
+    normalizeKey(
+      args[0] || "status"
+    );
 
-  if (action === "enter") {
+  if (
+    action === "enter"
+  ) {
     const result =
       await enterDungeon(
         event.threadID,
@@ -1936,7 +3543,9 @@ async function handleDungeon(
     return;
   }
 
-  if (action === "advance") {
+  if (
+    action === "advance"
+  ) {
     const result =
       await advanceDungeon(
         event.threadID,
@@ -2012,7 +3621,10 @@ async function handleDungeon(
    REST
 ========================================================= */
 
-async function handleRest(api, event) {
+async function handleRest(
+  api,
+  event
+) {
   const state =
     await getUserState(
       event.threadID,
@@ -2034,41 +3646,51 @@ async function handleRest(api, event) {
   await send(
     api,
     event.threadID,
-    box("🛏️ RESTED", [
-      "❤️ HP restored to " +
-        state.player.max_hp,
+    box(
+      "🛏️ RESTED",
+      [
+        "❤️ HP restored to " +
+          state.player.max_hp,
 
-      "🔷 MP restored to " +
-        state.player.max_mp,
+        "🔷 MP restored to " +
+          state.player.max_mp,
 
-      "⚡ Stamina restored to " +
-        state.player.max_stamina,
+        "⚡ Stamina restored to " +
+          state.player.max_stamina,
 
-      "",
+        "",
 
-      "You are ready for your next adventure.",
-    ])
+        "You are ready for your next adventure.",
+      ]
+    )
   );
 }
 
 
 /* =========================================================
-   SCOUTING
+   SCOUT
 ========================================================= */
 
-async function handleScout(api, event, args) {
-  const report = await scoutLocation(
-    event.threadID,
-    event.senderID,
-    args.join(" ")
-  );
+async function handleScout(
+  api,
+  event,
+  args
+) {
+  const report =
+    await scoutLocation(
+      event.threadID,
+      event.senderID,
+      args.join(" ")
+    );
 
   await send(
     api,
     event.threadID,
     box(
       "🔭 SCOUTING REPORT",
-      scoutSummary(report)
+      scoutSummary(
+        report
+      )
     )
   );
 }
@@ -2078,31 +3700,43 @@ async function handleScout(api, event, args) {
    RAID
 ========================================================= */
 
-async function handleRaid(api, event, args) {
-  const result = await raidLocation(
-    event.threadID,
-    event.senderID,
-    args.join(" ")
-  );
+async function handleRaid(
+  api,
+  event,
+  args
+) {
+  const result =
+    await raidLocation(
+      event.threadID,
+      event.senderID,
+      args.join(" ")
+    );
 
   await send(
     api,
     event.threadID,
-    box("🔥 RAID SUCCESSFUL", [
-      "🏘️ Target: " +
-        result.location.name,
+    box(
+      "🔥 RAID SUCCESSFUL",
+      [
+        "🏘️ Target: " +
+          result.location.name,
 
-      "💰 Looted: " +
-        formatNumber(result.lootGold) +
-        " coins",
+        "💰 Looted: " +
+          formatNumber(
+            result.lootGold
+          ) +
+          " coins",
 
-      "🛡️ Garrison weakened by " +
-        formatNumber(result.garrisonLoss),
+        "🛡️ Garrison weakened by " +
+          formatNumber(
+            result.garrisonLoss
+          ),
 
-      "",
+        "",
 
-      "⚠️ Reputation -5. Hostility in this region has risen.",
-    ])
+        "⚠️ Reputation -5. Hostility in this region has risen.",
+      ]
+    )
   );
 }
 
@@ -2111,7 +3745,11 @@ async function handleRaid(api, event, args) {
    AMBUSH
 ========================================================= */
 
-async function handleAmbush(api, event, args) {
+async function handleAmbush(
+  api,
+  event,
+  args
+) {
   const targetID =
     event.messageReply?.senderID ||
     args[0];
@@ -2174,191 +3812,244 @@ async function handleAmbush(api, event, args) {
    HELP
 ========================================================= */
 
-async function handleHelp(api, event) {
+async function handleHelp(
+  api,
+  event
+) {
   await send(
     api,
     event.threadID,
-    box("🌑 ECLIPSE RPG", [
+    box(
+      "🌑 ECLIPSE RPG",
+      [
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "━━━━━━━━━━━━━━━━━━━━━━",
 
-      "👤 CHARACTER",
+        "👤 CHARACTER",
 
-      "▶ !rpg profile",
-      "View your character and stats.",
+        "▶ !rpg profile",
+        "View your character and stats.",
 
-      "▶ !rpg class",
-      "View available classes.",
+        "▶ !rpg class",
+        "View available classes.",
 
-      "▶ !rpg class <name>",
-      "Choose your class.",
+        "▶ !rpg class <name>",
+        "Choose your class.",
 
-      "▶ !rpg skills",
-      "View your class skills.",
+        "▶ !rpg skills",
+        "View your class skills.",
 
-      "▶ !rpg inventory",
-      "View your RPG inventory.",
+        "▶ !rpg inventory",
+        "View your RPG inventory.",
 
-      "▶ !rpg equipment",
-      "View equipped items.",
+        "▶ !rpg equipment",
+        "View equipped items.",
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "━━━━━━━━━━━━━━━━━━━━━━",
 
-      "▶ !rpg magic",
-      "View your affinity, mana, and known spells.",
+        "🌟 AFFINITIES",
 
-      "▶ !rpg spell <name>",
-      "Cast a spell during combat.",
-      "Example: !rpg spell firebolt",
+        "▶ !rpg affinity",
+        "View your affinities and mastery.",
 
-      "▶ !rpg learn <spell>",
-      "Learn a new spell for gold.",
-      "Example: !rpg learn healing_light",
+        "▶ !rpg affinity list",
+        "View every affinity in Eclipse.",
 
-      "▶ !rpg cast <spell>",
-      "Cast a utility spell outside combat.",
-      "Example: !rpg cast detect_magic",
+        "▶ !rpg affinity <name>",
+        "Inspect an affinity.",
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "▶ !rpg affinity learn <name>",
+        "Unlock an affinity.",
 
-      "⚔️ ADVENTURE",
+        "▶ !rpg affinity mastery <name>",
+        "View affinity mastery progression.",
 
-      "▶ !rpg hunt",
-      "Start a battle against a random enemy.",
+        "━━━━━━━━━━━━━━━━━━━━━━",
 
-      "▶ !rpg explore",
-      "Wander out and see what you find.",
-      "Costs stamina. Dorian comments on the result.",
+        "🔮 MAGIC",
 
-      "▶ !rpg attack",
-      "Attack the enemy during combat.",
+        "▶ !rpg magic",
+        "View your magic overview.",
 
-      "▶ !rpg skill <name>",
-      "Use a combat skill.",
+        "▶ !rpg spells",
+        "View your spellbook.",
 
-      "▶ !rpg defend",
-      "Defend against the next attack.",
+        "▶ !rpg spells <affinity>",
+        "View spells for an affinity.",
 
-      "▶ !rpg item <name>",
-      "Use an item during combat.",
+        "▶ !rpg spell <name>",
+        "Cast a spell during combat.",
 
-      "▶ !rpg rest",
-      "Restore your HP, MP, and stamina.",
+        "▶ !rpg learn <spell>",
+        "Learn a spell.",
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "▶ !rpg cast <spell>",
+        "Cast a utility spell.",
 
-      "🌍 WORLD",
+        "━━━━━━━━━━━━━━━━━━━━━━",
 
-      "▶ !rpg map",
-      "View the world regions.",
+        "🌟 SPECIAL MOVES",
 
-      "▶ !rpg locations <region>",
-      "View locations in a region.",
+        "▶ !rpg special",
+        "View your unlocked special moves.",
 
-      "▶ !rpg march <location>",
-      "Travel to another location.",
+        "▶ !rpg special all",
+        "View every special move.",
 
-      "▶ !rpg march status",
-      "Check your current march.",
+        "▶ !rpg special <name>",
+        "Inspect a special move.",
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "━━━━━━━━━━━━━━━━━━━━━━",
 
-      "🏰 DOMAIN",
+        "⚔️ ADVENTURE",
 
-      "▶ !rpg property",
-      "View your domain.",
+        "▶ !rpg hunt",
+        "Start a battle.",
 
-      "▶ !rpg domain",
-      "Alias for !rpg property.",
+        "▶ !rpg explore",
+        "Explore the current region.",
 
-      "▶ !rpg property buy <tier>",
-      "Purchase or upgrade property.",
+        "▶ !rpg attack",
+        "Attack during combat.",
 
-      "▶ !rpg build <building>",
-      "Build or upgrade a building.",
+        "▶ !rpg skill <name>",
+        "Use a combat skill.",
 
-      "▶ !rpg defense <part>",
-      "Improve your defenses.",
+        "▶ !rpg spell <name>",
+        "Use a spell during combat.",
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "▶ !rpg special <name>",
+        "Use a special move during combat.",
 
-      "🏰 KINGDOMS & DIPLOMACY",
+        "▶ !rpg defend",
+        "Defend against the next attack.",
 
-      "▶ !rpg kingdom",
-      "View all kingdoms of Eclipse.",
+        "▶ !rpg item <name>",
+        "Use an item during combat.",
 
-      "▶ !rpg kingdom <name>",
-      "View a kingdom's strength, territory, and relations.",
-      "Example: !rpg kingdom ironspine_hold",
+        "▶ !rpg rest",
+        "Restore HP, MP, and stamina.",
 
-      "▶ !rpg kingdom pledge <name>",
-      "Pledge allegiance to a kingdom.",
+        "━━━━━━━━━━━━━━━━━━━━━━",
 
-      "▶ !rpg diplomacy war <a> <b>",
-      "Declare war between two kingdoms.",
+        "🌍 WORLD",
 
-      "▶ !rpg diplomacy peace <a> <b>",
-      "Offer peace between two warring kingdoms.",
+        "▶ !rpg map",
+        "View world regions.",
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "▶ !rpg locations <region>",
+        "View locations in a region.",
 
-      "⚔️ ARMY",
+        "▶ !rpg world",
+        "View current season, weather, and world conditions.",
 
-      "▶ !rpg army",
-      "View your army.",
+        "▶ !rpg season",
+        "View the current season.",
 
-      "▶ !rpg army train <unit> <amount>",
-      "Train troops.",
+        "▶ !rpg weather",
+        "View the current weather.",
 
-      "▶ !rpg army formation <name>",
-      "Change army formation.",
+        "▶ !rpg march <location>",
+        "Travel to another location.",
 
-      "▶ !rpg army regiment",
-      "View your regiments.",
+        "▶ !rpg march status",
+        "Check your march.",
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "━━━━━━━━━━━━━━━━━━━━━━",
 
-      "🔭 SCOUTING & WARFARE",
+        "🏰 DOMAIN",
 
-      "▶ !rpg scout <location>",
-      "Gather intel on a location's garrison and defenses.",
-      "Example: !rpg scout stonehold",
+        "▶ !rpg property",
+        "View your domain.",
 
-      "▶ !rpg raid <location>",
-      "Raid a location with your army for gold.",
-      "Example: !rpg raid willowmere",
+        "▶ !rpg domain",
+        "Alias for !rpg property.",
 
-      "▶ !rpg ambush <userID>",
-      "Ambush another player's marching army.",
-      "Reply to their message to target them.",
+        "▶ !rpg property buy <tier>",
+        "Purchase or upgrade property.",
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "▶ !rpg build <building>",
+        "Build or upgrade a building.",
 
-      "📜 QUESTS",
+        "▶ !rpg defense <part>",
+        "Improve defenses.",
 
-      "▶ !rpg quest",
-      "View your current quest.",
+        "━━━━━━━━━━━━━━━━━━━━━━",
 
-      "▶ !rpg quest claim",
-      "Claim a completed quest reward.",
+        "🏰 KINGDOMS & DIPLOMACY",
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "▶ !rpg kingdom",
+        "View the kingdoms of Eclipse.",
 
-      "🏰 DUNGEONS",
+        "▶ !rpg kingdom <name>",
+        "View kingdom information.",
 
-      "▶ !rpg dungeon",
-      "View your dungeon status.",
+        "▶ !rpg kingdom pledge <name>",
+        "Pledge allegiance.",
 
-      "▶ !rpg dungeon enter <key>",
-      "Enter a dungeon.",
+        "▶ !rpg diplomacy war <a> <b>",
+        "Declare kingdom war.",
 
-      "▶ !rpg dungeon advance",
-      "Advance through a dungeon.",
+        "▶ !rpg diplomacy peace <a> <b>",
+        "Offer peace.",
 
-      "━━━━━━━━━━━━━━━━━━━━━━",
+        "━━━━━━━━━━━━━━━━━━━━━━",
 
-      "Use !rpg help anytime to see this guide.",
-    ])
+        "⚔️ ARMY",
+
+        "▶ !rpg army",
+        "View your army.",
+
+        "▶ !rpg army train <unit> <amount>",
+        "Train troops.",
+
+        "▶ !rpg army formation <name>",
+        "Change formation.",
+
+        "▶ !rpg army regiment",
+        "View regiments.",
+
+        "━━━━━━━━━━━━━━━━━━━━━━",
+
+        "🔭 SCOUTING & WARFARE",
+
+        "▶ !rpg scout <location>",
+        "Scout a location.",
+
+        "▶ !rpg raid <location>",
+        "Raid a location.",
+
+        "▶ !rpg ambush <userID>",
+        "Ambush another player's army.",
+
+        "━━━━━━━━━━━━━━━━━━━━━━",
+
+        "📜 QUESTS",
+
+        "▶ !rpg quest",
+        "View your current quest.",
+
+        "▶ !rpg quest claim",
+        "Claim a completed quest.",
+
+        "━━━━━━━━━━━━━━━━━━━━━━",
+
+        "🏰 DUNGEONS",
+
+        "▶ !rpg dungeon",
+        "View dungeon status.",
+
+        "▶ !rpg dungeon enter <key>",
+        "Enter a dungeon.",
+
+        "▶ !rpg dungeon advance",
+        "Advance through a dungeon.",
+
+        "━━━━━━━━━━━━━━━━━━━━━━",
+
+        "Use !rpg help anytime to see this guide.",
+      ]
+    )
   );
 }
 
@@ -2373,11 +4064,12 @@ async function handleRpgCommand(
   text,
   originalText
 ) {
-  const cleanText = String(
-    originalText ||
+  const cleanText =
+    String(
+      originalText ||
       text ||
       ""
-  ).trim();
+    ).trim();
 
   if (
     !/^!rpg(?:\s|$)/i.test(
@@ -2392,7 +4084,8 @@ async function handleRpgCommand(
 
   const action =
     normalizeKey(
-      parts[1] || "help"
+      parts[1] ||
+        "help"
     );
 
   const args =
@@ -2404,7 +4097,9 @@ async function handleRpgCommand(
        HELP
     ===================================================== */
 
-    if (action === "help") {
+    if (
+      action === "help"
+    ) {
       await handleHelp(
         api,
         event
@@ -2454,6 +4149,36 @@ async function handleRpgCommand(
     }
 
     /* =====================================================
+       AFFINITY
+    ===================================================== */
+
+    else if (
+      action === "affinity" ||
+      action === "affinities"
+    ) {
+      await handleAffinity(
+        api,
+        event,
+        args
+      );
+    }
+
+    /* =====================================================
+       SPELLBOOK
+    ===================================================== */
+
+    else if (
+      action === "spells" ||
+      action === "spellbook"
+    ) {
+      await handleSpells(
+        api,
+        event,
+        args
+      );
+    }
+
+    /* =====================================================
        MAGIC
     ===================================================== */
 
@@ -2495,6 +4220,48 @@ async function handleRpgCommand(
     }
 
     /* =====================================================
+       SPECIALS
+    ===================================================== */
+
+    else if (
+      action === "special" ||
+      action === "specials"
+    ) {
+      /*
+       * A named special is routed to combat.
+       * "special" alone opens the menu.
+       */
+      if (
+        args.length
+      ) {
+        const special =
+          getSpecial(
+            args.join("_")
+          );
+
+        if (special) {
+          await handleSpecialCombat(
+            api,
+            event,
+            args
+          );
+        } else {
+          await handleSpecial(
+            api,
+            event,
+            args
+          );
+        }
+      } else {
+        await handleSpecial(
+          api,
+          event,
+          ["list"]
+        );
+      }
+    }
+
+    /* =====================================================
        INVENTORY
     ===================================================== */
 
@@ -2522,7 +4289,7 @@ async function handleRpgCommand(
     }
 
     /* =====================================================
-       MAP / WORLD
+       WORLD / MAP
     ===================================================== */
 
     else if (
@@ -2531,17 +4298,58 @@ async function handleRpgCommand(
       action === "regions" ||
       action === "locations"
     ) {
-      await handleMap(
+      if (
+        action === "world"
+      ) {
+        await handleWorldConditions(
+          api,
+          event
+        );
+      } else {
+        await handleMap(
+          api,
+          event,
+          action ===
+          "locations"
+            ? [
+                "locations",
+                ...args,
+              ]
+            : args
+        );
+      }
+    }
+
+    /* =====================================================
+       SEASON
+    ===================================================== */
+
+    else if (
+      action === "season" ||
+      action === "seasons"
+    ) {
+      await handleSeason(
         api,
-        event,
-        action === "locations"
-          ? ["locations"].concat(args)
-          : args
+        event
       );
     }
 
     /* =====================================================
-       PROPERTY / DOMAIN
+       WEATHER
+    ===================================================== */
+
+    else if (
+      action === "weather" ||
+      action === "conditions"
+    ) {
+      await handleWeather(
+        api,
+        event
+      );
+    }
+
+    /* =====================================================
+       PROPERTY
     ===================================================== */
 
     else if (
@@ -2595,7 +4403,10 @@ async function handleRpgCommand(
       await handleProperty(
         api,
         event,
-        ["build"].concat(args)
+        [
+          "build",
+          ...args,
+        ]
       );
     }
 
@@ -2609,7 +4420,10 @@ async function handleRpgCommand(
       await handleProperty(
         api,
         event,
-        ["defense"].concat(args)
+        [
+          "defense",
+          ...args,
+        ]
       );
     }
 
@@ -2629,7 +4443,10 @@ async function handleRpgCommand(
         event,
         action === "army"
           ? args
-          : [action].concat(args)
+          : [
+              action,
+              ...args,
+            ]
       );
     }
 
@@ -2705,9 +4522,6 @@ async function handleRpgCommand(
 
     /* =====================================================
        COMBAT
-
-       IMPORTANT:
-       "spell" MUST be here.
     ===================================================== */
 
     else if (
