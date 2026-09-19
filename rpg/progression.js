@@ -4,7 +4,7 @@
  * ECLIPSE RPG — PROGRESSION COMMANDS
  * ===================================
  *
- * Command layer for:
+ * COMMAND/UI LAYER ONLY
  *
  * KINGDOM
  *   !rpg kingdoms
@@ -14,7 +14,7 @@
  *   !rpg kingdom quest <id>
  *   !rpg kingdom claim <id>
  *   !rpg kingdom reputation
- *   !rpg pledge <id>                 legacy alias
+ *   !rpg pledge <id>
  *
  * AFFINITY
  *   !rpg affinity
@@ -25,15 +25,17 @@
  *   !rpg spells
  *   !rpg spells <affinity>
  *
- * SPECIALS
- *   !rpg special
+ * IMPORTANT:
+ *   SPECIALS ARE NOT OWNED BY THIS ROUTER.
+ *
  *   !rpg special <name>
  *
- * This file is the COMMAND/UI layer.
+ * is intentionally handled by the main RPG router because
+ * special execution must be able to reach the combat engine.
  *
- * The actual progression logic remains in:
+ * Actual progression/data logic remains in:
  *
- *   kingdom-quests.js
+ *   kingdom-quest.js
  *   kingdoms.js
  *   affinities.js
  *   spells.js
@@ -61,7 +63,6 @@ const {
 const kingdoms = require("./kingdoms");
 const affinities = require("./affinities");
 const spells = require("./spells");
-const specials = require("./specials");
 
 // ============================================================
 // HELPERS
@@ -83,22 +84,15 @@ function getArg(args, index = 0) {
   return String(args?.[index] || "").trim();
 }
 
-function getJoinedArgs(args, start = 0) {
-  return (args || [])
-    .slice(start)
-    .join(" ")
-    .trim();
-}
-
 // ============================================================
 // KINGDOM LIST
 // ============================================================
 
-async function handleKingdoms(
-  threadID,
-  userID
-) {
-  const list = getAllKingdoms();
+async function handleKingdoms(threadID, userID) {
+  const list =
+    typeof getAllKingdoms === "function"
+      ? getAllKingdoms()
+      : [];
 
   const player =
     await getPlayerKingdom(
@@ -114,6 +108,10 @@ async function handleKingdoms(
   ];
 
   for (const kingdom of list) {
+    if (!kingdom) {
+      continue;
+    }
+
     const reputation =
       await getKingdomReputation(
         threadID,
@@ -124,12 +122,17 @@ async function handleKingdoms(
     const pledged =
       player?.kingdom_id === kingdom.id;
 
+    const affinitiesList =
+      Array.isArray(kingdom.primaryAffinities)
+        ? kingdom.primaryAffinities.join(", ")
+        : "None";
+
     lines.push(
       `${pledged ? "👑" : "◆"} ${kingdom.name}`,
       `   ID: ${kingdom.id}`,
-      `   Capital: ${kingdom.capital}`,
-      `   Reputation: ${reputation}`,
-      `   Affinities: ${kingdom.primaryAffinities.join(", ")}`,
+      `   Capital: ${kingdom.capital || "Unknown"}`,
+      `   Reputation: ${reputation ?? 0}`,
+      `   Affinities: ${affinitiesList}`,
       ""
     );
   }
@@ -137,7 +140,7 @@ async function handleKingdoms(
   if (player?.traitor) {
     lines.push(
       "⚠️ TRAITOR STATUS",
-      `You betrayed: ${player.traitor_kingdom_id}`,
+      `You betrayed: ${player.traitor_kingdom_id || "Unknown"}`,
       "You cannot pledge to another kingdom.",
       ""
     );
@@ -173,7 +176,7 @@ async function handleKingdomProfile(
 
   const kingdomID =
     requested ||
-    player?.kingdom_id;
+    normalize(player?.kingdom_id);
 
   if (!kingdomID) {
     return handleKingdoms(
@@ -204,7 +207,7 @@ async function handleKingdomProfile(
   const lines = [
     formatKingdom(kingdom),
     "",
-    `Reputation: ${reputation}`,
+    `Reputation: ${reputation ?? 0}`,
   ];
 
   if (
@@ -286,7 +289,7 @@ async function handleKingdomReputation(
 
     lines.push(
       `${current ? "👑" : "◆"} ${kingdom.name}`,
-      `  Reputation: ${reputation}`
+      `  Reputation: ${reputation ?? 0}`
     );
 
     if (current) {
@@ -301,7 +304,7 @@ async function handleKingdomReputation(
   if (player.traitor) {
     lines.push(
       "⚠️ TRAITOR",
-      `Betrayed kingdom: ${player.traitor_kingdom_id}`,
+      `Betrayed kingdom: ${player.traitor_kingdom_id || "Unknown"}`,
       ""
     );
   }
@@ -345,14 +348,9 @@ async function handlePledge(
       kingdomID
     );
 
-  if (!check.allowed) {
-    return `❌ ${check.reason}`;
+  if (!check?.allowed) {
+    return `❌ ${check?.reason || "You cannot pledge to this kingdom."}`;
   }
-
-  /*
-   * Existing kingdoms.js remains the authority
-   * for the actual pledge write.
-   */
 
   if (
     typeof kingdoms.pledgeToKingdom !==
@@ -386,6 +384,11 @@ async function handlePledge(
     return "❌ Kingdom no longer exists.";
   }
 
+  const affinitiesList =
+    Array.isArray(kingdom.primaryAffinities)
+      ? kingdom.primaryAffinities.join(", ")
+      : "None";
+
   return [
     "╔════════════════════╗",
     "       OATH SWORN",
@@ -393,8 +396,8 @@ async function handlePledge(
     "",
     `You have pledged yourself to ${kingdom.name}.`,
     "",
-    `Capital: ${kingdom.capital}`,
-    `Affinities: ${kingdom.primaryAffinities.join(", ")}`,
+    `Capital: ${kingdom.capital || "Unknown"}`,
+    `Affinities: ${affinitiesList}`,
     "",
     "Kingdom quests are now available.",
     "",
@@ -406,19 +409,6 @@ async function handlePledge(
 // ============================================================
 // KINGDOM COMMAND ROUTER
 // ============================================================
-//
-// Handles the organized structure:
-//
-// !rpg kingdom
-// !rpg kingdom <id>
-// !rpg kingdom quests
-// !rpg kingdom quest <id>
-// !rpg kingdom claim <id>
-// !rpg kingdom reputation
-// !rpg kingdom pledge <id>
-//
-// This is the missing piece from the previous version.
-//
 
 async function handleKingdomCommand(
   threadID,
@@ -487,13 +477,6 @@ async function handleKingdomCommand(
       );
 
     default:
-      /*
-       * Allows:
-       *
-       * !rpg kingdom ashen_dominion
-       *
-       * without requiring the "info" keyword.
-       */
       return handleKingdomProfile(
         threadID,
         userID,
@@ -516,7 +499,7 @@ async function handleKingdomQuests(
       userID
     );
 
-  if (!summary.kingdom) {
+  if (!summary?.kingdom) {
     return [
       "❌ You are not pledged to a kingdom.",
       "",
@@ -528,15 +511,15 @@ async function handleKingdomQuests(
 
   const lines = [
     "╔════════════════════════════╗",
-    `   ${summary.kingdom.name.toUpperCase()}`,
+    `   ${String(summary.kingdom.name || "KINGDOM").toUpperCase()}`,
     "       KINGDOM QUESTS",
     "╚════════════════════════════╝",
     "",
-    `Reputation: ${summary.reputation}`,
+    `Reputation: ${summary.reputation ?? 0}`,
     "",
   ];
 
-  for (const entry of summary.quests) {
+  for (const entry of summary.quests || []) {
     const {
       quest,
       progress,
@@ -544,6 +527,10 @@ async function handleKingdomQuests(
       completed,
       claimed,
     } = entry;
+
+    if (!quest) {
+      continue;
+    }
 
     let status = "○";
 
@@ -556,7 +543,7 @@ async function handleKingdomQuests(
     lines.push(
       `${status} ${quest.id}`,
       `  ${quest.name}`,
-      `  ${quest.objective.type}: ${progress}/${required}`,
+      `  ${quest.objective?.type || "objective"}: ${progress ?? 0}/${required ?? 0}`,
       ""
     );
   }
@@ -603,13 +590,13 @@ async function handleKingdomQuest(
       questID
     );
 
-  if (!result.success) {
+  if (!result?.success) {
     return [
-      `❌ ${result.reason}`,
+      `❌ ${result?.reason || "Unable to start quest."}`,
       "",
       formatKingdomQuest(
         quest,
-        result.record
+        result?.record
       ),
     ].join("\n");
   }
@@ -654,64 +641,70 @@ async function handleKingdomClaim(
       questID
     );
 
-  if (!result.success) {
-    return `❌ ${result.reason}`;
+  if (!result?.success) {
+    return `❌ ${result?.reason || "Unable to claim quest."}`;
   }
+
+  const rewards =
+    result.rewards || {};
+
+  const questRewards =
+    result.quest?.rewards || {};
 
   const lines = [
     "╔════════════════════════╗",
     "       QUEST COMPLETE",
     "╚════════════════════════╝",
     "",
-    result.quest.name,
+    result.quest?.name || questID,
     "",
     "Rewards:",
   ];
 
-  if (result.rewards.coins) {
+  if (rewards.coins) {
     lines.push(
-      `🪙 +${result.rewards.coins} coins`
+      `🪙 +${rewards.coins} coins`
     );
   }
 
-  if (result.rewards.xp) {
+  if (rewards.xp) {
     lines.push(
-      `✨ +${result.rewards.xp} XP`
+      `✨ +${rewards.xp} XP`
     );
   }
 
-  if (result.rewards.reputation) {
+  if (rewards.reputation) {
     lines.push(
-      `👑 +${result.rewards.reputation} kingdom reputation`
+      `👑 +${rewards.reputation} kingdom reputation`
     );
   }
 
-  if (result.rewards.affinity) {
+  if (rewards.affinity) {
     const affinity =
-      result.quest.rewards
-        .affinity?.id;
+      questRewards.affinity?.id;
 
     const mastery =
-      result.quest.rewards
-        .affinity?.mastery || 0;
+      questRewards.affinity?.mastery || 0;
 
-    lines.push(
-      `🔮 +${mastery} ${title(affinity)} mastery`
-    );
+    if (affinity) {
+      lines.push(
+        `🔮 +${mastery} ${title(affinity)} mastery`
+      );
+    }
   }
 
-  if (result.rewards.spell) {
+  if (rewards.spell) {
     lines.push(
       `📜 Spell unlocked: ${title(
-        result.quest.rewards.spell
+        rewards.spell
       )}`
     );
   }
 
-  if (result.rewards.special) {
+  if (rewards.special) {
     lines.push(
       `⚔️ Special unlocked: ${title(
-        result.quest.rewards.special
+        rewards.special
       )}`
     );
   }
@@ -755,6 +748,11 @@ async function handleAffinity(
       userID
     );
 
+  const ownedList =
+    Array.isArray(list)
+      ? list
+      : [];
+
   const primary =
     await affinities.getPrimaryAffinity(
       threadID,
@@ -777,12 +775,12 @@ async function handleAffinity(
     "",
   ];
 
-  if (!list.length) {
+  if (!ownedList.length) {
     lines.push(
       "No affinities unlocked yet."
     );
   } else {
-    for (const entry of list) {
+    for (const entry of ownedList) {
       const affinity =
         affinities.getAffinity(
           entry.affinity_id ||
@@ -794,9 +792,9 @@ async function handleAffinity(
       }
 
       const tier =
-        affinities.getTier(
-          entry.tier
-        );
+        typeof affinities.getTier === "function"
+          ? affinities.getTier(entry.tier)
+          : null;
 
       lines.push(
         `${affinity.name}`,
@@ -838,8 +836,8 @@ async function handleAffinityDetails(
       ...affinities
         .getAllAffinities()
         .map(
-          affinity =>
-            `• ${affinity.id}`
+          entry =>
+            `• ${entry.id}`
         ),
     ].join("\n");
   }
@@ -852,22 +850,31 @@ async function handleAffinityDetails(
     );
 
   const tier =
-    owned
-      ? affinities.getTier(
-          owned.tier
-        )
-      : affinities.getTier(
-          "none"
-        );
+    owned && typeof affinities.getTier === "function"
+      ? affinities.getTier(owned.tier)
+      : null;
 
   const kingdom =
     getKingdomForAffinity(
       affinity.id
     );
 
+  /*
+   * getKingdomForAffinity() may return either a kingdom ID
+   * or a kingdom object depending on the data implementation.
+   */
+  let kingdomData = null;
+
+  if (kingdom) {
+    kingdomData =
+      typeof kingdom === "object"
+        ? kingdom
+        : getKingdom(kingdom);
+  }
+
   const lines = [
     "╔════════════════════════╗",
-    `      ${affinity.name.toUpperCase()}`,
+    `      ${String(affinity.name || affinity.id).toUpperCase()}`,
     "╚════════════════════════╝",
     "",
     affinity.description ||
@@ -877,12 +884,9 @@ async function handleAffinityDetails(
     `Mastery: ${Number(owned?.mastery || 0)}`,
   ];
 
-  if (kingdom) {
-    const kingdomData =
-      getKingdom(kingdom);
-
+  if (kingdomData) {
     lines.push(
-      `Kingdom: ${kingdomData?.name || kingdom}`
+      `Kingdom: ${kingdomData.name || kingdomData.id}`
     );
   } else {
     lines.push(
@@ -913,7 +917,12 @@ async function handleAffinityMastery(
       userID
     );
 
-  if (!list.length) {
+  const ownedList =
+    Array.isArray(list)
+      ? list
+      : [];
+
+  if (!ownedList.length) {
     return [
       "You have no unlocked affinities.",
       "",
@@ -930,7 +939,7 @@ async function handleAffinityMastery(
     "",
   ];
 
-  for (const entry of list) {
+  for (const entry of ownedList) {
     const affinity =
       affinities.getAffinity(
         entry.affinity_id ||
@@ -942,14 +951,14 @@ async function handleAffinityMastery(
     }
 
     const tier =
-      affinities.getTier(
-        entry.tier
-      );
+      typeof affinities.getTier === "function"
+        ? affinities.getTier(entry.tier)
+        : null;
 
     const next =
-      affinities.getNextTier(
-        entry.tier
-      );
+      typeof affinities.getNextTier === "function"
+        ? affinities.getNextTier(entry.tier)
+        : null;
 
     lines.push(
       `◆ ${affinity.name}`,
@@ -1136,12 +1145,16 @@ async function handleAffinitySpells(
 
   const lines = [
     "╔════════════════════════╗",
-    `     ${affinity.name.toUpperCase()} SPELLS`,
+    `     ${String(affinity.name || affinity.id).toUpperCase()} SPELLS`,
     "╚════════════════════════╝",
     "",
   ];
 
   for (const spell of spellsForAffinity) {
+    if (!spell) {
+      continue;
+    }
+
     const known =
       learnedIDs.has(spell.id);
 
@@ -1160,115 +1173,6 @@ async function handleAffinitySpells(
       ""
     );
   }
-
-  return lines.join("\n");
-}
-
-// ============================================================
-// SPECIALS
-// ============================================================
-
-async function handleSpecials(
-  threadID,
-  userID,
-  args
-) {
-  const requested =
-    normalize(getArg(args));
-
-  if (requested) {
-    const special =
-      specials.getSpecial(
-        requested
-      );
-
-    if (!special) {
-      return `❌ Unknown special: ${requested}`;
-    }
-
-    const owned =
-      await specials.hasSpecial(
-        threadID,
-        userID,
-        special.id
-      );
-
-    const lines = [
-      "╔════════════════════════╗",
-      `       ${special.name.toUpperCase()}`,
-      "╚════════════════════════╝",
-      "",
-      special.description ||
-        "A powerful special ability.",
-      "",
-      `Status: ${owned ? "Unlocked" : "Locked"}`,
-    ];
-
-    if (special.affinity) {
-      lines.push(
-        `Affinity: ${special.affinity}`
-      );
-    }
-
-    if (special.category) {
-      lines.push(
-        `Category: ${special.category}`
-      );
-    }
-
-    if (special.cooldown) {
-      lines.push(
-        `Cooldown: ${special.cooldown}`
-      );
-    }
-
-    return lines.join("\n");
-  }
-
-  const list =
-    typeof specials.getPlayerSpecials ===
-    "function"
-      ? await specials.getPlayerSpecials(
-          threadID,
-          userID
-        )
-      : [];
-
-  const lines = [
-    "╔════════════════════════╗",
-    "       SPECIAL MOVES",
-    "╚════════════════════════╝",
-    "",
-  ];
-
-  if (!list.length) {
-    lines.push(
-      "No special moves unlocked."
-    );
-  } else {
-    for (const entry of list) {
-      const special =
-        specials.getSpecial(
-          entry.special_id ||
-          entry.id
-        );
-
-      if (!special) {
-        continue;
-      }
-
-      lines.push(
-        `◆ ${special.name}`,
-        `  ${special.id}`,
-        ""
-      );
-    }
-  }
-
-  lines.push(
-    "Inspect a special:",
-    "!rpg special <name>"
-  );
 
   return lines.join("\n");
 }
@@ -1335,17 +1239,16 @@ async function handleProgressionCommand(
         args || []
       );
 
-    // --------------------------------------------------------
-    // SPECIALS
-    // --------------------------------------------------------
-
-    case "special":
-    case "specials":
-      return handleSpecials(
-        threadID,
-        userID,
-        args || []
-      );
+    /*
+     * DO NOT ADD:
+     *
+     * case "special":
+     * case "specials":
+     *
+     * Specials intentionally remain in the main RPG router.
+     * The main router needs to distinguish special inspection
+     * from actual combat execution.
+     */
 
     default:
       return null;
@@ -1378,7 +1281,4 @@ module.exports = {
   handleSpells,
   handleSpellbook,
   handleAffinitySpells,
-
-  // Specials
-  handleSpecials,
 };
