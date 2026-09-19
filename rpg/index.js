@@ -162,6 +162,17 @@ const {
 } = require("./diplomacy");
 
 /* =========================================================
+   PROGRESSION
+   (kingdom quests / reputation, affinity browsing, spell
+   browsing, special-move info — see PROGRESSION_COMMANDS
+   whitelist below for exactly which actions this covers)
+========================================================= */
+
+const {
+  handleProgressionCommand,
+} = require("./progression");
+
+/* =========================================================
    UTILS
 ========================================================= */
 
@@ -745,690 +756,15 @@ async function handleMagic(
 
 
 /* =========================================================
-   AFFINITY
-========================================================= */
-
-async function handleAffinity(
-  api,
-  event,
-  args
-) {
-  const threadID =
-    event.threadID;
-
-  const userID =
-    event.senderID;
-
-  await ensurePlayer(
-    threadID,
-    userID
-  );
-
-  const action =
-    normalizeKey(
-      args[0] || "status"
-    );
-
-  /* -------------------------------------------------------
-     LIST ALL
-  ------------------------------------------------------- */
-
-  if (
-    action === "list" ||
-    action === "all"
-  ) {
-    const affinities =
-      getAllAffinities();
-
-    const lines = [
-      "🌟 AVAILABLE AFFINITIES",
-      "",
-    ];
-
-    for (const affinity of affinities) {
-      lines.push(
-        (
-          affinity.emoji ||
-          "✨"
-        ) +
-        " " +
-        affinity.name
-      );
-
-      lines.push(
-        "   Kingdom: " +
-          (
-            affinity.kingdom
-              ? (
-                  KINGDOMS[
-                    affinity.kingdom
-                  ]?.name ||
-                  prettyName(
-                    affinity.kingdom
-                  )
-                )
-              : "Unknown"
-          )
-      );
-
-      lines.push("");
-    }
-
-    lines.push(
-      "Use !rpg affinity <name> for details."
-    );
-
-    await send(
-      api,
-      threadID,
-      box(
-        "🌟 AFFINITIES",
-        lines
-      )
-    );
-
-    return;
-  }
-
-  /* -------------------------------------------------------
-     LEARN / UNLOCK
-  ------------------------------------------------------- */
-
-  if (
-    action === "learn" ||
-    action === "unlock"
-  ) {
-    if (!args[1]) {
-      throw new Error(
-        "Choose an affinity to learn. Example: !rpg affinity learn fire"
-      );
-    }
-
-    const affinityID =
-      normalizeKey(args[1]);
-
-    const affinity =
-      getAffinity(
-        affinityID
-      );
-
-    if (!affinity) {
-      throw new Error(
-        "Unknown affinity: " +
-          args[1]
-      );
-    }
-
-    const result =
-      await unlockAffinity(
-        threadID,
-        userID,
-        affinityID,
-        {
-          source: "command",
-        }
-      );
-
-    await send(
-      api,
-      threadID,
-      box(
-        "🌟 AFFINITY UNLOCKED",
-        [
-          (
-            affinity.emoji ||
-            "✨"
-          ) +
-            " " +
-            affinity.name,
-
-          "",
-
-          "Tier: " +
-            (
-              result?.tier_name ||
-              result?.tier ||
-              "Weak"
-            ),
-
-          "",
-
-          "Your new affinity is now available.",
-        ]
-      )
-    );
-
-    return;
-  }
-
-  /* -------------------------------------------------------
-     MASTERY
-  ------------------------------------------------------- */
-
-  if (
-    action === "mastery"
-  ) {
-    if (!args[1]) {
-      throw new Error(
-        "Choose an affinity. Example: !rpg affinity mastery shadow"
-      );
-    }
-
-    const affinityID =
-      normalizeKey(args[1]);
-
-    const affinity =
-      getAffinity(
-        affinityID
-      );
-
-    if (!affinity) {
-      throw new Error(
-        "Unknown affinity."
-      );
-    }
-
-    const row =
-      await getPlayerAffinity(
-        threadID,
-        userID,
-        affinityID
-      );
-
-    if (!row) {
-      throw new Error(
-        "You have not unlocked " +
-          affinity.name +
-          "."
-      );
-    }
-
-    const mastery =
-      safeNumber(
-        row.mastery ??
-        row.mastery_points
-      );
-
-    const tier =
-      row.tier_name ||
-      row.tier ||
-      "Weak";
-
-    const tierData =
-      Object.values(
-        NEW_AFFINITY_TIERS
-      ).find(
-        value =>
-          value.key ===
-          String(tier).toLowerCase()
-      );
-
-    const next =
-      tierData
-        ? Object.values(
-            NEW_AFFINITY_TIERS
-          ).find(
-            value =>
-              value.id ===
-              tierData.id + 1
-          )
-        : null;
-
-    await send(
-      api,
-      threadID,
-      box(
-        "🌟 AFFINITY MASTERY",
-        [
-          (
-            affinity.emoji ||
-            "✨"
-          ) +
-            " " +
-            affinity.name,
-
-          "📊 Tier: " +
-            tier,
-
-          "✨ Mastery: " +
-            formatNumber(
-              mastery
-            ),
-
-          ...(next
-            ? [
-                "⬆️ Next: " +
-                  next.name,
-
-                "🎯 Required: " +
-                  formatNumber(
-                    next.masteryRequired
-                  ),
-              ]
-            : [
-                "👑 This affinity has reached its highest tier.",
-              ]),
-        ]
-      )
-    );
-
-    return;
-  }
-
-  /* -------------------------------------------------------
-     SPECIFIC AFFINITY
-  ------------------------------------------------------- */
-
-  if (args[0]) {
-    const affinityID =
-      normalizeKey(
-        args.join("_")
-      );
-
-    const affinity =
-      getAffinity(
-        affinityID
-      );
-
-    if (affinity) {
-      const row =
-        await getPlayerAffinity(
-          threadID,
-          userID,
-          affinityID
-        );
-
-      const lines = [
-        (
-          affinity.emoji ||
-          "✨"
-        ) +
-          " " +
-          affinity.name,
-
-        "",
-
-        "🌍 Kingdom: " +
-          (
-            KINGDOMS[
-              affinity.kingdom
-            ]?.name ||
-            prettyName(
-              affinity.kingdom
-            )
-          ),
-
-        "📊 Status: " +
-          (
-            row
-              ? (
-                  row.tier_name ||
-                  row.tier ||
-                  "Weak"
-                )
-              : "Locked"
-          ),
-
-        "✨ Mastery: " +
-          formatNumber(
-            row
-              ? (
-                  row.mastery ??
-                  row.mastery_points ??
-                  0
-                )
-              : 0
-          ),
-
-        "",
-      ];
-
-      if (affinity.environment) {
-        lines.push(
-          "🌎 Environmental bonuses:"
-        );
-
-        for (
-          const [
-            region,
-            multiplier,
-          ] of Object.entries(
-            affinity.environment
-          )
-        ) {
-          lines.push(
-            "   " +
-              prettyName(region) +
-              " x" +
-              multiplier
-          );
-        }
-
-        lines.push("");
-      }
-
-      lines.push(
-        row
-          ? "🔓 This affinity is unlocked."
-          : "🔒 This affinity is locked."
-      );
-
-      if (!row) {
-        lines.push(
-          "",
-          "Unlock through quests, trials, bosses, dungeons, or special story rewards."
-        );
-      }
-
-      await send(
-        api,
-        threadID,
-        box(
-          "🌟 AFFINITY",
-          lines
-        )
-      );
-
-      return;
-    }
-  }
-
-  /* -------------------------------------------------------
-     PLAYER AFFINITIES
-  ------------------------------------------------------- */
-
-  const affinities =
-    await getPlayerAffinities(
-      threadID,
-      userID
-    );
-
-  const primary =
-    await getPrimaryAffinity(
-      threadID,
-      userID
-    );
-
-  const lines = [
-    "🌟 YOUR AFFINITIES",
-    "",
-  ];
-
-  if (
-    primary
-  ) {
-    lines.push(
-      "👑 PRIMARY"
-    );
-
-    lines.push(
-      formatAffinity(primary)
-    );
-
-    lines.push("");
-  }
-
-  if (
-    !affinities ||
-    !affinities.length
-  ) {
-    lines.push(
-      "No secondary affinities unlocked yet."
-    );
-  } else {
-    lines.push(
-      "✨ UNLOCKED"
-    );
-
-    for (
-      const row of affinities
-    ) {
-      const id =
-        row.affinity_id ||
-        row.id;
-
-      const definition =
-        getAffinity(id);
-
-      if (!definition) continue;
-
-      lines.push(
-        (
-          definition.emoji ||
-          "✨"
-        ) +
-          " " +
-          definition.name +
-          " — " +
-          (
-            row.tier_name ||
-            row.tier ||
-            "Weak"
-          ) +
-          " · " +
-          formatNumber(
-            row.mastery ??
-            row.mastery_points ??
-            0
-          ) +
-          " mastery"
-      );
-    }
-  }
-
-  lines.push(
-    "",
-    "See every affinity: !rpg affinity list",
-    "View mastery: !rpg affinity mastery <affinity>",
-    "Learn an affinity: !rpg affinity learn <affinity>"
-  );
-
-  await send(
-    api,
-    threadID,
-    box(
-      "🌟 AFFINITY SYSTEM",
-      lines
-    )
-  );
-}
-
-
-/* =========================================================
-   SPELLS
-========================================================= */
-
-async function handleSpells(
-  api,
-  event,
-  args
-) {
-  const threadID =
-    event.threadID;
-
-  const userID =
-    event.senderID;
-
-  await ensurePlayer(
-    threadID,
-    userID
-  );
-
-  const learned =
-    await getLearnedSpells(
-      threadID,
-      userID
-    );
-
-  const filter =
-    args[0]
-      ? normalizeKey(args[0])
-      : null;
-
-  const lines = [];
-
-  if (filter) {
-    const affinity =
-      getAffinity(filter);
-
-    if (!affinity) {
-      throw new Error(
-        "Unknown affinity: " +
-          args[0]
-      );
-    }
-
-    lines.push(
-      (
-        affinity.emoji ||
-        "✨"
-      ) +
-        " " +
-        affinity.name +
-        " SPELLS"
-    );
-
-    lines.push("");
-
-    /*
-     * The legacy magic registry is still used
-     * here until the dedicated spells registry
-     * is fully switched over.
-     */
-    for (
-      const spellID of learned
-    ) {
-      const spell =
-        getSpell(spellID);
-
-      if (!spell) continue;
-
-      const spellSchool =
-        normalizeKey(
-          spell.school ||
-          spell.affinity ||
-          ""
-        );
-
-      if (
-        spellSchool !==
-        normalizeKey(
-          affinity.name
-        ) &&
-        spellSchool !==
-        filter
-      ) {
-        continue;
-      }
-
-      lines.push(
-        (
-          spell.emoji ||
-          "🔮"
-        ) +
-          " " +
-          spell.name
-      );
-    }
-
-    if (
-      lines.length === 2
-    ) {
-      lines.push(
-        "No known spells from this affinity."
-      );
-    }
-
-    lines.push(
-      "",
-      "Learn spells through affinity mastery, kingdom quests, dungeons, bosses, and special rewards."
-    );
-
-    await send(
-      api,
-      threadID,
-      box(
-        "🔮 SPELLS",
-        lines
-      )
-    );
-
-    return;
-  }
-
-  lines.push(
-    "🔮 KNOWN SPELLS"
-  );
-
-  lines.push("");
-
-  if (!learned.length) {
-    lines.push(
-      "No spells learned yet."
-    );
-  } else {
-    for (
-      const spellID of learned
-    ) {
-      const spell =
-        getSpell(spellID);
-
-      if (!spell) continue;
-
-      lines.push(
-        (
-          spell.emoji ||
-          "🔮"
-        ) +
-          " " +
-          spell.name
-      );
-
-      lines.push(
-        "   " +
-          prettyName(
-            spell.school ||
-            spell.affinity ||
-            "Unknown affinity"
-          )
-      );
-
-      if (
-        spell.manaCost !== undefined
-      ) {
-        lines.push(
-          "   🔷 " +
-            spell.manaCost +
-            " MP"
-        );
-      }
-
-      lines.push("");
-    }
-  }
-
-  lines.push(
-    "━━━━━━━━━━━━━━━━━━━━━━",
-    "Filter by affinity:",
-    "!rpg spells shadow",
-    "!rpg spells fire",
-    "!rpg spells arcane",
-    "!rpg spells divine"
-  );
-
-  await send(
-    api,
-    threadID,
-    box(
-      "🔮 SPELLBOOK",
-      lines
-    )
-  );
-}
-
-
-/* =========================================================
-   SPECIAL MOVES
+   SPECIAL MOVES (combat execution)
+
+   NOTE: Browsing/inspecting special moves ("!rpg special" and
+   "!rpg special <name>" when not mid-combat) is now handled by
+   progression.js (see handleSpecials there). This function and
+   handleSpecialCombat below remain here because actually
+   EXECUTING a special move during combat must stay wired into
+   the combat engine — progression.js only ever returns
+   descriptive text and must never intercept a live cast.
 ========================================================= */
 
 async function handleSpecial(
@@ -2522,6 +1858,16 @@ async function handleProperty(
 
 /* =========================================================
    KINGDOM
+
+   NOTE: This is the world-lore / diplomacy view of kingdoms
+   (KINGDOMS from ./kingdoms, relations from ./diplomacy),
+   including the "!rpg kingdom pledge <name>" subcommand.
+   It is intentionally kept separate from progression.js's
+   "!rpg kingdoms" (plural) and "!rpg pledge <name>" commands,
+   which layer kingdom QUESTS and reputation on top via
+   ./kingdom-quests. Routing "kingdom" (singular) through
+   progression would silently break the pledge subcommand
+   below, so it stays handled here.
 ========================================================= */
 
 async function handleKingdomInfo(
@@ -2566,6 +1912,7 @@ async function handleKingdomInfo(
           .concat([
             "View details: !rpg kingdom <name>",
             "Pledge allegiance: !rpg kingdom pledge <name>",
+            "Kingdom quests & reputation: !rpg kingdoms",
           ])
       )
     );
@@ -3255,6 +2602,11 @@ async function handleCombat(
 
 /* =========================================================
    SPECIAL COMBAT COMMAND
+
+   IMPORTANT: this is what actually casts a special move
+   during a live fight. It must never be replaced by
+   progression.js's info-only "!rpg special" handler — see
+   the whitelist notes on PROGRESSION_COMMANDS below.
 ========================================================= */
 
 async function handleSpecialCombat(
@@ -3987,6 +3339,12 @@ async function handleHelp(
         "▶ !rpg kingdom pledge <name>",
         "Pledge allegiance.",
 
+        "▶ !rpg kingdoms",
+        "View kingdom quests and your reputation.",
+
+        "▶ !rpg pledge <name>",
+        "Pledge allegiance (kingdom-quest reputation track).",
+
         "▶ !rpg diplomacy war <a> <b>",
         "Declare kingdom war.",
 
@@ -4055,6 +3413,42 @@ async function handleHelp(
 
 
 /* =========================================================
+   PROGRESSION ROUTING
+
+   These are the ONLY actions handed off to progression.js.
+   "kingdom" (singular) and "special"/"specials" are
+   deliberately excluded:
+
+     - "kingdom" is handled above by handleKingdomInfo, which
+       supports "!rpg kingdom pledge <name>". progression.js's
+       kingdom-profile handler has no pledge subcommand, so
+       routing "kingdom" through it would silently break
+       pledging.
+
+     - "special"/"specials" must stay wired to handleSpecial /
+       handleSpecialCombat below, because casting a special
+       move in live combat has to reach the combat engine.
+       progression.js's version is informational only and
+       would silently stop casts from working if it took over.
+
+   "kingdoms" (plural) and "pledge" are new, non-conflicting
+   top-level commands that only progression.js implements.
+   "affinity"/"affinities" and "spells"/"spellbook" are fully
+   owned by progression.js now — the old local handlers for
+   these were removed from this router.
+========================================================= */
+
+const PROGRESSION_COMMANDS = new Set([
+  "kingdoms",
+  "pledge",
+  "affinity",
+  "affinities",
+  "spells",
+  "spellbook",
+]);
+
+
+/* =========================================================
    MAIN RPG COMMAND ROUTER
 ========================================================= */
 
@@ -4090,6 +3484,53 @@ async function handleRpgCommand(
 
   const args =
     parts.slice(2);
+
+  /* =====================================================
+     PROGRESSION (whitelisted actions only — see notes above)
+  ===================================================== */
+
+  if (PROGRESSION_COMMANDS.has(action)) {
+    try {
+      const progressionResult =
+        await handleProgressionCommand(
+          event.threadID,
+          event.senderID,
+          action,
+          args
+        );
+
+      if (progressionResult !== null) {
+        await send(
+          api,
+          event.threadID,
+          progressionResult
+        );
+
+        return true;
+      }
+      /*
+       * progressionResult === null falls through to the
+       * normal router below, in case progression.js decides
+       * it doesn't own this particular action after all.
+       */
+    } catch (error) {
+      console.error(
+        "[RPG] Progression command failed:",
+        error
+      );
+
+      await send(
+        api,
+        event.threadID,
+        errorBox(
+          error.message ||
+            "The progression system could not complete that command."
+        )
+      );
+
+      return true;
+    }
+  }
 
   try {
 
@@ -4149,36 +3590,6 @@ async function handleRpgCommand(
     }
 
     /* =====================================================
-       AFFINITY
-    ===================================================== */
-
-    else if (
-      action === "affinity" ||
-      action === "affinities"
-    ) {
-      await handleAffinity(
-        api,
-        event,
-        args
-      );
-    }
-
-    /* =====================================================
-       SPELLBOOK
-    ===================================================== */
-
-    else if (
-      action === "spells" ||
-      action === "spellbook"
-    ) {
-      await handleSpells(
-        api,
-        event,
-        args
-      );
-    }
-
-    /* =====================================================
        MAGIC
     ===================================================== */
 
@@ -4220,7 +3631,9 @@ async function handleRpgCommand(
     }
 
     /* =====================================================
-       SPECIALS
+       SPECIALS (combat execution + local browsing —
+       see PROGRESSION_COMMANDS notes above for why this
+       stays local instead of routing through progression.js)
     ===================================================== */
 
     else if (
@@ -4366,7 +3779,7 @@ async function handleRpgCommand(
     }
 
     /* =====================================================
-       KINGDOM
+       KINGDOM (singular — see PROGRESSION_COMMANDS notes)
     ===================================================== */
 
     else if (
