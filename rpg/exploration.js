@@ -1,3 +1,5 @@
+"use strict";
+
 const db = require("../db");
 
 const {
@@ -37,7 +39,6 @@ const OUTCOME_TABLE = [
   { type: "nothing", weight: 10 },
 ];
 
-
 /* =========================================================
    DORIAN FLAVOR LINES
    Deterministic, pre-written — no AI call per explore.
@@ -48,24 +49,33 @@ const DORIAN_LINES = {
     "\"Something's moving out there. Don't say I didn't warn you.\"",
     "\"Ah. That's not the silence I was hoping for.\"",
   ],
+
   elite_encounter: [
     "\"That one's stronger than it looks. Mind yourself.\"",
     "\"I'd suggest running, but you never do listen.\"",
   ],
+
   gold: [
     "\"Well. At least the trip wasn't a total waste.\"",
     "\"Gold, not glory. I suppose it'll do.\"",
   ],
+
   item: [
     "\"That's worth more than you realize. Don't sell it too cheap.\"",
     "\"Interesting find. Bring it by the shop sometime.\"",
   ],
+
   nothing: [
     "\"Nothing? Consistent, if uneventful.\"",
     "\"Some days the road gives you nothing. Try again tomorrow.\"",
   ],
+
   insufficient_stamina: [
     "\"You're in no shape to go wandering. Rest first.\"",
+  ],
+
+  active_combat: [
+    "\"You're already in a fight. Try surviving that one first.\"",
   ],
 };
 
@@ -76,9 +86,39 @@ function pickLine(key) {
     return "";
   }
 
-  return lines[randomInt(0, lines.length - 1)];
+  return lines[
+    randomInt(0, lines.length - 1)
+  ];
 }
 
+/* =========================================================
+   ACTIVE COMBAT CHECK
+========================================================= */
+
+/*
+ * Exploration must not consume stamina when the player is
+ * already inside an active combat session.
+ *
+ * This check intentionally happens BEFORE updateVitals().
+ */
+async function hasActiveCombat(threadID, userID) {
+  const result = await db.query(
+    `
+      SELECT 1
+      FROM rpg_combat_sessions
+      WHERE thread_id = $1
+        AND user_id = $2
+        AND status = 'active'
+      LIMIT 1
+    `,
+    [
+      String(threadID),
+      String(userID),
+    ]
+  );
+
+  return result.rows.length > 0;
+}
 
 /* =========================================================
    OUTCOME ROLL
@@ -86,7 +126,8 @@ function pickLine(key) {
 
 function rollOutcome() {
   const total = OUTCOME_TABLE.reduce(
-    (sum, outcome) => sum + outcome.weight,
+    (sum, outcome) =>
+      sum + outcome.weight,
     0
   );
 
@@ -103,36 +144,81 @@ function rollOutcome() {
   return "nothing";
 }
 
-
 /* =========================================================
    EXPLORE
 ========================================================= */
 
 async function explore(threadID, userID) {
-  const state = await getUserState(threadID, userID);
+  const state =
+    await getUserState(
+      threadID,
+      userID
+    );
+
   const player = state.player;
 
-  if (Number(player.hp) <= 0 || player.status === "dead") {
+  if (
+    Number(player.hp) <= 0 ||
+    player.status === "dead"
+  ) {
     throw new Error(
       "You are defeated. Use !rpg rest before exploring again."
     );
   }
 
-  if (Number(player.stamina) < EXPLORE_STAMINA_COST) {
+  /*
+   * IMPORTANT:
+   * Check active combat BEFORE stamina is deducted.
+   *
+   * Without this check, a player already fighting could
+   * spend another 15 stamina by using exploration.
+   */
+  if (
+    await hasActiveCombat(
+      threadID,
+      userID
+    )
+  ) {
     const error = new Error(
-      "Not enough stamina to explore. Use !rpg rest to recover."
+      "You are already in combat. Finish the current battle before exploring again."
     );
 
-    error.dorianLine = pickLine("insufficient_stamina");
+    error.dorianLine =
+      pickLine("active_combat");
 
     throw error;
   }
 
-  await updateVitals(threadID, userID, {
-    stamina: Number(player.stamina) - EXPLORE_STAMINA_COST,
-  });
+  if (
+    Number(player.stamina) <
+    EXPLORE_STAMINA_COST
+  ) {
+    const error = new Error(
+      "Not enough stamina to explore. Use !rpg rest to recover."
+    );
 
-  const outcomeType = rollOutcome();
+    error.dorianLine =
+      pickLine("insufficient_stamina");
+
+    throw error;
+  }
+
+  /*
+   * Stamina is only consumed after all conditions that can
+   * reject the exploration have passed.
+   */
+  await updateVitals(
+    threadID,
+    userID,
+    {
+      stamina:
+        Number(player.stamina) -
+        EXPLORE_STAMINA_COST,
+    }
+  );
+
+  const outcomeType =
+    rollOutcome();
 
   /* -------------------------------------------------------
      ENCOUNTER (regular or elite)
@@ -147,29 +233,58 @@ async function explore(threadID, userID) {
     outcomeType === "encounter" ||
     outcomeType === "elite_encounter"
   ) {
-    const hunt = await createHunt(threadID, userID, {
-      elite: outcomeType === "elite_encounter",
-    });
+    try {
+      const hunt =
+        await createHunt(
+          threadID,
+          userID,
+          {
+            elite:
+              outcomeType ===
+              "elite_encounter",
+          }
+        );
 
-    return {
-      outcomeType,
-      dorianLine: pickLine(outcomeType),
-      hunt,
-    };
+      return {
+        outcomeType,
+        dorianLine:
+          pickLine(outcomeType),
+        hunt,
+      };
+    } catch (error) {
+      /*
+       * createHunt() should normally succeed because the
+       * active-combat check was already performed above.
+       *
+       * If another combat was created between the check and
+       * createHunt(), do not silently create another session.
+       * The stamina remains consumed because exploration itself
+       * already occurred and the encounter was rolled.
+       */
+      throw error;
+    }
   }
 
   /* -------------------------------------------------------
      GOLD
   ------------------------------------------------------- */
 
-  if (outcomeType === "gold") {
-    const amount = randomInt(80, 420);
+  if (
+    outcomeType === "gold"
+  ) {
+    const amount =
+      randomInt(80, 420);
 
-    await db.addBalance(threadID, userID, amount);
+    await db.addBalance(
+      threadID,
+      userID,
+      amount
+    );
 
     return {
       outcomeType,
-      dorianLine: pickLine("gold"),
+      dorianLine:
+        pickLine("gold"),
       gold: amount,
     };
   }
@@ -178,17 +293,28 @@ async function explore(threadID, userID) {
      ITEM
   ------------------------------------------------------- */
 
-  if (outcomeType === "item") {
+  if (
+    outcomeType === "item"
+  ) {
     const itemID =
       TREASURE_ITEMS[
-        randomInt(0, TREASURE_ITEMS.length - 1)
+        randomInt(
+          0,
+          TREASURE_ITEMS.length - 1
+        )
       ];
 
-    await addItem(threadID, userID, itemID, 1);
+    await addItem(
+      threadID,
+      userID,
+      itemID,
+      1
+    );
 
     return {
       outcomeType,
-      dorianLine: pickLine("item"),
+      dorianLine:
+        pickLine("item"),
       item: getItem(itemID),
     };
   }
@@ -199,10 +325,10 @@ async function explore(threadID, userID) {
 
   return {
     outcomeType: "nothing",
-    dorianLine: pickLine("nothing"),
+    dorianLine:
+      pickLine("nothing"),
   };
 }
-
 
 /* =========================================================
    EXPORT
