@@ -6398,6 +6398,7 @@ module.exports = {
   HER_LETTER_TO_DORIAN,
 
   isHer,
+  isSpecialPlayer: isHer,
   privateAccess,
 
   ensureTables,
@@ -6463,4 +6464,3 @@ module.exports = {
 
   handleLoveQuestCommand,
 };
-
