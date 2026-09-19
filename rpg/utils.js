@@ -42,66 +42,50 @@ function statLine(icon, label, value, maximum, length = 10) {
 // ============================================================================
 // ECLIPSE UI
 //
-// Designed for Messenger's narrow text layout:
+// New aesthetic — no boxed footer, corner-glyph frame instead of a full
+// closed box, left-aligned title:
 //
-// ╭─────────────────────────╮
-// │        🌑 ECLIPSE       │
-// ╰─────────────────────────╯
+// ⟡───────────────────────⟡
+//   🌑 ECLIPSE
+// ⟡───────────────────────⟡
 //
-// Content
+// content
 //
-// ╭─────────────────────────╮
-// │       END OF PANEL      │
-// ╰─────────────────────────╯
+// Errors use the same shape with a ✕ frame instead of ⟡, so they read as
+// visually distinct from normal panels at a glance:
+//
+// ✕───────────────────────✕
+//   ❌ SYSTEM
+// ✕───────────────────────✕
+//
+// content
 // ============================================================================
 
-const BOX_WIDTH = 25;
+const BOX_WIDTH = 27;
 const BOX_BAR = "─".repeat(BOX_WIDTH);
 
-function centerTitle(title) {
-  const clean = String(title || "").trim();
-
-  if (!clean) {
-    return " ".repeat(BOX_WIDTH);
-  }
-
-  if (clean.length >= BOX_WIDTH) {
-    return clean.slice(0, BOX_WIDTH);
-  }
-
-  const totalPadding = BOX_WIDTH - clean.length;
-  const leftPadding = Math.floor(totalPadding / 2);
-
-  return (
-    " ".repeat(leftPadding) +
-    clean +
-    " ".repeat(totalPadding - leftPadding)
-  );
-}
-
 function box(title, lines = []) {
-  const content = Array.isArray(lines)
-    ? lines
-    : [lines];
+  const content = Array.isArray(lines) ? lines : [lines];
 
   return [
-    `╭${BOX_BAR}╮`,
-    `│${centerTitle(title)}│`,
-    `╰${BOX_BAR}╯`,
+    `⟡${BOX_BAR}⟡`,
+    `  ${String(title || "").trim()}`,
+    `⟡${BOX_BAR}⟡`,
     "",
     ...content,
-    "",
-    `╭${BOX_BAR}╮`,
-    `│${centerTitle("🌑 ECLIPSE RPG")}│`,
-    `╰${BOX_BAR}╯`,
   ].join("\n");
 }
 
 function errorBox(message) {
-  return box(
-    "❌ SYSTEM",
-    Array.isArray(message) ? message : [message]
-  );
+  const content = Array.isArray(message) ? message : [message];
+
+  return [
+    `✕${BOX_BAR}✕`,
+    "  ❌ SYSTEM",
+    `✕${BOX_BAR}✕`,
+    "",
+    ...content,
+  ].join("\n");
 }
 
 // ============================================================================
