@@ -1,5 +1,3 @@
-kingdom-quest.js
-
 "use strict";
 
 /**
