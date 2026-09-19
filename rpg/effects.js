@@ -1,5 +1,3 @@
-effects.js
-
 "use strict";
 
 /**
