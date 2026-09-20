@@ -123,6 +123,331 @@ const lastRandomRoastByThread = new Map();
 const activeThreads = new Map();
 
 // ============================================================
+// WATCHDOG
+// ============================================================
+//
+// Local process watchdog.
+//
+// Purpose:
+//   - Detect prolonged event-loop stalls.
+//   - Confirm the Node process is still alive.
+//   - Track Messenger connection state.
+//   - Expose watchdog state through /health.
+//   - Allow admin status/restart commands.
+//   - Exit with code 1 when the process is genuinely unhealthy
+//     so Render can restart it.
+//
+// IMPORTANT:
+//   The watchdog does NOT spawn another copy of ECLIPSE.
+//   Render is responsible for restarting the failed process.
+// ============================================================
+
+const WATCHDOG_INTERVAL_MS = 30_000;
+
+const WATCHDOG_EVENT_LOOP_TIMEOUT_MS =
+  90_000;
+
+const WATCHDOG_FAILURE_LIMIT = 3;
+
+const WATCHDOG_STARTUP_GRACE_MS =
+  2 * 60 * 1000;
+
+const WATCHDOG_LOG_INTERVAL_MS =
+  5 * 60 * 1000;
+
+let watchdogStarted = false;
+let watchdogTimer = null;
+
+let watchdogStartedAt = Date.now();
+
+let watchdogLastTickAt =
+  Date.now();
+
+let watchdogLastHealthyAt =
+  Date.now();
+
+let watchdogConsecutiveFailures = 0;
+
+let watchdogMessengerConnected =
+  false;
+
+let watchdogShuttingDown = false;
+
+let watchdogLastLogAt = 0;
+
+function watchdogHeartbeat() {
+  const now =
+    Date.now();
+
+  watchdogLastHealthyAt =
+    now;
+
+  watchdogConsecutiveFailures =
+    0;
+}
+
+function watchdogSetMessengerConnected(
+  connected
+) {
+  watchdogMessengerConnected =
+    Boolean(connected);
+
+  if (
+    watchdogMessengerConnected
+  ) {
+    watchdogHeartbeat();
+  }
+}
+
+function watchdogSetShuttingDown(
+  value
+) {
+  watchdogShuttingDown =
+    Boolean(value);
+}
+
+function getWatchdogStatus() {
+  const now =
+    Date.now();
+
+  const uptimeMs =
+    now - watchdogStartedAt;
+
+  const eventLoopAgeMs =
+    now - watchdogLastTickAt;
+
+  const healthyAgeMs =
+    now - watchdogLastHealthyAt;
+
+  const inStartupGrace =
+    uptimeMs <
+    WATCHDOG_STARTUP_GRACE_MS;
+
+  const eventLoopHealthy =
+    eventLoopAgeMs <=
+    WATCHDOG_EVENT_LOOP_TIMEOUT_MS;
+
+  const watchdogHealthy =
+    !watchdogShuttingDown &&
+    (
+      inStartupGrace ||
+      (
+        eventLoopHealthy &&
+        watchdogConsecutiveFailures <
+          WATCHDOG_FAILURE_LIMIT
+      )
+    );
+
+  return {
+    ok:
+      watchdogHealthy,
+
+    started:
+      watchdogStarted,
+
+    shuttingDown:
+      watchdogShuttingDown,
+
+    messengerConnected:
+      watchdogMessengerConnected,
+
+    uptimeMs,
+
+    eventLoopAgeMs,
+
+    healthyAgeMs,
+
+    consecutiveFailures:
+      watchdogConsecutiveFailures,
+
+    startupGrace:
+      inStartupGrace,
+
+    lastHealthyAt:
+      watchdogLastHealthyAt,
+
+    timestamp:
+      new Date().toISOString(),
+  };
+}
+
+function runWatchdogCheck() {
+  if (
+    watchdogShuttingDown
+  ) {
+    return;
+  }
+
+  const now =
+    Date.now();
+
+  const expectedInterval =
+    WATCHDOG_INTERVAL_MS;
+
+  const elapsedSinceTick =
+    now - watchdogLastTickAt;
+
+  const eventLoopDelay =
+    elapsedSinceTick -
+    expectedInterval;
+
+  watchdogLastTickAt =
+    now;
+
+  const startupAge =
+    now - watchdogStartedAt;
+
+  if (
+    startupAge <
+    WATCHDOG_STARTUP_GRACE_MS
+  ) {
+    watchdogLastHealthyAt =
+      now;
+
+    watchdogConsecutiveFailures =
+      0;
+
+    return;
+  }
+
+  const eventLoopHealthy =
+    eventLoopDelay <=
+    WATCHDOG_EVENT_LOOP_TIMEOUT_MS;
+
+  if (
+    !eventLoopHealthy
+  ) {
+    watchdogConsecutiveFailures++;
+
+    console.error(
+      `[WATCHDOG] Event-loop stall detected: ${eventLoopDelay}ms`
+    );
+
+    console.error(
+      `[WATCHDOG] Failure ${watchdogConsecutiveFailures}/${WATCHDOG_FAILURE_LIMIT}`
+    );
+
+    if (
+      watchdogConsecutiveFailures >=
+      WATCHDOG_FAILURE_LIMIT
+    ) {
+      console.error(
+        "[WATCHDOG] ECLIPSE appears unhealthy."
+      );
+
+      console.error(
+        "[WATCHDOG] Exiting with code 1 so Render can restart the process."
+      );
+
+      process.exit(1);
+    }
+
+    return;
+  }
+
+  watchdogLastHealthyAt =
+    now;
+
+  watchdogConsecutiveFailures =
+    0;
+
+  if (
+    now - watchdogLastLogAt >=
+    WATCHDOG_LOG_INTERVAL_MS
+  ) {
+    watchdogLastLogAt =
+      now;
+
+    const memory =
+      process.memoryUsage();
+
+    console.log(
+      `[WATCHDOG] Healthy | ` +
+        `Messenger: ${
+          watchdogMessengerConnected
+            ? "connected"
+            : "not connected"
+        } | ` +
+        `RSS: ${Math.round(
+          memory.rss /
+            1024 /
+            1024
+        )} MB`
+    );
+  }
+}
+
+function startWatchdog() {
+  if (
+    watchdogStarted
+  ) {
+    return;
+  }
+
+  watchdogStarted =
+    true;
+
+  watchdogShuttingDown =
+    false;
+
+  watchdogStartedAt =
+    Date.now();
+
+  watchdogLastTickAt =
+    Date.now();
+
+  watchdogLastHealthyAt =
+    Date.now();
+
+  watchdogConsecutiveFailures =
+    0;
+
+  watchdogLastLogAt =
+    Date.now();
+
+  watchdogTimer =
+    setInterval(
+      runWatchdogCheck,
+      WATCHDOG_INTERVAL_MS
+    );
+
+  if (
+    watchdogTimer &&
+    typeof watchdogTimer.unref ===
+      "function"
+  ) {
+    watchdogTimer.unref();
+  }
+
+  console.log(
+    "[WATCHDOG] Local watchdog started."
+  );
+}
+
+function stopWatchdog() {
+  watchdogShuttingDown =
+    true;
+
+  if (
+    watchdogTimer
+  ) {
+    clearInterval(
+      watchdogTimer
+    );
+
+    watchdogTimer =
+      null;
+  }
+
+  watchdogStarted =
+    false;
+
+  console.log(
+    "[WATCHDOG] Local watchdog stopped."
+  );
+}
+
+// ============================================================
 // MUSIC RESOURCE PROTECTION
 // ============================================================
 //
@@ -1463,8 +1788,19 @@ app.get("/health", (_req, res) => {
   const music =
     getMusicStats();
 
-  res.status(200).json({
-    ok: true,
+  const watchdog =
+    getWatchdogStatus();
+
+  const healthOk =
+    watchdog.ok;
+
+  res.status(
+    healthOk
+      ? 200
+      : 503
+  ).json({
+    ok:
+      healthOk,
 
     botDisabled:
       global.botDisabled === true,
@@ -1474,6 +1810,8 @@ app.get("/health", (_req, res) => {
 
     uptime:
       process.uptime(),
+
+    watchdog,
 
     music: {
       activeDownloads:
@@ -1521,6 +1859,8 @@ const server =
       console.log(
         `Web server listening on port ${port}`
       );
+
+      startWatchdog();
     }
   );
 
@@ -1660,6 +2000,10 @@ login(
         loginError
       );
 
+      watchdogSetMessengerConnected(
+        false
+      );
+
       process.exit(1);
     }
 
@@ -1668,8 +2012,16 @@ login(
         "Login failed: Facebook API object was not returned."
       );
 
+      watchdogSetMessengerConnected(
+        false
+      );
+
       process.exit(1);
     }
+
+    watchdogSetMessengerConnected(
+      true
+    );
 
     console.log(
       "Logged in successfully."
@@ -1736,6 +2088,7 @@ login(
           "♡ music protection: 2 / GC",
           "♡ global downloads: 2",
           "♡ pause system: ready",
+          "♡ watchdog: active",
         ].join("\n"),
         startupThreadID,
         (sendError) => {
@@ -1759,6 +2112,10 @@ login(
         event
       ) => {
         if (listenError) {
+          watchdogSetMessengerConnected(
+            false
+          );
+
           console.error(
             "Listener error:",
             listenError
@@ -1766,6 +2123,12 @@ login(
 
           return;
         }
+
+        watchdogSetMessengerConnected(
+          true
+        );
+
+        watchdogHeartbeat();
 
         if (
           !event ||
@@ -1844,6 +2207,8 @@ async function handleMessage(
   api,
   event
 ) {
+  watchdogHeartbeat();
+
   const {
     threadID,
     senderID,
@@ -1952,6 +2317,9 @@ async function handleMessage(
       const music =
         getMusicStats();
 
+      const watchdog =
+        getWatchdogStatus();
+
       sendReplyWithTyping(
         api,
         [
@@ -1966,6 +2334,13 @@ async function handleMessage(
           "",
           "୨୧ process",
           "    ♡ 🟢 STILL RUNNING",
+          "",
+          "୨୧ watchdog",
+          `    ♡ ${
+            watchdog.ok
+              ? "🟢 HEALTHY"
+              : "🔴 UNHEALTHY"
+          }`,
           "",
           "୨୧ music",
           `    ♡ active downloads: ${
@@ -2067,6 +2442,11 @@ async function handleMessage(
           "    ♡ !pause status",
           "    ♡ !resume",
           "",
+          "୨୧ watchdog",
+          "    ♡ !watchdog",
+          "    ♡ !watchdog status",
+          "    ♡ !watchdog restart",
+          "",
           "୨୧ communication",
           "    ♡ !broadcast <message>",
           "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
@@ -2083,6 +2463,9 @@ async function handleMessage(
     ) {
       const music =
         getMusicStats();
+
+      const watchdog =
+        getWatchdogStatus();
 
       sendReplyWithTyping(
         api,
@@ -2103,6 +2486,18 @@ async function handleMessage(
               : "🟢 ACTIVE"
           }`,
           "",
+          "୨୧ watchdog",
+          `    ♡ ${
+            watchdog.ok
+              ? "🟢 HEALTHY"
+              : "🔴 UNHEALTHY"
+          }`,
+          `    ♡ Messenger: ${
+            watchdog.messengerConnected
+              ? "🟢 CONNECTED"
+              : "🔴 DISCONNECTED"
+          }`,
+          "",
           "୨୧ music protection",
           `    ♡ global downloads: ${music.activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
           `    ♡ global pending: ${music.waitingGlobal}`,
@@ -2114,6 +2509,7 @@ async function handleMessage(
           "    ♡ !resume",
           "    ♡ !shutdown",
           "    ♡ !startup",
+          "    ♡ !watchdog status",
           "",
           "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
         ].join("\n"),
@@ -2187,6 +2583,161 @@ async function handleMessage(
 
       return;
     }
+  }
+
+  // ==========================================================
+  // WATCHDOG CONTROL
+  // ==========================================================
+
+  const watchdogMatch =
+    originalText.match(
+      /^!watchdog(?:\s+(status|restart))?$/i
+    );
+
+  if (
+    watchdogMatch
+  ) {
+    if (!isAdmin) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  WATCHDOG  🎀 ──────╮",
+          "",
+          "🔒 ADMIN ONLY",
+          "",
+          "Only the bot admin can inspect",
+          "or restart the watchdog.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    const watchdogCommand =
+      (
+        watchdogMatch[1] ||
+        "status"
+      ).toLowerCase();
+
+    if (
+      watchdogCommand ===
+      "restart"
+    ) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  WATCHDOG  🎀 ──────╮",
+          "",
+          "🔴 MANUAL RESTART REQUESTED",
+          "",
+          "ECLIPSE will exit now.",
+          "Render should automatically restart",
+          "the service.",
+          "",
+          "♡ This is intentional.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      setTimeout(
+        () => {
+          watchdogSetShuttingDown(
+            true
+          );
+
+          watchdogSetMessengerConnected(
+            false
+          );
+
+          stopWatchdog();
+
+          process.exit(1);
+        },
+        1500
+      );
+
+      return;
+    }
+
+    const watchdog =
+      getWatchdogStatus();
+
+    const uptimeSeconds =
+      Math.floor(
+        process.uptime()
+      );
+
+    const uptimeMinutes =
+      Math.floor(
+        uptimeSeconds / 60
+      );
+
+    const uptimeHours =
+      Math.floor(
+        uptimeMinutes / 60
+      );
+
+    const displayMinutes =
+      uptimeMinutes % 60;
+
+    const displaySeconds =
+      uptimeSeconds % 60;
+
+    sendReplyWithTyping(
+      api,
+      [
+        "╭────── 🎀  WATCHDOG STATUS  🎀 ──────╮",
+        "",
+        "୨୧ watchdog",
+        `    ♡ ${
+          watchdog.ok
+            ? "🟢 HEALTHY"
+            : "🔴 UNHEALTHY"
+        }`,
+        "",
+        "୨୧ process",
+        "    ♡ 🟢 RUNNING",
+        `    ♡ uptime: ${uptimeHours}h ${displayMinutes}m ${displaySeconds}s`,
+        "",
+        "୨୧ Messenger",
+        `    ♡ ${
+          watchdog.messengerConnected
+            ? "🟢 CONNECTED"
+            : "🔴 DISCONNECTED"
+        }`,
+        "",
+        "୨୧ event loop",
+        `    ♡ last tick: ${watchdog.eventLoopAgeMs}ms ago`,
+        `    ♡ failures: ${watchdog.consecutiveFailures}`,
+        "",
+        "୨୧ watchdog",
+        `    ♡ started: ${
+          watchdog.started
+            ? "YES"
+            : "NO"
+        }`,
+        `    ♡ shutdown: ${
+          watchdog.shuttingDown
+            ? "YES"
+            : "NO"
+        }`,
+        "",
+        "୨୧ commands",
+        "    ♡ !watchdog",
+        "    ♡ !watchdog status",
+        "    ♡ !watchdog restart",
+        "",
+        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+      ].join("\n"),
+      threadID
+    );
+
+    return;
   }
 
   // ==========================================================
@@ -2605,6 +3156,11 @@ async function handleMessage(
         "♡ !pause",
         "♡ !pause status",
         "♡ !resume",
+        "",
+        "୨୧ WATCHDOG",
+        "♡ !watchdog",
+        "♡ !watchdog status",
+        "♡ !watchdog restart",
         "",
         "୨୧ PICTURES",
         "♡ !pic",
@@ -4063,6 +4619,16 @@ async function gracefulShutdown(
   }
 
   shuttingDown = true;
+
+  watchdogSetShuttingDown(
+    true
+  );
+
+  watchdogSetMessengerConnected(
+    false
+  );
+
+  stopWatchdog();
 
   console.log(
     `[SYSTEM] Received ${signal}. Cleaning up ECLIPSE...`
