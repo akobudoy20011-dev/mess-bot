@@ -175,6 +175,109 @@ let watchdogShuttingDown = false;
 
 let watchdogLastLogAt = 0;
 
+const WATCHDOG_MODES = Object.freeze({
+  NORMAL: "normal",
+  REDUCED: "reduced",
+  PROTECTIVE: "protective",
+  EMERGENCY: "emergency",
+  RECOVERY: "recovery",
+});
+
+const WATCHDOG_EVENT_LOOP_SAMPLE_MS = 5_000;
+const WATCHDOG_MEMORY_REDUCED_MB = Math.max(256, Number(process.env.WATCHDOG_MEMORY_REDUCED_MB || 450));
+const WATCHDOG_MEMORY_PROTECTIVE_MB = Math.max(WATCHDOG_MEMORY_REDUCED_MB + 64, Number(process.env.WATCHDOG_MEMORY_PROTECTIVE_MB || 650));
+const WATCHDOG_MEMORY_EMERGENCY_MB = Math.max(WATCHDOG_MEMORY_PROTECTIVE_MB + 64, Number(process.env.WATCHDOG_MEMORY_EMERGENCY_MB || 800));
+const WATCHDOG_RECOVERY_STABLE_MS = Math.max(30_000, Number(process.env.WATCHDOG_RECOVERY_STABLE_MS || 60_000));
+
+let watchdogMode = WATCHDOG_MODES.NORMAL;
+let watchdogModeChangedAt = Date.now();
+let watchdogLastEventLoopSampleAt = Date.now();
+let watchdogLastEventLoopLagMs = 0;
+let watchdogEventLoopTimer = null;
+let watchdogStableSince = Date.now();
+let watchdogLastReason = "startup";
+let watchdogResourcePressure = "normal";
+let watchdogLastTransitionLogAt = 0;
+
+function watchdogSetMode(mode, reason = "") {
+  const key = String(mode || "").toUpperCase();
+  const nextMode = WATCHDOG_MODES[key];
+  if (!nextMode) return;
+  if (watchdogMode === nextMode) {
+    watchdogLastReason = reason || watchdogLastReason;
+    return;
+  }
+  const previous = watchdogMode;
+  watchdogMode = nextMode;
+  watchdogModeChangedAt = Date.now();
+  watchdogLastReason = reason || "state transition";
+  watchdogStableSince = nextMode === WATCHDOG_MODES.NORMAL || nextMode === WATCHDOG_MODES.RECOVERY ? Date.now() : 0;
+  if (Date.now() - watchdogLastTransitionLogAt > 5_000) {
+    watchdogLastTransitionLogAt = Date.now();
+    console.warn(`[WATCHDOG] Mode ${previous.toUpperCase()} -> ${nextMode.toUpperCase()} | ${watchdogLastReason}`);
+  }
+}
+
+function watchdogRecordEventLoopLag(lagMs) {
+  watchdogLastEventLoopLagMs = Math.max(0, Number(lagMs) || 0);
+  watchdogLastEventLoopSampleAt = Date.now();
+  if (watchdogLastEventLoopLagMs >= WATCHDOG_EVENT_LOOP_TIMEOUT_MS) {
+    watchdogSetMode("PROTECTIVE", `event-loop lag ${Math.round(watchdogLastEventLoopLagMs)}ms`);
+  } else if (watchdogLastEventLoopLagMs >= 5_000 && watchdogMode === WATCHDOG_MODES.NORMAL) {
+    watchdogSetMode("REDUCED", `event-loop lag ${Math.round(watchdogLastEventLoopLagMs)}ms`);
+  }
+}
+
+function watchdogSampleEventLoop() {
+  const now = Date.now();
+  const elapsed = now - watchdogLastEventLoopSampleAt;
+  watchdogLastEventLoopSampleAt = now;
+  watchdogRecordEventLoopLag(Math.max(0, elapsed - WATCHDOG_EVENT_LOOP_SAMPLE_MS));
+}
+
+function watchdogEvaluateResources() {
+  const rssMb = process.memoryUsage().rss / 1024 / 1024;
+  let pressure = "normal";
+  if (rssMb >= WATCHDOG_MEMORY_EMERGENCY_MB) pressure = "emergency";
+  else if (rssMb >= WATCHDOG_MEMORY_PROTECTIVE_MB) pressure = "protective";
+  else if (rssMb >= WATCHDOG_MEMORY_REDUCED_MB) pressure = "reduced";
+  watchdogResourcePressure = pressure;
+  if (pressure === "emergency") watchdogSetMode("EMERGENCY", `RSS ${Math.round(rssMb)}MB`);
+  else if (pressure === "protective") watchdogSetMode("PROTECTIVE", `RSS ${Math.round(rssMb)}MB`);
+  else if (pressure === "reduced" && watchdogMode === WATCHDOG_MODES.NORMAL) watchdogSetMode("REDUCED", `RSS ${Math.round(rssMb)}MB`);
+}
+
+function watchdogCanStartBackgroundWork(kind = "normal") {
+  if (watchdogMode === WATCHDOG_MODES.EMERGENCY) return kind === "critical";
+  if (watchdogMode === WATCHDOG_MODES.PROTECTIVE) return kind !== "background";
+  return true;
+}
+
+function watchdogGetTrafficMultiplier() {
+  switch (watchdogMode) {
+    case WATCHDOG_MODES.REDUCED: return 1.35;
+    case WATCHDOG_MODES.PROTECTIVE: return 2.0;
+    case WATCHDOG_MODES.EMERGENCY: return 4.0;
+    case WATCHDOG_MODES.RECOVERY: return 1.5;
+    default: return 1.0;
+  }
+}
+
+function watchdogMaybeRecover() {
+  if (watchdogMode === WATCHDOG_MODES.NORMAL) return;
+  const rssMb = process.memoryUsage().rss / 1024 / 1024;
+  if ([WATCHDOG_MODES.EMERGENCY, WATCHDOG_MODES.PROTECTIVE, WATCHDOG_MODES.REDUCED].includes(watchdogMode)) {
+    if (rssMb < WATCHDOG_MEMORY_REDUCED_MB && watchdogLastEventLoopLagMs < 2_000) {
+      if (!watchdogStableSince) watchdogStableSince = Date.now();
+      if (Date.now() - watchdogStableSince >= WATCHDOG_RECOVERY_STABLE_MS) watchdogSetMode("RECOVERY", "resources stable");
+    } else {
+      watchdogStableSince = 0;
+    }
+  } else if (watchdogMode === WATCHDOG_MODES.RECOVERY && Date.now() - watchdogModeChangedAt >= WATCHDOG_RECOVERY_STABLE_MS) {
+    watchdogSetMode("NORMAL", "recovery complete");
+  }
+}
+
 function watchdogHeartbeat() {
   const now =
     Date.now();
@@ -266,6 +369,14 @@ function getWatchdogStatus() {
     lastHealthyAt:
       watchdogLastHealthyAt,
 
+    mode: watchdogMode,
+    modeChangedAt: watchdogModeChangedAt,
+    modeReason: watchdogLastReason,
+    resourcePressure: watchdogResourcePressure,
+    eventLoopLagMs: Math.round(watchdogLastEventLoopLagMs),
+    eventLoopSampleAgeMs: now - watchdogLastEventLoopSampleAt,
+    recoveryStableMs: watchdogStableSince ? now - watchdogStableSince : 0,
+
     timestamp:
       new Date().toISOString(),
   };
@@ -309,6 +420,10 @@ function runWatchdogCheck() {
 
     return;
   }
+
+  watchdogRecordEventLoopLag(eventLoopDelay);
+  watchdogEvaluateResources();
+  watchdogMaybeRecover();
 
   const eventLoopHealthy =
     eventLoopDelay <=
@@ -411,12 +526,18 @@ function startWatchdog() {
       WATCHDOG_INTERVAL_MS
     );
 
+  watchdogEventLoopTimer = setInterval(watchdogSampleEventLoop, WATCHDOG_EVENT_LOOP_SAMPLE_MS);
+
   if (
     watchdogTimer &&
     typeof watchdogTimer.unref ===
       "function"
   ) {
     watchdogTimer.unref();
+  }
+
+  if (watchdogEventLoopTimer && typeof watchdogEventLoopTimer.unref === "function") {
+    watchdogEventLoopTimer.unref();
   }
 
   console.log(
@@ -437,6 +558,11 @@ function stopWatchdog() {
 
     watchdogTimer =
       null;
+  }
+
+  if (watchdogEventLoopTimer) {
+    clearInterval(watchdogEventLoopTimer);
+    watchdogEventLoopTimer = null;
   }
 
   watchdogStarted =
@@ -554,12 +680,324 @@ function withTimeout(
 }
 
 // ============================================================
+// MESSENGER SAFETY MANAGER
+// ============================================================
+// Responsible traffic protection for Messenger sends.
+// This does NOT attempt to disguise automation or bypass Meta
+// enforcement. It keeps ECLIPSE from producing accidental bursts,
+// duplicate sends, retry storms, and concurrent API overload.
+// ============================================================
+
+const MESSENGER_SAFETY = {
+  globalMinGapMs: Math.max(
+    150,
+    Number(process.env.MESSENGER_GLOBAL_GAP_MS || 350)
+  ),
+  threadMinGapMs: Math.max(
+    500,
+    Number(process.env.MESSENGER_THREAD_GAP_MS || 1500)
+  ),
+  maxQueue: Math.max(
+    50,
+    Number(process.env.MESSENGER_MAX_QUEUE || 500)
+  ),
+  maxRetries: Math.min(
+    3,
+    Math.max(0, Number(process.env.MESSENGER_MAX_RETRIES || 2))
+  ),
+  retryBaseMs: Math.max(
+    500,
+    Number(process.env.MESSENGER_RETRY_BASE_MS || 1500)
+  ),
+  circuitFailureLimit: Math.max(
+    3,
+    Number(process.env.MESSENGER_CIRCUIT_FAILURE_LIMIT || 5)
+  ),
+  circuitPauseMs: Math.max(
+    10_000,
+    Number(process.env.MESSENGER_CIRCUIT_PAUSE_MS || 30_000)
+  ),
+  duplicateWindowMs: Math.max(
+    1000,
+    Number(process.env.MESSENGER_DUPLICATE_WINDOW_MS || 4000)
+  ),
+};
+
+const messengerSendQueue = [];
+const messengerThreadNextAt = new Map();
+const messengerRecentSends = new Map();
+let messengerSendWorkerRunning = false;
+let messengerLastSendAt = 0;
+let messengerConsecutiveFailures = 0;
+let messengerCircuitOpenUntil = 0;
+let messengerTotalSent = 0;
+let messengerTotalFailures = 0;
+let messengerTotalRetries = 0;
+let messengerTotalSuppressed = 0;
+let messengerTotalRejected = 0;
+let messengerNextJobId = 0;
+
+function messengerErrorCode(error) {
+  return String(
+    error?.errorCode ??
+    error?.code ??
+    error?.status ??
+    error?.statusCode ??
+    ""
+  ).trim();
+}
+
+function isMessengerTransientError(error) {
+  const code = messengerErrorCode(error);
+  const message = String(error?.message || error || "").toLowerCase();
+
+  return (
+    code === "1545012" ||
+    code === "613" ||
+    code === "429" ||
+    /rate.?limit|too many|temporar|throttl|try again|timeout|timed out|econnreset|socket hang up|network/i.test(message)
+  );
+}
+
+function messengerRetryDelay(attempt) {
+  const exponential =
+    MESSENGER_SAFETY.retryBaseMs * Math.pow(2, attempt);
+  const jitter = Math.floor(Math.random() * 500);
+  return Math.min(30_000, exponential + jitter);
+}
+
+function messengerPayloadFingerprint(message, threadID) {
+  let body = "";
+
+  if (typeof message === "string") {
+    body = message;
+  } else if (message && typeof message === "object") {
+    body = String(message.body || "");
+    if (message.attachment) {
+      body += `|attachment:${message.attachment.path || message.attachment.fd || "stream"}`;
+    }
+  }
+
+  return crypto
+    .createHash("sha1")
+    .update(`${String(threadID)}|${body}`)
+    .digest("hex");
+}
+
+function messengerCleanupSafetyState(now = Date.now()) {
+  for (const [threadID, nextAt] of messengerThreadNextAt.entries()) {
+    if (nextAt < now - 60_000) {
+      messengerThreadNextAt.delete(threadID);
+    }
+  }
+
+  for (const [key, sentAt] of messengerRecentSends.entries()) {
+    if (sentAt < now - MESSENGER_SAFETY.duplicateWindowMs * 2) {
+      messengerRecentSends.delete(key);
+    }
+  }
+}
+
+function messengerSafetyStatus() {
+  const now = Date.now();
+  return {
+    queue: messengerSendQueue.length,
+    workerRunning: messengerSendWorkerRunning,
+    lastSendAt: messengerLastSendAt,
+    consecutiveFailures: messengerConsecutiveFailures,
+    circuitOpen: now < messengerCircuitOpenUntil,
+    circuitOpenUntil: messengerCircuitOpenUntil,
+    totalSent: messengerTotalSent,
+    totalFailures: messengerTotalFailures,
+    totalRetries: messengerTotalRetries,
+    totalSuppressed: messengerTotalSuppressed,
+    totalRejected: messengerTotalRejected,
+    effective: {
+      globalGapMs: messengerEffectiveGlobalGapMs(),
+      threadGapMs: messengerEffectiveThreadGapMs(),
+      trafficMultiplier: watchdogGetTrafficMultiplier(),
+    },
+    limits: {
+      globalGapMs: MESSENGER_SAFETY.globalMinGapMs,
+      threadGapMs: MESSENGER_SAFETY.threadMinGapMs,
+      maxQueue: MESSENGER_SAFETY.maxQueue,
+      maxRetries: MESSENGER_SAFETY.maxRetries,
+    },
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function messengerEffectiveGlobalGapMs() {
+  return Math.ceil(MESSENGER_SAFETY.globalMinGapMs * watchdogGetTrafficMultiplier());
+}
+
+function messengerEffectiveThreadGapMs() {
+  return Math.ceil(MESSENGER_SAFETY.threadMinGapMs * watchdogGetTrafficMultiplier());
+}
+
+function waitForMessengerSlot(threadID) {
+  const now = Date.now();
+  const globalWait = Math.max(0, messengerLastSendAt + messengerEffectiveGlobalGapMs() - now);
+  const threadNextAt = messengerThreadNextAt.get(String(threadID)) || 0;
+  const threadWait = Math.max(0, threadNextAt - now);
+  return Math.max(globalWait, threadWait);
+}
+
+async function performMessengerSend(api, message, threadID) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= MESSENGER_SAFETY.maxRetries; attempt++) {
+    const circuitWait = Math.max(0, messengerCircuitOpenUntil - Date.now());
+    if (circuitWait > 0) {
+      await sleep(circuitWait);
+    }
+
+    const slotWait = waitForMessengerSlot(threadID);
+    if (slotWait > 0) {
+      await sleep(slotWait);
+    }
+
+    try {
+      const result = await new Promise((resolve, reject) => {
+        try {
+          api.sendMessage(
+            message,
+            threadID,
+            (error, messageInfo) => {
+              if (error) reject(error);
+              else resolve(messageInfo || null);
+            }
+          );
+        } catch (error) {
+          reject(error);
+        }
+      });
+
+      const now = Date.now();
+      messengerLastSendAt = now;
+      messengerThreadNextAt.set(
+        String(threadID),
+        now + messengerEffectiveThreadGapMs()
+      );
+      messengerConsecutiveFailures = 0;
+      messengerCircuitOpenUntil = 0;
+      messengerTotalSent++;
+      watchdogSetMessengerConnected(true);
+
+      return result;
+    } catch (error) {
+      lastError = error;
+      messengerConsecutiveFailures++;
+      messengerTotalFailures++;
+
+      if (messengerConsecutiveFailures >= MESSENGER_SAFETY.circuitFailureLimit) {
+        messengerCircuitOpenUntil =
+          Date.now() + MESSENGER_SAFETY.circuitPauseMs;
+        console.error(
+          `[MESSENGER SAFETY] Circuit opened for ${MESSENGER_SAFETY.circuitPauseMs}ms after ${messengerConsecutiveFailures} consecutive send failures.`
+        );
+      }
+
+      const retryable = isMessengerTransientError(error);
+      if (!retryable || attempt >= MESSENGER_SAFETY.maxRetries) {
+        throw error;
+      }
+
+      const delay = messengerRetryDelay(attempt);
+      messengerTotalRetries++;
+      console.warn(
+        `[MESSENGER SAFETY] Transient send error (${messengerErrorCode(error) || "unknown"}); retry ${attempt + 1}/${MESSENGER_SAFETY.maxRetries} in ${delay}ms.`
+      );
+      await sleep(delay);
+    }
+  }
+
+  throw lastError || new Error("Messenger send failed.");
+}
+
+function enqueueMessengerSend(api, message, threadID) {
+  const normalizedThreadID = String(threadID);
+  const fingerprint = messengerPayloadFingerprint(message, normalizedThreadID);
+  const now = Date.now();
+
+  messengerCleanupSafetyState(now);
+
+  if (now < messengerCircuitOpenUntil) {
+    return Promise.reject(
+      new Error("Messenger safety circuit is temporarily open.")
+    );
+  }
+
+  const previous = messengerRecentSends.get(fingerprint);
+  if (previous && now - previous < MESSENGER_SAFETY.duplicateWindowMs) {
+    messengerTotalSuppressed++;
+    console.warn(
+      `[MESSENGER SAFETY] Duplicate send suppressed for thread ${normalizedThreadID}.`
+    );
+    return Promise.resolve(null);
+  }
+
+  if (messengerSendQueue.length >= MESSENGER_SAFETY.maxQueue) {
+    messengerTotalRejected++;
+    return Promise.reject(
+      new Error("Messenger safety queue is full; send rejected to protect the connection.")
+    );
+  }
+
+  messengerRecentSends.set(fingerprint, now);
+
+  return new Promise((resolve, reject) => {
+    messengerSendQueue.push({
+      id: ++messengerNextJobId,
+      api,
+      message,
+      threadID: normalizedThreadID,
+      resolve,
+      reject,
+      enqueuedAt: now,
+    });
+
+    void processMessengerSendQueue();
+  });
+}
+
+async function processMessengerSendQueue() {
+  if (messengerSendWorkerRunning) return;
+  messengerSendWorkerRunning = true;
+
+  try {
+    while (messengerSendQueue.length > 0) {
+      const job = messengerSendQueue.shift();
+      if (!job) continue;
+
+      try {
+        const result = await performMessengerSend(
+          job.api,
+          job.message,
+          job.threadID
+        );
+        job.resolve(result);
+      } catch (error) {
+        job.reject(error);
+      }
+    }
+  } finally {
+    messengerSendWorkerRunning = false;
+    if (messengerSendQueue.length > 0) {
+      void processMessengerSendQueue();
+    }
+  }
+}
+
+// ============================================================
 // MESSENGER PROMISE WRAPPER
 // ============================================================
 //
-// IMPORTANT:
-// The callback's messageInfo is returned so music can capture
-// the message ID and edit the original status message.
+// All normal Messenger sends now pass through the centralized
+// safety manager above. Existing callers do not need to change.
 // ============================================================
 
 function sendMessengerMessage(
@@ -567,25 +1005,11 @@ function sendMessengerMessage(
   message,
   threadID
 ) {
-  return new Promise((resolve, reject) => {
-    try {
-      api.sendMessage(
-        message,
-        threadID,
-        (error, messageInfo) => {
-          if (error) {
-            reject(error);
-          } else {
-            resolve(
-              messageInfo || null
-            );
-          }
-        }
-      );
-    } catch (error) {
-      reject(error);
-    }
-  });
+  return enqueueMessengerSend(
+    api,
+    message,
+    threadID
+  );
 }
 
 // ============================================================
@@ -876,6 +1300,10 @@ function processMusicQueue() {
     global.botPaused === true ||
     musicPaused === true
   ) {
+    return;
+  }
+
+  if (!watchdogCanStartBackgroundWork("background")) {
     return;
   }
 
@@ -1813,6 +2241,15 @@ app.get("/health", (_req, res) => {
 
     watchdog,
 
+    messengerSafety: messengerSafetyStatus(),
+
+    resources: {
+      rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      heapTotalMb: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+      externalMb: Math.round(process.memoryUsage().external / 1024 / 1024),
+    },
+
     music: {
       activeDownloads:
         music.activeDownloads,
@@ -2076,7 +2513,8 @@ login(
       process.env.STARTUP_THREAD_ID;
 
     if (startupThreadID) {
-      api.sendMessage(
+      void sendMessengerMessage(
+        api,
         [
           "╭─────── ୨୧ ♡ ୨୧ ───────╮",
           "        🎀 E C L I P S E",
@@ -2090,16 +2528,13 @@ login(
           "♡ pause system: ready",
           "♡ watchdog: active",
         ].join("\n"),
-        startupThreadID,
-        (sendError) => {
-          if (sendError) {
-            console.error(
-              "Startup message failed:",
-              sendError
-            );
-          }
-        }
-      );
+        startupThreadID
+      ).catch((sendError) => {
+        console.error(
+          "Startup message failed:",
+          sendError
+        );
+      });
     }
 
     console.log(
@@ -2200,6 +2635,150 @@ function registerActiveThread(
 }
 
 // ============================================================
+// WATCHDOG COMMAND + ADMISSION LAYER
+// ============================================================
+//
+// This is an additional protection layer above feature handlers.
+// It limits command storms before they reach RPG, games, music,
+// AI, economy, or Messenger. It is intentionally conservative and
+// does not attempt to disguise automation or bypass Meta systems.
+// ============================================================
+
+const WATCHDOG_COMMAND_WINDOW_MS = Math.max(
+  5_000,
+  Number(process.env.WATCHDOG_COMMAND_WINDOW_MS || 10_000)
+);
+
+const WATCHDOG_COMMAND_LIMIT = Math.max(
+  10,
+  Number(process.env.WATCHDOG_COMMAND_LIMIT || 40)
+);
+
+const WATCHDOG_COMMAND_BURST_LIMIT = Math.max(
+  5,
+  Number(process.env.WATCHDOG_COMMAND_BURST_LIMIT || 12)
+);
+
+const watchdogCommandBuckets = new Map();
+const watchdogCommandWarnings = new Map();
+
+function watchdogResetCounters() {
+  watchdogConsecutiveFailures = 0;
+  watchdogLastEventLoopLagMs = 0;
+  watchdogLastReason = "manual reset";
+  watchdogResourcePressure = "normal";
+  watchdogStableSince = Date.now();
+  messengerConsecutiveFailures = 0;
+  messengerCircuitOpenUntil = 0;
+  messengerCleanupSafetyState();
+}
+
+function watchdogResetMessengerCounters() {
+  messengerConsecutiveFailures = 0;
+  messengerCircuitOpenUntil = 0;
+  messengerCleanupSafetyState();
+}
+
+function watchdogFormatStatus() {
+  const status = getWatchdogStatus();
+  const messenger = messengerSafetyStatus();
+  const memory = process.memoryUsage();
+  const rssMb = Math.round(memory.rss / 1024 / 1024);
+
+  return [
+    "╔══════════════════════════════╗",
+    "        🌑 ECLIPSE WATCHDOG",
+    "╚══════════════════════════════╝",
+    "",
+    `Mode: ${status.mode.toUpperCase()}`,
+    `Health: ${status.ok ? "🟢 STABLE" : "🔴 UNHEALTHY"}`,
+    `Reason: ${status.modeReason || "none"}`,
+    "",
+    "⚙️ SYSTEM",
+    `Node: ✓ (${Math.round(process.uptime())}s uptime)`,
+    `Event Loop: ${status.eventLoopLagMs}ms`,
+    `Memory: ${rssMb}MB (${status.resourcePressure})`,
+    `Database: available`,
+    "",
+    "📡 MESSENGER",
+    `Connection: ${status.messengerConnected ? "🟢 CONNECTED" : "🟡 WAITING"}`,
+    `Queue: ${messenger.queue}/${messenger.limits.maxQueue}`,
+    `Circuit: ${messenger.circuitOpen ? "🔴 OPEN" : "🟢 CLOSED"}`,
+    `Failures: ${messenger.consecutiveFailures}`,
+    `Retries: ${messenger.totalRetries}`,
+    `Duplicates: ${messenger.totalSuppressed}`,
+    `Rejected: ${messenger.totalRejected}`,
+    "",
+    `Traffic multiplier: ${messenger.effective.trafficMultiplier}x`,
+    `Global gap: ${messenger.effective.globalGapMs}ms`,
+    `Thread gap: ${messenger.effective.threadGapMs}ms`,
+  ].join("\n");
+}
+
+function watchdogAdmitCommand(threadId, senderId, originalText, isAdmin) {
+  if (isAdmin) return true;
+
+  const text = String(originalText || "").trim();
+  if (!/^!/i.test(text)) return true;
+
+  const now = Date.now();
+  const key = `${String(threadId)}:${String(senderId)}`;
+  let bucket = watchdogCommandBuckets.get(key);
+
+  if (!bucket || now - bucket.startedAt > WATCHDOG_COMMAND_WINDOW_MS) {
+    bucket = {
+      startedAt: now,
+      count: 0,
+      lastCommand: "",
+      burstCount: 0,
+      lastAt: 0,
+    };
+    watchdogCommandBuckets.set(key, bucket);
+  }
+
+  bucket.count++;
+  if (bucket.lastCommand === text && now - bucket.lastAt <= 3_000) {
+    bucket.burstCount++;
+  } else {
+    bucket.burstCount = 1;
+  }
+  bucket.lastCommand = text;
+  bucket.lastAt = now;
+
+  if (
+    bucket.count > WATCHDOG_COMMAND_LIMIT ||
+    bucket.burstCount > WATCHDOG_COMMAND_BURST_LIMIT
+  ) {
+    const lastWarning = watchdogCommandWarnings.get(key) || 0;
+    if (now - lastWarning > WATCHDOG_COMMAND_WINDOW_MS) {
+      watchdogCommandWarnings.set(key, now);
+      console.warn(
+        `[WATCHDOG] Command storm suppressed for ${key}.`
+      );
+    }
+    return false;
+  }
+
+  if (watchdogMode === WATCHDOG_MODES.EMERGENCY) {
+    return false;
+  }
+
+  return true;
+}
+
+function watchdogCleanupCommandState() {
+  const cutoff = Date.now() - WATCHDOG_COMMAND_WINDOW_MS * 3;
+  for (const [key, bucket] of watchdogCommandBuckets.entries()) {
+    if (bucket.lastAt < cutoff) watchdogCommandBuckets.delete(key);
+  }
+  for (const [key, at] of watchdogCommandWarnings.entries()) {
+    if (at < cutoff) watchdogCommandWarnings.delete(key);
+  }
+}
+
+setInterval(watchdogCleanupCommandState, WATCHDOG_COMMAND_WINDOW_MS * 3).unref?.();
+
+// ============================================================
 // MESSAGE HANDLING
 // ============================================================
 
@@ -2242,6 +2821,130 @@ async function handleMessage(
     ADMIN_IDS.includes(
       senderId
     );
+
+  // ==========================================================
+  // WATCHDOG COMMANDS
+  // Read-only commands are public. Control commands are admin-only.
+  // ==========================================================
+
+  const watchdogMatch = originalText.match(
+    /^!watchdog(?:\s+(status|stats|test|pause|resume|reset|restart))?$/i
+  );
+
+  if (watchdogMatch) {
+    const action = String(watchdogMatch[1] || "status").toLowerCase();
+
+    if (["pause", "resume", "reset", "restart"].includes(action) && !isAdmin) {
+      await sendReplyWithTyping(
+        api,
+        "🔒 WATCHDOG CONTROL IS ADMIN-ONLY.\n\nYou can use `!watchdog`, `!watchdog status`, `!watchdog stats`, and `!watchdog test` to view health.",
+        threadId
+      );
+      return;
+    }
+
+    if (action === "restart") {
+      sendReplyWithTyping(
+        api,
+        "🌑 WATCHDOG\n\n🔴 MANUAL RESTART REQUESTED\n\nECLIPSE will exit so the external process manager can restart it.",
+        threadId
+      );
+      setTimeout(() => {
+        watchdogSetShuttingDown(true);
+        watchdogSetMessengerConnected(false);
+        stopWatchdog();
+        process.exit(1);
+      }, 1500);
+      return;
+    }
+
+    if (action === "pause") {
+      watchdogSetMode("PROTECTIVE", "manual admin pause");
+      musicPaused = true;
+      sendReplyWithTyping(
+        api,
+        "🌑 WATCHDOG\n\n🟠 PROTECTIVE MODE ENABLED\n\nNon-essential background activity is being restricted.\n\nUse `!watchdog resume` when you want automatic operation restored.",
+        threadId
+      );
+      return;
+    }
+
+    if (action === "resume") {
+      watchdogResetMessengerCounters();
+      watchdogStableSince = Date.now();
+      watchdogSetMode("RECOVERY", "manual admin resume");
+      resumeMusicProcessing();
+      sendReplyWithTyping(
+        api,
+        "🌑 WATCHDOG\n\n🔵 RECOVERY MODE\n\nSystems are resuming gradually. Watchdog will return to NORMAL after the stability window.",
+        threadId
+      );
+      return;
+    }
+
+    if (action === "reset") {
+      watchdogResetCounters();
+      sendReplyWithTyping(
+        api,
+        "🌑 WATCHDOG\n\n♻️ STATE RESET\n\nWatchdog and Messenger failure counters were reset. Automatic protection remains enabled.",
+        threadId
+      );
+      return;
+    }
+
+    if (action === "stats") {
+      const status = getWatchdogStatus();
+      const messenger = messengerSafetyStatus();
+      const memory = process.memoryUsage();
+      sendReplyWithTyping(
+        api,
+        [
+          watchdogFormatStatus(),
+          "",
+          "📊 TELEMETRY",
+          `Successful sends: ${messenger.totalSent}`,
+          `Failed sends: ${messenger.totalFailures}`,
+          `Retries: ${messenger.totalRetries}`,
+          `Suppressed duplicates: ${messenger.totalSuppressed}`,
+          `Rejected by queue: ${messenger.totalRejected}`,
+          `RSS: ${Math.round(memory.rss / 1024 / 1024)}MB`,
+          `Event-loop lag: ${status.eventLoopLagMs}ms`,
+        ].join("\n"),
+        threadId
+      );
+      return;
+    }
+
+    if (action === "test") {
+      const status = getWatchdogStatus();
+      const memory = process.memoryUsage();
+      const checks = [
+        `Node process: ${status.shuttingDown ? "❌" : "✓"}`,
+        `Watchdog timer: ${status.started ? "✓" : "❌"}`,
+        `Event loop: ${status.eventLoopLagMs < 5000 ? "✓" : "⚠️"}`,
+        `Memory: ${status.resourcePressure === "normal" ? "✓" : "⚠️"}`,
+        `Messenger circuit: ${messengerCircuitOpenUntil > Date.now() ? "⚠️ OPEN" : "✓ CLOSED"}`,
+        `RSS: ${Math.round(memory.rss / 1024 / 1024)}MB`,
+      ];
+      sendReplyWithTyping(
+        api,
+        "🌑 WATCHDOG SELF-TEST\n\n" + checks.join("\n") + "\n\nNo test spam was sent to Messenger.",
+        threadId
+      );
+      return;
+    }
+
+    sendReplyWithTyping(
+      api,
+      watchdogFormatStatus(),
+      threadId
+    );
+    return;
+  }
+
+  if (!watchdogAdmitCommand(threadId, senderId, originalText, isAdmin)) {
+    return;
+  }
 
   // ==========================================================
   // PAUSE / RESUME / BOT CONTROL
@@ -2497,6 +3200,8 @@ async function handleMessage(
               ? "🟢 CONNECTED"
               : "🔴 DISCONNECTED"
           }`,
+          `    ♡ send queue: ${messengerSendQueue.length}/${MESSENGER_SAFETY.maxQueue}`,
+          `    ♡ safety circuit: ${Date.now() < messengerCircuitOpenUntil ? "🟡 PAUSED" : "🟢 CLOSED"}`,
           "",
           "୨୧ music protection",
           `    ♡ global downloads: ${music.activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
@@ -2583,161 +3288,6 @@ async function handleMessage(
 
       return;
     }
-  }
-
-  // ==========================================================
-  // WATCHDOG CONTROL
-  // ==========================================================
-
-  const watchdogMatch =
-    originalText.match(
-      /^!watchdog(?:\s+(status|restart))?$/i
-    );
-
-  if (
-    watchdogMatch
-  ) {
-    if (!isAdmin) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  WATCHDOG  🎀 ──────╮",
-          "",
-          "🔒 ADMIN ONLY",
-          "",
-          "Only the bot admin can inspect",
-          "or restart the watchdog.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      return;
-    }
-
-    const watchdogCommand =
-      (
-        watchdogMatch[1] ||
-        "status"
-      ).toLowerCase();
-
-    if (
-      watchdogCommand ===
-      "restart"
-    ) {
-      sendReplyWithTyping(
-        api,
-        [
-          "╭────── 🎀  WATCHDOG  🎀 ──────╮",
-          "",
-          "🔴 MANUAL RESTART REQUESTED",
-          "",
-          "ECLIPSE will exit now.",
-          "Render should automatically restart",
-          "the service.",
-          "",
-          "♡ This is intentional.",
-          "",
-          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-        ].join("\n"),
-        threadID
-      );
-
-      setTimeout(
-        () => {
-          watchdogSetShuttingDown(
-            true
-          );
-
-          watchdogSetMessengerConnected(
-            false
-          );
-
-          stopWatchdog();
-
-          process.exit(1);
-        },
-        1500
-      );
-
-      return;
-    }
-
-    const watchdog =
-      getWatchdogStatus();
-
-    const uptimeSeconds =
-      Math.floor(
-        process.uptime()
-      );
-
-    const uptimeMinutes =
-      Math.floor(
-        uptimeSeconds / 60
-      );
-
-    const uptimeHours =
-      Math.floor(
-        uptimeMinutes / 60
-      );
-
-    const displayMinutes =
-      uptimeMinutes % 60;
-
-    const displaySeconds =
-      uptimeSeconds % 60;
-
-    sendReplyWithTyping(
-      api,
-      [
-        "╭────── 🎀  WATCHDOG STATUS  🎀 ──────╮",
-        "",
-        "୨୧ watchdog",
-        `    ♡ ${
-          watchdog.ok
-            ? "🟢 HEALTHY"
-            : "🔴 UNHEALTHY"
-        }`,
-        "",
-        "୨୧ process",
-        "    ♡ 🟢 RUNNING",
-        `    ♡ uptime: ${uptimeHours}h ${displayMinutes}m ${displaySeconds}s`,
-        "",
-        "୨୧ Messenger",
-        `    ♡ ${
-          watchdog.messengerConnected
-            ? "🟢 CONNECTED"
-            : "🔴 DISCONNECTED"
-        }`,
-        "",
-        "୨୧ event loop",
-        `    ♡ last tick: ${watchdog.eventLoopAgeMs}ms ago`,
-        `    ♡ failures: ${watchdog.consecutiveFailures}`,
-        "",
-        "୨୧ watchdog",
-        `    ♡ started: ${
-          watchdog.started
-            ? "YES"
-            : "NO"
-        }`,
-        `    ♡ shutdown: ${
-          watchdog.shuttingDown
-            ? "YES"
-            : "NO"
-        }`,
-        "",
-        "୨୧ commands",
-        "    ♡ !watchdog",
-        "    ♡ !watchdog status",
-        "    ♡ !watchdog restart",
-        "",
-        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
-      ].join("\n"),
-      threadID
-    );
-
-    return;
   }
 
   // ==========================================================
@@ -4348,24 +4898,22 @@ function broadcastToAllThreads(
     ) => {
       setTimeout(
         () => {
-          api.sendMessage(
+          void sendMessengerMessage(
+            api,
             broadcastMessage,
-            threadID,
-            (sendError) => {
-              if (
+            threadID
+          )
+            .then(() => {
+              console.log(
+                `[Broadcast] Sent to ${threadID}`
+              );
+            })
+            .catch((sendError) => {
+              console.error(
+                `[Broadcast] Failed for ${threadID}:`,
                 sendError
-              ) {
-                console.error(
-                  `[Broadcast] Failed for ${threadID}:`,
-                  sendError
-                );
-              } else {
-                console.log(
-                  `[Broadcast] Sent to ${threadID}`
-                );
-              }
-            }
-          );
+              );
+            });
         },
         index * 500
       );
@@ -4486,20 +5034,16 @@ function sendReplyWithTyping(
               }
             : message;
 
-        api.sendMessage(
+        void sendMessengerMessage(
+          api,
           outgoingMessage,
-          threadID,
-          (sendError) => {
-            if (
-              sendError
-            ) {
-              console.error(
-                "Reply failed:",
-                sendError
-              );
-            }
-          }
-        );
+          threadID
+        ).catch((sendError) => {
+          console.error(
+            "Reply failed:",
+            sendError
+          );
+        });
       } catch (sendError) {
         console.error(
           "Reply error:",
@@ -4695,6 +5239,9 @@ process.once(
 // ============================================================
 
 setInterval(() => {
+  watchdogEvaluateResources();
+  watchdogMaybeRecover();
+
   const m =
     process.memoryUsage();
 
