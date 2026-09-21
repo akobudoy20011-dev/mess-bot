@@ -18,6 +18,23 @@ const {
   initLastChamber,
 } = require("./games");
 
+// ============================================================
+// ECLIPSE ACADEMY / EXAM
+// ============================================================
+
+const {
+  handleExam,
+  handleExamResponse,
+} = require("./exam-manager");
+
+// ============================================================
+// ECLIPSE INVESTIGATIONS
+// ============================================================
+
+const {
+  handleInvestigationCommand,
+} = require("./investigations");
+
 const { handleRpgCommand } = require("./rpg");
 
 const {
@@ -4781,6 +4798,40 @@ async function handleMessage(
   }
 
   // ==========================================================
+  // EXAM RESPONSE
+  // !answer A/B/C/D
+  // Must run before the normal game-response router.
+  // ==========================================================
+
+  if (/^!answer(?:\s|$)/i.test(originalText)) {
+    try {
+      if (
+        await handleExamResponse(
+          api,
+          event,
+          text,
+          originalText
+        )
+      ) {
+        return;
+      }
+    } catch (error) {
+      console.error(
+        "[EXAM] Response handler failed:",
+        error
+      );
+
+      await sendReplyWithTyping(
+        api,
+        "🎓 The exam system encountered an error. Please try again.",
+        threadID
+      );
+
+      return;
+    }
+  }
+
+  // ==========================================================
   // GAME RESPONSE
   // ==========================================================
 
@@ -5074,6 +5125,86 @@ async function handleMessage(
       }
 
       return;
+    }
+
+    // --------------------------------------------------------
+    // EXAM COMMANDS
+    // --------------------------------------------------------
+
+    const examMatch =
+      text.match(
+        /^!exam(?:\s+(.*))?$/i
+      );
+
+    if (examMatch) {
+      const examArgs = examMatch[1]
+        ? examMatch[1].trim().split(/\s+/)
+        : [];
+
+      try {
+        if (await handleExam(api, event, examArgs)) {
+          return;
+        }
+      } catch (error) {
+        console.error(
+          "[EXAM] Command failed:",
+          error
+        );
+
+        await sendReplyWithTyping(
+          api,
+          "🎓 The exam system encountered an error. Please try again.",
+          threadID
+        );
+
+        return;
+      }
+    }
+
+    // --------------------------------------------------------
+    // INVESTIGATION COMMANDS
+    // !case / !haunt / !incident / !heist / !trial / !lost
+    // !investigator / !investigations
+    // --------------------------------------------------------
+
+    const investigationMatch =
+      text.match(
+        /^!(investigations?|investigator|case|haunt|incident|heist|trial|lost)(?:\s+(.*))?$/i
+      );
+
+    if (investigationMatch) {
+      const investigationCommand =
+        investigationMatch[1].toLowerCase();
+
+      const investigationArgs = investigationMatch[2]
+        ? investigationMatch[2].trim().split(/\s+/)
+        : [];
+
+      try {
+        if (
+          await handleInvestigationCommand(
+            api,
+            event,
+            investigationCommand,
+            investigationArgs
+          )
+        ) {
+          return;
+        }
+      } catch (error) {
+        console.error(
+          "[INVESTIGATIONS] Command failed:",
+          error
+        );
+
+        await sendReplyWithTyping(
+          api,
+          "🕵️ The investigation system encountered an error. Please try again.",
+          threadID
+        );
+
+        return;
+      }
     }
 
     // --------------------------------------------------------
