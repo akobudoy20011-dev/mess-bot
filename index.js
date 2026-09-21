@@ -175,109 +175,6 @@ let watchdogShuttingDown = false;
 
 let watchdogLastLogAt = 0;
 
-const WATCHDOG_MODES = Object.freeze({
-  NORMAL: "normal",
-  REDUCED: "reduced",
-  PROTECTIVE: "protective",
-  EMERGENCY: "emergency",
-  RECOVERY: "recovery",
-});
-
-const WATCHDOG_EVENT_LOOP_SAMPLE_MS = 5_000;
-const WATCHDOG_MEMORY_REDUCED_MB = Math.max(256, Number(process.env.WATCHDOG_MEMORY_REDUCED_MB || 450));
-const WATCHDOG_MEMORY_PROTECTIVE_MB = Math.max(WATCHDOG_MEMORY_REDUCED_MB + 64, Number(process.env.WATCHDOG_MEMORY_PROTECTIVE_MB || 650));
-const WATCHDOG_MEMORY_EMERGENCY_MB = Math.max(WATCHDOG_MEMORY_PROTECTIVE_MB + 64, Number(process.env.WATCHDOG_MEMORY_EMERGENCY_MB || 800));
-const WATCHDOG_RECOVERY_STABLE_MS = Math.max(30_000, Number(process.env.WATCHDOG_RECOVERY_STABLE_MS || 60_000));
-
-let watchdogMode = WATCHDOG_MODES.NORMAL;
-let watchdogModeChangedAt = Date.now();
-let watchdogLastEventLoopSampleAt = Date.now();
-let watchdogLastEventLoopLagMs = 0;
-let watchdogEventLoopTimer = null;
-let watchdogStableSince = Date.now();
-let watchdogLastReason = "startup";
-let watchdogResourcePressure = "normal";
-let watchdogLastTransitionLogAt = 0;
-
-function watchdogSetMode(mode, reason = "") {
-  const key = String(mode || "").toUpperCase();
-  const nextMode = WATCHDOG_MODES[key];
-  if (!nextMode) return;
-  if (watchdogMode === nextMode) {
-    watchdogLastReason = reason || watchdogLastReason;
-    return;
-  }
-  const previous = watchdogMode;
-  watchdogMode = nextMode;
-  watchdogModeChangedAt = Date.now();
-  watchdogLastReason = reason || "state transition";
-  watchdogStableSince = nextMode === WATCHDOG_MODES.NORMAL || nextMode === WATCHDOG_MODES.RECOVERY ? Date.now() : 0;
-  if (Date.now() - watchdogLastTransitionLogAt > 5_000) {
-    watchdogLastTransitionLogAt = Date.now();
-    console.warn(`[WATCHDOG] Mode ${previous.toUpperCase()} -> ${nextMode.toUpperCase()} | ${watchdogLastReason}`);
-  }
-}
-
-function watchdogRecordEventLoopLag(lagMs) {
-  watchdogLastEventLoopLagMs = Math.max(0, Number(lagMs) || 0);
-  watchdogLastEventLoopSampleAt = Date.now();
-  if (watchdogLastEventLoopLagMs >= WATCHDOG_EVENT_LOOP_TIMEOUT_MS) {
-    watchdogSetMode("PROTECTIVE", `event-loop lag ${Math.round(watchdogLastEventLoopLagMs)}ms`);
-  } else if (watchdogLastEventLoopLagMs >= 5_000 && watchdogMode === WATCHDOG_MODES.NORMAL) {
-    watchdogSetMode("REDUCED", `event-loop lag ${Math.round(watchdogLastEventLoopLagMs)}ms`);
-  }
-}
-
-function watchdogSampleEventLoop() {
-  const now = Date.now();
-  const elapsed = now - watchdogLastEventLoopSampleAt;
-  watchdogLastEventLoopSampleAt = now;
-  watchdogRecordEventLoopLag(Math.max(0, elapsed - WATCHDOG_EVENT_LOOP_SAMPLE_MS));
-}
-
-function watchdogEvaluateResources() {
-  const rssMb = process.memoryUsage().rss / 1024 / 1024;
-  let pressure = "normal";
-  if (rssMb >= WATCHDOG_MEMORY_EMERGENCY_MB) pressure = "emergency";
-  else if (rssMb >= WATCHDOG_MEMORY_PROTECTIVE_MB) pressure = "protective";
-  else if (rssMb >= WATCHDOG_MEMORY_REDUCED_MB) pressure = "reduced";
-  watchdogResourcePressure = pressure;
-  if (pressure === "emergency") watchdogSetMode("EMERGENCY", `RSS ${Math.round(rssMb)}MB`);
-  else if (pressure === "protective") watchdogSetMode("PROTECTIVE", `RSS ${Math.round(rssMb)}MB`);
-  else if (pressure === "reduced" && watchdogMode === WATCHDOG_MODES.NORMAL) watchdogSetMode("REDUCED", `RSS ${Math.round(rssMb)}MB`);
-}
-
-function watchdogCanStartBackgroundWork(kind = "normal") {
-  if (watchdogMode === WATCHDOG_MODES.EMERGENCY) return kind === "critical";
-  if (watchdogMode === WATCHDOG_MODES.PROTECTIVE) return kind !== "background";
-  return true;
-}
-
-function watchdogGetTrafficMultiplier() {
-  switch (watchdogMode) {
-    case WATCHDOG_MODES.REDUCED: return 1.35;
-    case WATCHDOG_MODES.PROTECTIVE: return 2.0;
-    case WATCHDOG_MODES.EMERGENCY: return 4.0;
-    case WATCHDOG_MODES.RECOVERY: return 1.5;
-    default: return 1.0;
-  }
-}
-
-function watchdogMaybeRecover() {
-  if (watchdogMode === WATCHDOG_MODES.NORMAL) return;
-  const rssMb = process.memoryUsage().rss / 1024 / 1024;
-  if ([WATCHDOG_MODES.EMERGENCY, WATCHDOG_MODES.PROTECTIVE, WATCHDOG_MODES.REDUCED].includes(watchdogMode)) {
-    if (rssMb < WATCHDOG_MEMORY_REDUCED_MB && watchdogLastEventLoopLagMs < 2_000) {
-      if (!watchdogStableSince) watchdogStableSince = Date.now();
-      if (Date.now() - watchdogStableSince >= WATCHDOG_RECOVERY_STABLE_MS) watchdogSetMode("RECOVERY", "resources stable");
-    } else {
-      watchdogStableSince = 0;
-    }
-  } else if (watchdogMode === WATCHDOG_MODES.RECOVERY && Date.now() - watchdogModeChangedAt >= WATCHDOG_RECOVERY_STABLE_MS) {
-    watchdogSetMode("NORMAL", "recovery complete");
-  }
-}
-
 function watchdogHeartbeat() {
   const now =
     Date.now();
@@ -369,14 +266,6 @@ function getWatchdogStatus() {
     lastHealthyAt:
       watchdogLastHealthyAt,
 
-    mode: watchdogMode,
-    modeChangedAt: watchdogModeChangedAt,
-    modeReason: watchdogLastReason,
-    resourcePressure: watchdogResourcePressure,
-    eventLoopLagMs: Math.round(watchdogLastEventLoopLagMs),
-    eventLoopSampleAgeMs: now - watchdogLastEventLoopSampleAt,
-    recoveryStableMs: watchdogStableSince ? now - watchdogStableSince : 0,
-
     timestamp:
       new Date().toISOString(),
   };
@@ -420,10 +309,6 @@ function runWatchdogCheck() {
 
     return;
   }
-
-  watchdogRecordEventLoopLag(eventLoopDelay);
-  watchdogEvaluateResources();
-  watchdogMaybeRecover();
 
   const eventLoopHealthy =
     eventLoopDelay <=
@@ -526,18 +411,12 @@ function startWatchdog() {
       WATCHDOG_INTERVAL_MS
     );
 
-  watchdogEventLoopTimer = setInterval(watchdogSampleEventLoop, WATCHDOG_EVENT_LOOP_SAMPLE_MS);
-
   if (
     watchdogTimer &&
     typeof watchdogTimer.unref ===
       "function"
   ) {
     watchdogTimer.unref();
-  }
-
-  if (watchdogEventLoopTimer && typeof watchdogEventLoopTimer.unref === "function") {
-    watchdogEventLoopTimer.unref();
   }
 
   console.log(
@@ -560,17 +439,619 @@ function stopWatchdog() {
       null;
   }
 
-  if (watchdogEventLoopTimer) {
-    clearInterval(watchdogEventLoopTimer);
-    watchdogEventLoopTimer = null;
-  }
-
   watchdogStarted =
     false;
 
   console.log(
     "[WATCHDOG] Local watchdog stopped."
   );
+}
+
+
+// ============================================================
+// ECLIPSE VEIL — TRAFFIC GOVERNOR
+// ============================================================
+//
+// Legitimate reliability layer between ECLIPSE and Messenger.
+// It is designed to prevent accidental bursts, duplicate command
+// storms, retry amplification, and runaway outgoing traffic.
+// It is NOT an anti-detection or enforcement-evasion system.
+// ============================================================
+
+const TRAFFIC_GOVERNOR = Object.freeze({
+  globalPerMinute: Math.max(
+    20,
+    Number(process.env.ECLIPSE_GLOBAL_SENDS_PER_MINUTE || 60)
+  ),
+
+  threadPerMinute: Math.max(
+    5,
+    Number(process.env.ECLIPSE_THREAD_SENDS_PER_MINUTE || 20)
+  ),
+
+  userCommandsPerMinute: Math.max(
+    5,
+    Number(process.env.ECLIPSE_USER_COMMANDS_PER_MINUTE || 20)
+  ),
+
+  threadCommandsPerMinute: Math.max(
+    10,
+    Number(process.env.ECLIPSE_THREAD_COMMANDS_PER_MINUTE || 60)
+  ),
+
+  queueMax: Math.max(
+    50,
+    Number(process.env.ECLIPSE_TRAFFIC_QUEUE_MAX || 300)
+  ),
+
+  baseGapMs: Math.max(
+    250,
+    Number(process.env.ECLIPSE_TRAFFIC_GAP_MS || 750)
+  ),
+
+  duplicateWindowMs: Math.max(
+    1000,
+    Number(process.env.ECLIPSE_TRAFFIC_DUPLICATE_WINDOW_MS || 5000)
+  ),
+});
+
+const trafficSendQueue = [];
+const trafficGlobalSendTimes = [];
+const trafficThreadSendTimes = new Map();
+const trafficRecentMessages = new Map();
+const trafficUserCommandTimes = new Map();
+const trafficThreadCommandTimes = new Map();
+
+let trafficGovernorRunning = false;
+let trafficGovernorTimer = null;
+let trafficGovernorInstalled = false;
+let trafficLastSendAt = 0;
+let trafficTotalSent = 0;
+let trafficTotalDelayed = 0;
+let trafficTotalSuppressed = 0;
+let trafficTotalRejected = 0;
+let trafficTotalDuplicateBlocked = 0;
+let trafficTotalCommandBlocked = 0;
+let trafficPeakQueue = 0;
+
+function trafficNow() {
+  return Date.now();
+}
+
+function trafficPruneTimes(list, now, windowMs = 60_000) {
+  while (list.length && now - list[0] >= windowMs) {
+    list.shift();
+  }
+}
+
+function trafficPruneMap(map, now, windowMs = 60_000) {
+  for (const [key, list] of map.entries()) {
+    trafficPruneTimes(list, now, windowMs);
+    if (!list.length) {
+      map.delete(key);
+    }
+  }
+}
+
+function trafficFingerprint(message, threadID) {
+  let body = "";
+
+  if (typeof message === "string") {
+    body = message;
+  } else if (message && typeof message === "object") {
+    body = String(message.body || "");
+  }
+
+  return crypto
+    .createHash("sha1")
+    .update(`${String(threadID)}\n${body.trim()}`)
+    .digest("hex");
+}
+
+function trafficEffectiveGapMs() {
+  let multiplier = 1;
+
+  if (typeof watchdogGetTrafficMultiplier === "function") {
+    multiplier = watchdogGetTrafficMultiplier();
+  }
+
+  return Math.round(
+    TRAFFIC_GOVERNOR.baseGapMs * multiplier
+  );
+}
+
+function trafficMode() {
+  if (typeof watchdogMode !== "undefined") {
+    return watchdogMode;
+  }
+
+  return "normal";
+}
+
+function trafficCanAcceptCommand(senderID, threadID) {
+  const now = trafficNow();
+  const sender = String(senderID || "").trim();
+  const thread = String(threadID || "").trim();
+
+  if (!sender || !thread) {
+    return true;
+  }
+
+  const userTimes =
+    trafficUserCommandTimes.get(sender) || [];
+
+  const threadTimes =
+    trafficThreadCommandTimes.get(thread) || [];
+
+  trafficPruneTimes(userTimes, now);
+  trafficPruneTimes(threadTimes, now);
+
+  if (
+    userTimes.length >=
+    TRAFFIC_GOVERNOR.userCommandsPerMinute
+  ) {
+    trafficTotalCommandBlocked++;
+    trafficUserCommandTimes.set(sender, userTimes);
+    return false;
+  }
+
+  if (
+    threadTimes.length >=
+    TRAFFIC_GOVERNOR.threadCommandsPerMinute
+  ) {
+    trafficTotalCommandBlocked++;
+    trafficThreadCommandTimes.set(thread, threadTimes);
+    return false;
+  }
+
+  userTimes.push(now);
+  threadTimes.push(now);
+
+  trafficUserCommandTimes.set(sender, userTimes);
+  trafficThreadCommandTimes.set(thread, threadTimes);
+
+  return true;
+}
+
+function trafficCanSendNow(threadID, message, hasCallback = false) {
+  const now = trafficNow();
+  const thread = String(threadID || "");
+
+  trafficPruneTimes(
+    trafficGlobalSendTimes,
+    now
+  );
+
+  const threadTimes =
+    trafficThreadSendTimes.get(thread) || [];
+
+  trafficPruneTimes(threadTimes, now);
+  trafficThreadSendTimes.set(thread, threadTimes);
+
+  const fingerprint =
+    trafficFingerprint(message, thread);
+
+  const recentAt =
+    trafficRecentMessages.get(fingerprint) || 0;
+
+  if (
+    !hasCallback &&
+    recentAt &&
+    now - recentAt <
+      TRAFFIC_GOVERNOR.duplicateWindowMs
+  ) {
+    trafficTotalDuplicateBlocked++;
+    return {
+      ok: false,
+      reason: "duplicate",
+      waitMs: 0,
+    };
+  }
+
+  if (
+    trafficGlobalSendTimes.length >=
+    TRAFFIC_GOVERNOR.globalPerMinute
+  ) {
+    const waitMs =
+      Math.max(
+        100,
+        60_000 -
+          (now - trafficGlobalSendTimes[0])
+      );
+
+    return {
+      ok: false,
+      reason: "global_limit",
+      waitMs,
+    };
+  }
+
+  if (
+    threadTimes.length >=
+    TRAFFIC_GOVERNOR.threadPerMinute
+  ) {
+    const waitMs =
+      Math.max(
+        100,
+        60_000 -
+          (now - threadTimes[0])
+      );
+
+    return {
+      ok: false,
+      reason: "thread_limit",
+      waitMs,
+    };
+  }
+
+  const gapRemaining =
+    Math.max(
+      0,
+      trafficEffectiveGapMs() -
+        (now - trafficLastSendAt)
+    );
+
+  if (gapRemaining > 0) {
+    return {
+      ok: false,
+      reason: "spacing",
+      waitMs: gapRemaining,
+    };
+  }
+
+  return {
+    ok: true,
+    reason: "ok",
+    waitMs: 0,
+    fingerprint,
+  };
+}
+
+function trafficRecordSend(threadID, fingerprint) {
+  const now = trafficNow();
+  const thread = String(threadID || "");
+
+  trafficGlobalSendTimes.push(now);
+
+  const threadTimes =
+    trafficThreadSendTimes.get(thread) || [];
+
+  threadTimes.push(now);
+  trafficThreadSendTimes.set(thread, threadTimes);
+
+  trafficRecentMessages.set(
+    fingerprint || trafficFingerprint("", thread),
+    now
+  );
+
+  trafficLastSendAt = now;
+  trafficTotalSent++;
+}
+
+function trafficCleanup() {
+  const now = trafficNow();
+
+  trafficPruneTimes(
+    trafficGlobalSendTimes,
+    now
+  );
+
+  trafficPruneMap(
+    trafficThreadSendTimes,
+    now
+  );
+
+  trafficPruneMap(
+    trafficUserCommandTimes,
+    now
+  );
+
+  trafficPruneMap(
+    trafficThreadCommandTimes,
+    now
+  );
+
+  for (const [key, timestamp] of trafficRecentMessages.entries()) {
+    if (
+      now - timestamp >=
+      TRAFFIC_GOVERNOR.duplicateWindowMs
+    ) {
+      trafficRecentMessages.delete(key);
+    }
+  }
+}
+
+function trafficSafetyStatus() {
+  trafficCleanup();
+
+  const now = trafficNow();
+  const watchdog =
+    typeof getWatchdogStatus === "function"
+      ? getWatchdogStatus()
+      : null;
+
+  return {
+    mode: trafficMode(),
+    queue: trafficSendQueue.length,
+    queueMax: TRAFFIC_GOVERNOR.queueMax,
+    queuePercent: Math.round(
+      (trafficSendQueue.length /
+        TRAFFIC_GOVERNOR.queueMax) *
+        100
+    ),
+    globalSendsLastMinute:
+      trafficGlobalSendTimes.length,
+    globalLimit:
+      TRAFFIC_GOVERNOR.globalPerMinute,
+    activeThreads:
+      trafficThreadSendTimes.size,
+    lastSendAgoMs:
+      trafficLastSendAt
+        ? now - trafficLastSendAt
+        : null,
+    effectiveGapMs:
+      trafficEffectiveGapMs(),
+    totalSent:
+      trafficTotalSent,
+    totalDelayed:
+      trafficTotalDelayed,
+    totalSuppressed:
+      trafficTotalSuppressed,
+    totalRejected:
+      trafficTotalRejected,
+    duplicateBlocked:
+      trafficTotalDuplicateBlocked,
+    commandBlocked:
+      trafficTotalCommandBlocked,
+    peakQueue:
+      trafficPeakQueue,
+    watchdogMode:
+      watchdog?.mode || trafficMode(),
+    timestamp:
+      new Date().toISOString(),
+  };
+}
+
+function trafficQueueSend(api, message, threadID, callback) {
+  if (
+    trafficSendQueue.length >=
+    TRAFFIC_GOVERNOR.queueMax
+  ) {
+    trafficTotalRejected++;
+
+    const error =
+      new Error(
+        "ECLIPSE traffic queue is full."
+      );
+
+    if (typeof callback === "function") {
+      setImmediate(() => callback(error));
+    }
+
+    return false;
+  }
+
+  const rawApi =
+    api && api.__eclipseTrafficRawApi
+      ? api.__eclipseTrafficRawApi
+      : api;
+
+  trafficSendQueue.push({
+    api: rawApi,
+    message,
+    threadID: String(threadID),
+    callback,
+    enqueuedAt: trafficNow(),
+  });
+
+  trafficPeakQueue = Math.max(
+    trafficPeakQueue,
+    trafficSendQueue.length
+  );
+
+  if (
+    trafficSendQueue.length > 1
+  ) {
+    trafficTotalDelayed++;
+  }
+
+  trafficStartWorker();
+  return true;
+}
+
+async function trafficProcessQueue() {
+  if (trafficGovernorRunning) {
+    return;
+  }
+
+  trafficGovernorRunning = true;
+
+  try {
+    while (trafficSendQueue.length) {
+      const job =
+        trafficSendQueue[0];
+
+      const decision =
+        trafficCanSendNow(
+          job.threadID,
+          job.message,
+          typeof job.callback === "function"
+        );
+
+      if (!decision.ok) {
+        trafficSendQueue.shift();
+
+        if (decision.reason === "duplicate") {
+          trafficTotalSuppressed++;
+          if (typeof job.callback === "function") {
+            const error =
+              new Error(
+                "Duplicate Messenger send suppressed by ECLIPSE Traffic Governor."
+              );
+            error.code = "ECLIPSE_DUPLICATE_SUPPRESSED";
+            job.callback(error);
+          }
+          continue;
+        }
+
+        trafficSendQueue.unshift(job);
+
+        await new Promise((resolve) =>
+          setTimeout(
+            resolve,
+            Math.min(
+              Math.max(100, decision.waitMs),
+              60_000
+            )
+          )
+        );
+
+        continue;
+      }
+
+      trafficSendQueue.shift();
+
+      try {
+        trafficRecordSend(
+          job.threadID,
+          decision.fingerprint
+        );
+
+        await new Promise((resolve) => {
+          try {
+            job.api.sendMessage(
+              job.message,
+              job.threadID,
+              (error, messageInfo) => {
+                if (typeof job.callback === "function") {
+                  try {
+                    job.callback(
+                      error || null,
+                      messageInfo || null
+                    );
+                  } catch (callbackError) {
+                    console.error(
+                      "[TRAFFIC] Messenger callback failed:",
+                      callbackError
+                    );
+                  }
+                }
+
+                resolve();
+              }
+            );
+          } catch (error) {
+            if (typeof job.callback === "function") {
+              try {
+                job.callback(error);
+              } catch (callbackError) {
+                console.error(
+                  "[TRAFFIC] Messenger callback failed:",
+                  callbackError
+                );
+              }
+            }
+
+            resolve();
+          }
+        });
+      } catch (error) {
+        console.error(
+          "[TRAFFIC] Send worker error:",
+          error
+        );
+      }
+    }
+  } finally {
+    trafficGovernorRunning = false;
+  }
+}
+
+function trafficStartWorker() {
+  if (trafficGovernorTimer) {
+    return;
+  }
+
+  trafficGovernorTimer = setImmediate(() => {
+    trafficGovernorTimer = null;
+    trafficProcessQueue().catch((error) => {
+      console.error(
+        "[TRAFFIC] Queue worker failed:",
+        error
+      );
+    });
+  });
+}
+
+function installTrafficGovernor(api) {
+  if (!api || typeof api.sendMessage !== "function") {
+    return api || null;
+  }
+
+  if (api.__eclipseTrafficProxy === true) {
+    trafficGovernorInstalled = true;
+    return api;
+  }
+
+  const rawApi = api;
+
+  const guardedApi = new Proxy(rawApi, {
+    get(target, property) {
+      if (property === "__eclipseTrafficProxy") {
+        return true;
+      }
+
+      if (property === "__eclipseTrafficRawApi") {
+        return rawApi;
+      }
+
+      if (property === "sendMessage") {
+        return function guardedSendMessage(
+          message,
+          threadID,
+          callback
+        ) {
+          return trafficQueueSend(
+            rawApi,
+            message,
+            threadID,
+            callback
+          );
+        };
+      }
+
+      const value = Reflect.get(target, property, target);
+
+      if (typeof value === "function") {
+        return value.bind(target);
+      }
+
+      return value;
+    },
+  });
+
+  trafficGovernorInstalled = true;
+
+  console.log(
+    "[TRAFFIC] ECLIPSE VEIL Traffic Governor installed (proxy mode)."
+  );
+
+  return guardedApi;
+}
+
+function trafficSendMessage(api, message, threadID, callback) {
+  return trafficQueueSend(api, message, threadID, callback);
+}
+
+const trafficCleanupTimer = setInterval(() => {
+  trafficCleanup();
+  if (trafficSendQueue.length) {
+    trafficStartWorker();
+  }
+}, 15_000);
+
+if (trafficCleanupTimer && typeof trafficCleanupTimer.unref === "function") {
+  trafficCleanupTimer.unref();
 }
 
 // ============================================================
@@ -680,324 +1161,12 @@ function withTimeout(
 }
 
 // ============================================================
-// MESSENGER SAFETY MANAGER
-// ============================================================
-// Responsible traffic protection for Messenger sends.
-// This does NOT attempt to disguise automation or bypass Meta
-// enforcement. It keeps ECLIPSE from producing accidental bursts,
-// duplicate sends, retry storms, and concurrent API overload.
-// ============================================================
-
-const MESSENGER_SAFETY = {
-  globalMinGapMs: Math.max(
-    150,
-    Number(process.env.MESSENGER_GLOBAL_GAP_MS || 350)
-  ),
-  threadMinGapMs: Math.max(
-    500,
-    Number(process.env.MESSENGER_THREAD_GAP_MS || 1500)
-  ),
-  maxQueue: Math.max(
-    50,
-    Number(process.env.MESSENGER_MAX_QUEUE || 500)
-  ),
-  maxRetries: Math.min(
-    3,
-    Math.max(0, Number(process.env.MESSENGER_MAX_RETRIES || 2))
-  ),
-  retryBaseMs: Math.max(
-    500,
-    Number(process.env.MESSENGER_RETRY_BASE_MS || 1500)
-  ),
-  circuitFailureLimit: Math.max(
-    3,
-    Number(process.env.MESSENGER_CIRCUIT_FAILURE_LIMIT || 5)
-  ),
-  circuitPauseMs: Math.max(
-    10_000,
-    Number(process.env.MESSENGER_CIRCUIT_PAUSE_MS || 30_000)
-  ),
-  duplicateWindowMs: Math.max(
-    1000,
-    Number(process.env.MESSENGER_DUPLICATE_WINDOW_MS || 4000)
-  ),
-};
-
-const messengerSendQueue = [];
-const messengerThreadNextAt = new Map();
-const messengerRecentSends = new Map();
-let messengerSendWorkerRunning = false;
-let messengerLastSendAt = 0;
-let messengerConsecutiveFailures = 0;
-let messengerCircuitOpenUntil = 0;
-let messengerTotalSent = 0;
-let messengerTotalFailures = 0;
-let messengerTotalRetries = 0;
-let messengerTotalSuppressed = 0;
-let messengerTotalRejected = 0;
-let messengerNextJobId = 0;
-
-function messengerErrorCode(error) {
-  return String(
-    error?.errorCode ??
-    error?.code ??
-    error?.status ??
-    error?.statusCode ??
-    ""
-  ).trim();
-}
-
-function isMessengerTransientError(error) {
-  const code = messengerErrorCode(error);
-  const message = String(error?.message || error || "").toLowerCase();
-
-  return (
-    code === "1545012" ||
-    code === "613" ||
-    code === "429" ||
-    /rate.?limit|too many|temporar|throttl|try again|timeout|timed out|econnreset|socket hang up|network/i.test(message)
-  );
-}
-
-function messengerRetryDelay(attempt) {
-  const exponential =
-    MESSENGER_SAFETY.retryBaseMs * Math.pow(2, attempt);
-  const jitter = Math.floor(Math.random() * 500);
-  return Math.min(30_000, exponential + jitter);
-}
-
-function messengerPayloadFingerprint(message, threadID) {
-  let body = "";
-
-  if (typeof message === "string") {
-    body = message;
-  } else if (message && typeof message === "object") {
-    body = String(message.body || "");
-    if (message.attachment) {
-      body += `|attachment:${message.attachment.path || message.attachment.fd || "stream"}`;
-    }
-  }
-
-  return crypto
-    .createHash("sha1")
-    .update(`${String(threadID)}|${body}`)
-    .digest("hex");
-}
-
-function messengerCleanupSafetyState(now = Date.now()) {
-  for (const [threadID, nextAt] of messengerThreadNextAt.entries()) {
-    if (nextAt < now - 60_000) {
-      messengerThreadNextAt.delete(threadID);
-    }
-  }
-
-  for (const [key, sentAt] of messengerRecentSends.entries()) {
-    if (sentAt < now - MESSENGER_SAFETY.duplicateWindowMs * 2) {
-      messengerRecentSends.delete(key);
-    }
-  }
-}
-
-function messengerSafetyStatus() {
-  const now = Date.now();
-  return {
-    queue: messengerSendQueue.length,
-    workerRunning: messengerSendWorkerRunning,
-    lastSendAt: messengerLastSendAt,
-    consecutiveFailures: messengerConsecutiveFailures,
-    circuitOpen: now < messengerCircuitOpenUntil,
-    circuitOpenUntil: messengerCircuitOpenUntil,
-    totalSent: messengerTotalSent,
-    totalFailures: messengerTotalFailures,
-    totalRetries: messengerTotalRetries,
-    totalSuppressed: messengerTotalSuppressed,
-    totalRejected: messengerTotalRejected,
-    effective: {
-      globalGapMs: messengerEffectiveGlobalGapMs(),
-      threadGapMs: messengerEffectiveThreadGapMs(),
-      trafficMultiplier: watchdogGetTrafficMultiplier(),
-    },
-    limits: {
-      globalGapMs: MESSENGER_SAFETY.globalMinGapMs,
-      threadGapMs: MESSENGER_SAFETY.threadMinGapMs,
-      maxQueue: MESSENGER_SAFETY.maxQueue,
-      maxRetries: MESSENGER_SAFETY.maxRetries,
-    },
-  };
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function messengerEffectiveGlobalGapMs() {
-  return Math.ceil(MESSENGER_SAFETY.globalMinGapMs * watchdogGetTrafficMultiplier());
-}
-
-function messengerEffectiveThreadGapMs() {
-  return Math.ceil(MESSENGER_SAFETY.threadMinGapMs * watchdogGetTrafficMultiplier());
-}
-
-function waitForMessengerSlot(threadID) {
-  const now = Date.now();
-  const globalWait = Math.max(0, messengerLastSendAt + messengerEffectiveGlobalGapMs() - now);
-  const threadNextAt = messengerThreadNextAt.get(String(threadID)) || 0;
-  const threadWait = Math.max(0, threadNextAt - now);
-  return Math.max(globalWait, threadWait);
-}
-
-async function performMessengerSend(api, message, threadID) {
-  let lastError = null;
-
-  for (let attempt = 0; attempt <= MESSENGER_SAFETY.maxRetries; attempt++) {
-    const circuitWait = Math.max(0, messengerCircuitOpenUntil - Date.now());
-    if (circuitWait > 0) {
-      await sleep(circuitWait);
-    }
-
-    const slotWait = waitForMessengerSlot(threadID);
-    if (slotWait > 0) {
-      await sleep(slotWait);
-    }
-
-    try {
-      const result = await new Promise((resolve, reject) => {
-        try {
-          api.sendMessage(
-            message,
-            threadID,
-            (error, messageInfo) => {
-              if (error) reject(error);
-              else resolve(messageInfo || null);
-            }
-          );
-        } catch (error) {
-          reject(error);
-        }
-      });
-
-      const now = Date.now();
-      messengerLastSendAt = now;
-      messengerThreadNextAt.set(
-        String(threadID),
-        now + messengerEffectiveThreadGapMs()
-      );
-      messengerConsecutiveFailures = 0;
-      messengerCircuitOpenUntil = 0;
-      messengerTotalSent++;
-      watchdogSetMessengerConnected(true);
-
-      return result;
-    } catch (error) {
-      lastError = error;
-      messengerConsecutiveFailures++;
-      messengerTotalFailures++;
-
-      if (messengerConsecutiveFailures >= MESSENGER_SAFETY.circuitFailureLimit) {
-        messengerCircuitOpenUntil =
-          Date.now() + MESSENGER_SAFETY.circuitPauseMs;
-        console.error(
-          `[MESSENGER SAFETY] Circuit opened for ${MESSENGER_SAFETY.circuitPauseMs}ms after ${messengerConsecutiveFailures} consecutive send failures.`
-        );
-      }
-
-      const retryable = isMessengerTransientError(error);
-      if (!retryable || attempt >= MESSENGER_SAFETY.maxRetries) {
-        throw error;
-      }
-
-      const delay = messengerRetryDelay(attempt);
-      messengerTotalRetries++;
-      console.warn(
-        `[MESSENGER SAFETY] Transient send error (${messengerErrorCode(error) || "unknown"}); retry ${attempt + 1}/${MESSENGER_SAFETY.maxRetries} in ${delay}ms.`
-      );
-      await sleep(delay);
-    }
-  }
-
-  throw lastError || new Error("Messenger send failed.");
-}
-
-function enqueueMessengerSend(api, message, threadID) {
-  const normalizedThreadID = String(threadID);
-  const fingerprint = messengerPayloadFingerprint(message, normalizedThreadID);
-  const now = Date.now();
-
-  messengerCleanupSafetyState(now);
-
-  if (now < messengerCircuitOpenUntil) {
-    return Promise.reject(
-      new Error("Messenger safety circuit is temporarily open.")
-    );
-  }
-
-  const previous = messengerRecentSends.get(fingerprint);
-  if (previous && now - previous < MESSENGER_SAFETY.duplicateWindowMs) {
-    messengerTotalSuppressed++;
-    console.warn(
-      `[MESSENGER SAFETY] Duplicate send suppressed for thread ${normalizedThreadID}.`
-    );
-    return Promise.resolve(null);
-  }
-
-  if (messengerSendQueue.length >= MESSENGER_SAFETY.maxQueue) {
-    messengerTotalRejected++;
-    return Promise.reject(
-      new Error("Messenger safety queue is full; send rejected to protect the connection.")
-    );
-  }
-
-  messengerRecentSends.set(fingerprint, now);
-
-  return new Promise((resolve, reject) => {
-    messengerSendQueue.push({
-      id: ++messengerNextJobId,
-      api,
-      message,
-      threadID: normalizedThreadID,
-      resolve,
-      reject,
-      enqueuedAt: now,
-    });
-
-    void processMessengerSendQueue();
-  });
-}
-
-async function processMessengerSendQueue() {
-  if (messengerSendWorkerRunning) return;
-  messengerSendWorkerRunning = true;
-
-  try {
-    while (messengerSendQueue.length > 0) {
-      const job = messengerSendQueue.shift();
-      if (!job) continue;
-
-      try {
-        const result = await performMessengerSend(
-          job.api,
-          job.message,
-          job.threadID
-        );
-        job.resolve(result);
-      } catch (error) {
-        job.reject(error);
-      }
-    }
-  } finally {
-    messengerSendWorkerRunning = false;
-    if (messengerSendQueue.length > 0) {
-      void processMessengerSendQueue();
-    }
-  }
-}
-
-// ============================================================
 // MESSENGER PROMISE WRAPPER
 // ============================================================
 //
-// All normal Messenger sends now pass through the centralized
-// safety manager above. Existing callers do not need to change.
+// IMPORTANT:
+// The callback's messageInfo is returned so music can capture
+// the message ID and edit the original status message.
 // ============================================================
 
 function sendMessengerMessage(
@@ -1005,11 +1174,25 @@ function sendMessengerMessage(
   message,
   threadID
 ) {
-  return enqueueMessengerSend(
-    api,
-    message,
-    threadID
-  );
+  return new Promise((resolve, reject) => {
+    try {
+      trafficSendMessage(api, 
+        message,
+        threadID,
+        (error, messageInfo) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve(
+              messageInfo || null
+            );
+          }
+        }
+      );
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
 
 // ============================================================
@@ -1300,10 +1483,6 @@ function processMusicQueue() {
     global.botPaused === true ||
     musicPaused === true
   ) {
-    return;
-  }
-
-  if (!watchdogCanStartBackgroundWork("background")) {
     return;
   }
 
@@ -2241,14 +2420,7 @@ app.get("/health", (_req, res) => {
 
     watchdog,
 
-    messengerSafety: messengerSafetyStatus(),
-
-    resources: {
-      rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
-      heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-      heapTotalMb: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
-      externalMb: Math.round(process.memoryUsage().external / 1024 / 1024),
-    },
+    trafficGovernor: trafficSafetyStatus(),
 
     music: {
       activeDownloads:
@@ -2456,6 +2628,8 @@ login(
       process.exit(1);
     }
 
+    api = installTrafficGovernor(api) || api;
+
     watchdogSetMessengerConnected(
       true
     );
@@ -2513,8 +2687,7 @@ login(
       process.env.STARTUP_THREAD_ID;
 
     if (startupThreadID) {
-      void sendMessengerMessage(
-        api,
+      trafficSendMessage(api, 
         [
           "╭─────── ୨୧ ♡ ୨୧ ───────╮",
           "        🎀 E C L I P S E",
@@ -2528,13 +2701,16 @@ login(
           "♡ pause system: ready",
           "♡ watchdog: active",
         ].join("\n"),
-        startupThreadID
-      ).catch((sendError) => {
-        console.error(
-          "Startup message failed:",
-          sendError
-        );
-      });
+        startupThreadID,
+        (sendError) => {
+          if (sendError) {
+            console.error(
+              "Startup message failed:",
+              sendError
+            );
+          }
+        }
+      );
     }
 
     console.log(
@@ -2635,150 +2811,6 @@ function registerActiveThread(
 }
 
 // ============================================================
-// WATCHDOG COMMAND + ADMISSION LAYER
-// ============================================================
-//
-// This is an additional protection layer above feature handlers.
-// It limits command storms before they reach RPG, games, music,
-// AI, economy, or Messenger. It is intentionally conservative and
-// does not attempt to disguise automation or bypass Meta systems.
-// ============================================================
-
-const WATCHDOG_COMMAND_WINDOW_MS = Math.max(
-  5_000,
-  Number(process.env.WATCHDOG_COMMAND_WINDOW_MS || 10_000)
-);
-
-const WATCHDOG_COMMAND_LIMIT = Math.max(
-  10,
-  Number(process.env.WATCHDOG_COMMAND_LIMIT || 40)
-);
-
-const WATCHDOG_COMMAND_BURST_LIMIT = Math.max(
-  5,
-  Number(process.env.WATCHDOG_COMMAND_BURST_LIMIT || 12)
-);
-
-const watchdogCommandBuckets = new Map();
-const watchdogCommandWarnings = new Map();
-
-function watchdogResetCounters() {
-  watchdogConsecutiveFailures = 0;
-  watchdogLastEventLoopLagMs = 0;
-  watchdogLastReason = "manual reset";
-  watchdogResourcePressure = "normal";
-  watchdogStableSince = Date.now();
-  messengerConsecutiveFailures = 0;
-  messengerCircuitOpenUntil = 0;
-  messengerCleanupSafetyState();
-}
-
-function watchdogResetMessengerCounters() {
-  messengerConsecutiveFailures = 0;
-  messengerCircuitOpenUntil = 0;
-  messengerCleanupSafetyState();
-}
-
-function watchdogFormatStatus() {
-  const status = getWatchdogStatus();
-  const messenger = messengerSafetyStatus();
-  const memory = process.memoryUsage();
-  const rssMb = Math.round(memory.rss / 1024 / 1024);
-
-  return [
-    "╔══════════════════════════════╗",
-    "        🌑 ECLIPSE WATCHDOG",
-    "╚══════════════════════════════╝",
-    "",
-    `Mode: ${status.mode.toUpperCase()}`,
-    `Health: ${status.ok ? "🟢 STABLE" : "🔴 UNHEALTHY"}`,
-    `Reason: ${status.modeReason || "none"}`,
-    "",
-    "⚙️ SYSTEM",
-    `Node: ✓ (${Math.round(process.uptime())}s uptime)`,
-    `Event Loop: ${status.eventLoopLagMs}ms`,
-    `Memory: ${rssMb}MB (${status.resourcePressure})`,
-    `Database: available`,
-    "",
-    "📡 MESSENGER",
-    `Connection: ${status.messengerConnected ? "🟢 CONNECTED" : "🟡 WAITING"}`,
-    `Queue: ${messenger.queue}/${messenger.limits.maxQueue}`,
-    `Circuit: ${messenger.circuitOpen ? "🔴 OPEN" : "🟢 CLOSED"}`,
-    `Failures: ${messenger.consecutiveFailures}`,
-    `Retries: ${messenger.totalRetries}`,
-    `Duplicates: ${messenger.totalSuppressed}`,
-    `Rejected: ${messenger.totalRejected}`,
-    "",
-    `Traffic multiplier: ${messenger.effective.trafficMultiplier}x`,
-    `Global gap: ${messenger.effective.globalGapMs}ms`,
-    `Thread gap: ${messenger.effective.threadGapMs}ms`,
-  ].join("\n");
-}
-
-function watchdogAdmitCommand(threadId, senderId, originalText, isAdmin) {
-  if (isAdmin) return true;
-
-  const text = String(originalText || "").trim();
-  if (!/^!/i.test(text)) return true;
-
-  const now = Date.now();
-  const key = `${String(threadId)}:${String(senderId)}`;
-  let bucket = watchdogCommandBuckets.get(key);
-
-  if (!bucket || now - bucket.startedAt > WATCHDOG_COMMAND_WINDOW_MS) {
-    bucket = {
-      startedAt: now,
-      count: 0,
-      lastCommand: "",
-      burstCount: 0,
-      lastAt: 0,
-    };
-    watchdogCommandBuckets.set(key, bucket);
-  }
-
-  bucket.count++;
-  if (bucket.lastCommand === text && now - bucket.lastAt <= 3_000) {
-    bucket.burstCount++;
-  } else {
-    bucket.burstCount = 1;
-  }
-  bucket.lastCommand = text;
-  bucket.lastAt = now;
-
-  if (
-    bucket.count > WATCHDOG_COMMAND_LIMIT ||
-    bucket.burstCount > WATCHDOG_COMMAND_BURST_LIMIT
-  ) {
-    const lastWarning = watchdogCommandWarnings.get(key) || 0;
-    if (now - lastWarning > WATCHDOG_COMMAND_WINDOW_MS) {
-      watchdogCommandWarnings.set(key, now);
-      console.warn(
-        `[WATCHDOG] Command storm suppressed for ${key}.`
-      );
-    }
-    return false;
-  }
-
-  if (watchdogMode === WATCHDOG_MODES.EMERGENCY) {
-    return false;
-  }
-
-  return true;
-}
-
-function watchdogCleanupCommandState() {
-  const cutoff = Date.now() - WATCHDOG_COMMAND_WINDOW_MS * 3;
-  for (const [key, bucket] of watchdogCommandBuckets.entries()) {
-    if (bucket.lastAt < cutoff) watchdogCommandBuckets.delete(key);
-  }
-  for (const [key, at] of watchdogCommandWarnings.entries()) {
-    if (at < cutoff) watchdogCommandWarnings.delete(key);
-  }
-}
-
-setInterval(watchdogCleanupCommandState, WATCHDOG_COMMAND_WINDOW_MS * 3).unref?.();
-
-// ============================================================
 // MESSAGE HANDLING
 // ============================================================
 
@@ -2822,113 +2854,147 @@ async function handleMessage(
       senderId
     );
 
+
   // ==========================================================
-  // WATCHDOG COMMANDS
-  // Read-only commands are public. Control commands are admin-only.
+  // TRAFFIC GOVERNOR — INCOMING COMMAND GUARD
   // ==========================================================
 
-  const watchdogMatch = originalText.match(
-    /^!watchdog(?:\s+(status|stats|test|pause|resume|reset|restart))?$/i
-  );
+  if (
+    originalText.startsWith("!") &&
+    !trafficCanAcceptCommand(senderId, threadId)
+  ) {
+    // Intentionally do not send a warning here. Sending a warning
+    // during a command storm would itself add more Messenger traffic.
+    console.warn(
+      `[TRAFFIC] Command suppressed for sender=${senderId} thread=${threadId}`
+    );
+    return;
+  }
 
-  if (watchdogMatch) {
-    const action = String(watchdogMatch[1] || "status").toLowerCase();
+  // ==========================================================
+  // OWNER CONSOLE / ECLIPSE VEIL
+  // ==========================================================
 
-    if (["pause", "resume", "reset", "restart"].includes(action) && !isAdmin) {
-      await sendReplyWithTyping(
-        api,
-        "🔒 WATCHDOG CONTROL IS ADMIN-ONLY.\n\nYou can use `!watchdog`, `!watchdog status`, `!watchdog stats`, and `!watchdog test` to view health.",
-        threadId
-      );
-      return;
-    }
+  const ownerMatch =
+    originalText.match(
+      /^!owner(?:\s+(bot|automated|economy|rpg|music|moderation|system))?$/i
+    );
 
-    if (action === "restart") {
+  if (ownerMatch) {
+    if (!isAdmin) {
       sendReplyWithTyping(
         api,
-        "🌑 WATCHDOG\n\n🔴 MANUAL RESTART REQUESTED\n\nECLIPSE will exit so the external process manager can restart it.",
-        threadId
-      );
-      setTimeout(() => {
-        watchdogSetShuttingDown(true);
-        watchdogSetMessengerConnected(false);
-        stopWatchdog();
-        process.exit(1);
-      }, 1500);
-      return;
-    }
-
-    if (action === "pause") {
-      watchdogSetMode("PROTECTIVE", "manual admin pause");
-      musicPaused = true;
-      sendReplyWithTyping(
-        api,
-        "🌑 WATCHDOG\n\n🟠 PROTECTIVE MODE ENABLED\n\nNon-essential background activity is being restricted.\n\nUse `!watchdog resume` when you want automatic operation restored.",
+        "🔒 Owner access only.",
         threadId
       );
       return;
     }
 
-    if (action === "resume") {
-      watchdogResetMessengerCounters();
-      watchdogStableSince = Date.now();
-      watchdogSetMode("RECOVERY", "manual admin resume");
-      resumeMusicProcessing();
-      sendReplyWithTyping(
-        api,
-        "🌑 WATCHDOG\n\n🔵 RECOVERY MODE\n\nSystems are resuming gradually. Watchdog will return to NORMAL after the stability window.",
-        threadId
-      );
-      return;
-    }
+    const section =
+      (ownerMatch[1] || "home").toLowerCase();
 
-    if (action === "reset") {
-      watchdogResetCounters();
-      sendReplyWithTyping(
-        api,
-        "🌑 WATCHDOG\n\n♻️ STATE RESET\n\nWatchdog and Messenger failure counters were reset. Automatic protection remains enabled.",
-        threadId
-      );
-      return;
-    }
+    if (section === "automated") {
+      const traffic = trafficSafetyStatus();
+      const watchdog = getWatchdogStatus();
 
-    if (action === "stats") {
-      const status = getWatchdogStatus();
-      const messenger = messengerSafetyStatus();
-      const memory = process.memoryUsage();
       sendReplyWithTyping(
         api,
         [
-          watchdogFormatStatus(),
+          "╭─────────────── ୨୧ ───────────────╮",
+          "│                                    │",
+          "│       🪽 E C L I P S E 🪽          │",
+          "│            T H E  V E I L          │",
+          "│                                    │",
+          "│       traffic protection           │",
+          "│                                    │",
+          "├────────────────────────────────────┤",
+          "│                                    │",
+          "│  ♡ WATCHDOG                        │",
+          `│  ୨୧ mode       ${String(watchdog.mode || "normal").toUpperCase()}${" ".repeat(Math.max(0, 13 - String(watchdog.mode || "normal").length))}│`,
+          `│  ୨୧ health     ${watchdog.ok ? "🟢 HEALTHY" : "🔴 UNHEALTHY"}       │`,
+          `│  ୨୧ Messenger  ${watchdog.messengerConnected ? "🟢 CONNECTED" : "🔴 DISCONNECTED"}     │`,
+          "│                                    │",
+          "├────────────────────────────────────┤",
+          "│                                    │",
+          "│  ♡ TRAFFIC GOVERNOR                │",
+          `│  ୨୧ global      ${traffic.globalSendsLastMinute}/${traffic.globalLimit} / min${" ".repeat(Math.max(0, 11 - String(`${traffic.globalSendsLastMinute}/${traffic.globalLimit} / min`).length))}│`,
+          `│  ୨୧ queue       ${traffic.queue}/${traffic.queueMax}${" ".repeat(Math.max(0, 19 - String(`${traffic.queue}/${traffic.queueMax}`).length))}│`,
+          `│  ୨୧ sent        ${traffic.totalSent}${" ".repeat(Math.max(0, 19 - String(traffic.totalSent).length))}│`,
+          `│  ୨୧ delayed     ${traffic.totalDelayed}${" ".repeat(Math.max(0, 19 - String(traffic.totalDelayed).length))}│`,
+          `│  ୨୧ suppressed  ${traffic.totalSuppressed}${" ".repeat(Math.max(0, 19 - String(traffic.totalSuppressed).length))}│`,
+          `│  ୨୧ duplicates  ${traffic.duplicateBlocked}${" ".repeat(Math.max(0, 19 - String(traffic.duplicateBlocked).length))}│`,
+          `│  ୨୧ blocked     ${traffic.commandBlocked}${" ".repeat(Math.max(0, 19 - String(traffic.commandBlocked).length))}│`,
+          "│                                    │",
+          "├────────────────────────────────────┤",
+          "│                                    │",
+          "│  ♡ ACTIVE GUARDIANS                │",
+          "│  ୨୧ global limiter     ON          │",
+          "│  ୨୧ thread limiter     ON          │",
+          "│  ୨୧ command limiter   ON          │",
+          "│  ୨୧ burst guard        ON          │",
+          "│  ୨୧ duplicate guard    ON          │",
+          "│  ୨୧ retry spacing      ON          │",
+          "│  ୨୧ queue governor     ON          │",
+          "│                                    │",
+          "├────────────────────────────────────┤",
+          "│                                    │",
+          "│  ♡ CONTROLS                        │",
+          "│  !watchdog status                  │",
+          "│  !watchdog stats                   │",
+          "│  !watchdog test                    │",
+          "│  !watchdog pause                   │",
+          "│  !watchdog resume                  │",
+          "│  !watchdog reset                   │",
+          "│  !watchdog restart                 │",
+          "│                                    │",
+          "│  !owner automated                  │",
+          "│                                    │",
+          "╰─────────────── ୨୧ ───────────────╯",
+          "        ♡ protection layer online ♡",
+        ].join("\n"),
+        threadId
+      );
+
+      return;
+    }
+
+    if (section === "bot") {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── ୨୧ E C L I P S E ୨୧ ──────╮",
+          "│            O W N E R             │",
+          "│               B O T              │",
+          "╰──────────────────────────────────╯",
           "",
-          "📊 TELEMETRY",
-          `Successful sends: ${messenger.totalSent}`,
-          `Failed sends: ${messenger.totalFailures}`,
-          `Retries: ${messenger.totalRetries}`,
-          `Suppressed duplicates: ${messenger.totalSuppressed}`,
-          `Rejected by queue: ${messenger.totalRejected}`,
-          `RSS: ${Math.round(memory.rss / 1024 / 1024)}MB`,
-          `Event-loop lag: ${status.eventLoopLagMs}ms`,
+          "♡ !debug",
+          "♡ !cleanup",
+          "♡ !game",
+          "♡ !economy",
+          "♡ !mod",
+          "♡ !automod",
+          "♡ !rpg",
+          "",
+          "♡ use !owner <section>",
         ].join("\n"),
         threadId
       );
       return;
     }
 
-    if (action === "test") {
-      const status = getWatchdogStatus();
-      const memory = process.memoryUsage();
-      const checks = [
-        `Node process: ${status.shuttingDown ? "❌" : "✓"}`,
-        `Watchdog timer: ${status.started ? "✓" : "❌"}`,
-        `Event loop: ${status.eventLoopLagMs < 5000 ? "✓" : "⚠️"}`,
-        `Memory: ${status.resourcePressure === "normal" ? "✓" : "⚠️"}`,
-        `Messenger circuit: ${messengerCircuitOpenUntil > Date.now() ? "⚠️ OPEN" : "✓ CLOSED"}`,
-        `RSS: ${Math.round(memory.rss / 1024 / 1024)}MB`,
-      ];
+    if (section !== "home") {
       sendReplyWithTyping(
         api,
-        "🌑 WATCHDOG SELF-TEST\n\n" + checks.join("\n") + "\n\nNo test spam was sent to Messenger.",
+        [
+          `╭────── ୨୧ ${section.toUpperCase()} ୨୧ ──────╮`,
+          "",
+          "This owner section is reserved for",
+          "the corresponding subsystem controls.",
+          "",
+          `♡ !owner ${section}`,
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
         threadId
       );
       return;
@@ -2936,13 +3002,41 @@ async function handleMessage(
 
     sendReplyWithTyping(
       api,
-      watchdogFormatStatus(),
+      [
+        "╭━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮",
+        "┃                                    ┃",
+        "┃          ୨୧ E C L I P S E ୨୧       ┃",
+        "┃             O W N E R              ┃",
+        "┃           C O N S O L E            ┃",
+        "┃                                    ┃",
+        "┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫",
+        "┃  ◈ CORE                            ┃",
+        "┃    !owner bot                      ┃",
+        "┃                                    ┃",
+        "┃  🪽 AUTOMATED BOT                  ┃",
+        "┃    !owner automated                ┃",
+        "┃                                    ┃",
+        "┃  💗 ECONOMY                        ┃",
+        "┃    !owner economy                  ┃",
+        "┃                                    ┃",
+        "┃  🌸 RPG                            ┃",
+        "┃    !owner rpg                      ┃",
+        "┃                                    ┃",
+        "┃  🎀 MUSIC                          ┃",
+        "┃    !owner music                    ┃",
+        "┃                                    ┃",
+        "┃  🛡 MODERATION                     ┃",
+        "┃    !owner moderation               ┃",
+        "┃                                    ┃",
+        "┃  ⚙ SYSTEM                          ┃",
+        "┃    !owner system                   ┃",
+        "┃                                    ┃",
+        "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯",
+        "             ୨୧ E C L I P S E ୨୧",
+      ].join("\n"),
       threadId
     );
-    return;
-  }
 
-  if (!watchdogAdmitCommand(threadId, senderId, originalText, isAdmin)) {
     return;
   }
 
@@ -3200,8 +3294,6 @@ async function handleMessage(
               ? "🟢 CONNECTED"
               : "🔴 DISCONNECTED"
           }`,
-          `    ♡ send queue: ${messengerSendQueue.length}/${MESSENGER_SAFETY.maxQueue}`,
-          `    ♡ safety circuit: ${Date.now() < messengerCircuitOpenUntil ? "🟡 PAUSED" : "🟢 CLOSED"}`,
           "",
           "୨୧ music protection",
           `    ♡ global downloads: ${music.activeDownloads}/${MUSIC_MAX_GLOBAL_DOWNLOADS}`,
@@ -3288,6 +3380,161 @@ async function handleMessage(
 
       return;
     }
+  }
+
+  // ==========================================================
+  // WATCHDOG CONTROL
+  // ==========================================================
+
+  const watchdogMatch =
+    originalText.match(
+      /^!watchdog(?:\s+(status|restart))?$/i
+    );
+
+  if (
+    watchdogMatch
+  ) {
+    if (!isAdmin) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  WATCHDOG  🎀 ──────╮",
+          "",
+          "🔒 ADMIN ONLY",
+          "",
+          "Only the bot admin can inspect",
+          "or restart the watchdog.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      return;
+    }
+
+    const watchdogCommand =
+      (
+        watchdogMatch[1] ||
+        "status"
+      ).toLowerCase();
+
+    if (
+      watchdogCommand ===
+      "restart"
+    ) {
+      sendReplyWithTyping(
+        api,
+        [
+          "╭────── 🎀  WATCHDOG  🎀 ──────╮",
+          "",
+          "🔴 MANUAL RESTART REQUESTED",
+          "",
+          "ECLIPSE will exit now.",
+          "Render should automatically restart",
+          "the service.",
+          "",
+          "♡ This is intentional.",
+          "",
+          "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+        ].join("\n"),
+        threadID
+      );
+
+      setTimeout(
+        () => {
+          watchdogSetShuttingDown(
+            true
+          );
+
+          watchdogSetMessengerConnected(
+            false
+          );
+
+          stopWatchdog();
+
+          process.exit(1);
+        },
+        1500
+      );
+
+      return;
+    }
+
+    const watchdog =
+      getWatchdogStatus();
+
+    const uptimeSeconds =
+      Math.floor(
+        process.uptime()
+      );
+
+    const uptimeMinutes =
+      Math.floor(
+        uptimeSeconds / 60
+      );
+
+    const uptimeHours =
+      Math.floor(
+        uptimeMinutes / 60
+      );
+
+    const displayMinutes =
+      uptimeMinutes % 60;
+
+    const displaySeconds =
+      uptimeSeconds % 60;
+
+    sendReplyWithTyping(
+      api,
+      [
+        "╭────── 🎀  WATCHDOG STATUS  🎀 ──────╮",
+        "",
+        "୨୧ watchdog",
+        `    ♡ ${
+          watchdog.ok
+            ? "🟢 HEALTHY"
+            : "🔴 UNHEALTHY"
+        }`,
+        "",
+        "୨୧ process",
+        "    ♡ 🟢 RUNNING",
+        `    ♡ uptime: ${uptimeHours}h ${displayMinutes}m ${displaySeconds}s`,
+        "",
+        "୨୧ Messenger",
+        `    ♡ ${
+          watchdog.messengerConnected
+            ? "🟢 CONNECTED"
+            : "🔴 DISCONNECTED"
+        }`,
+        "",
+        "୨୧ event loop",
+        `    ♡ last tick: ${watchdog.eventLoopAgeMs}ms ago`,
+        `    ♡ failures: ${watchdog.consecutiveFailures}`,
+        "",
+        "୨୧ watchdog",
+        `    ♡ started: ${
+          watchdog.started
+            ? "YES"
+            : "NO"
+        }`,
+        `    ♡ shutdown: ${
+          watchdog.shuttingDown
+            ? "YES"
+            : "NO"
+        }`,
+        "",
+        "୨୧ commands",
+        "    ♡ !watchdog",
+        "    ♡ !watchdog status",
+        "    ♡ !watchdog restart",
+        "",
+        "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
+      ].join("\n"),
+      threadID
+    );
+
+    return;
   }
 
   // ==========================================================
@@ -4898,22 +5145,24 @@ function broadcastToAllThreads(
     ) => {
       setTimeout(
         () => {
-          void sendMessengerMessage(
-            api,
+          trafficSendMessage(api, 
             broadcastMessage,
-            threadID
-          )
-            .then(() => {
-              console.log(
-                `[Broadcast] Sent to ${threadID}`
-              );
-            })
-            .catch((sendError) => {
-              console.error(
-                `[Broadcast] Failed for ${threadID}:`,
+            threadID,
+            (sendError) => {
+              if (
                 sendError
-              );
-            });
+              ) {
+                console.error(
+                  `[Broadcast] Failed for ${threadID}:`,
+                  sendError
+                );
+              } else {
+                console.log(
+                  `[Broadcast] Sent to ${threadID}`
+                );
+              }
+            }
+          );
         },
         index * 500
       );
@@ -5034,16 +5283,20 @@ function sendReplyWithTyping(
               }
             : message;
 
-        void sendMessengerMessage(
-          api,
+        trafficSendMessage(api, 
           outgoingMessage,
-          threadID
-        ).catch((sendError) => {
-          console.error(
-            "Reply failed:",
-            sendError
-          );
-        });
+          threadID,
+          (sendError) => {
+            if (
+              sendError
+            ) {
+              console.error(
+                "Reply failed:",
+                sendError
+              );
+            }
+          }
+        );
       } catch (sendError) {
         console.error(
           "Reply error:",
@@ -5239,9 +5492,6 @@ process.once(
 // ============================================================
 
 setInterval(() => {
-  watchdogEvaluateResources();
-  watchdogMaybeRecover();
-
   const m =
     process.memoryUsage();
 
