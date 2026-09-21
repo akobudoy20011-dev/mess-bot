@@ -185,6 +185,8 @@ function watchdogHeartbeat() {
 
   watchdogConsecutiveFailures =
     0;
+
+  watchdogRecomputeMode();
 }
 
 function watchdogSetMessengerConnected(
@@ -205,6 +207,57 @@ function watchdogSetShuttingDown(
 ) {
   watchdogShuttingDown =
     Boolean(value);
+}
+
+// ============================================================
+// WATCHDOG MODE / TRAFFIC LINK
+// ============================================================
+//
+// Bridges watchdog health into the Traffic Governor. The
+// governor's trafficMode()/trafficEffectiveGapMs() functions
+// look for these two globals; previously neither was ever
+// declared, so the link was permanently inert. This makes it
+// real: as health degrades, outgoing sends space out more.
+// ============================================================
+
+let watchdogMode = "normal"; // normal | degraded | critical
+
+function watchdogRecomputeMode() {
+  if (
+    watchdogConsecutiveFailures >=
+    WATCHDOG_FAILURE_LIMIT - 1
+  ) {
+    watchdogMode = "critical";
+    return;
+  }
+
+  const now = Date.now();
+
+  const eventLoopAgeMs =
+    now - watchdogLastTickAt;
+
+  if (
+    watchdogConsecutiveFailures > 0 ||
+    eventLoopAgeMs >
+      WATCHDOG_EVENT_LOOP_TIMEOUT_MS / 2
+  ) {
+    watchdogMode = "degraded";
+    return;
+  }
+
+  watchdogMode = "normal";
+}
+
+function watchdogGetTrafficMultiplier() {
+  if (watchdogMode === "critical") {
+    return 3;
+  }
+
+  if (watchdogMode === "degraded") {
+    return 1.75;
+  }
+
+  return 1;
 }
 
 function getWatchdogStatus() {
@@ -242,6 +295,9 @@ function getWatchdogStatus() {
   return {
     ok:
       watchdogHealthy,
+
+    mode:
+      watchdogMode,
 
     started:
       watchdogStarted,
@@ -308,6 +364,8 @@ function runWatchdogCheck() {
     watchdogConsecutiveFailures =
       0;
 
+    watchdogRecomputeMode();
+
     return;
   }
 
@@ -319,6 +377,8 @@ function runWatchdogCheck() {
     !eventLoopHealthy
   ) {
     watchdogConsecutiveFailures++;
+
+    watchdogRecomputeMode();
 
     console.error(
       `[WATCHDOG] Event-loop stall detected: ${eventLoopDelay}ms`
@@ -351,6 +411,8 @@ function runWatchdogCheck() {
 
   watchdogConsecutiveFailures =
     0;
+
+  watchdogRecomputeMode();
 
   if (
     now - watchdogLastLogAt >=
@@ -405,6 +467,8 @@ function startWatchdog() {
 
   watchdogLastLogAt =
     Date.now();
+
+  watchdogRecomputeMode();
 
   watchdogTimer =
     setInterval(
@@ -1109,14 +1173,71 @@ let musicPaused = false;
 // ============================================================
 // GLOBAL BOT STATE
 // ============================================================
+//
+// botDisabled / botPaused are persisted to a small local JSON
+// file so a Render restart (crash, manual `!watchdog restart`)
+// doesn't silently un-pause or re-enable the bot. This does NOT
+// survive a fresh deploy (new container = new disk), only
+// same-container restarts.
+// ============================================================
 
-if (typeof global.botDisabled !== "boolean") {
-  global.botDisabled = false;
+const BOT_STATE_FILE = path.join(
+  __dirname,
+  ".eclipse-state.json"
+);
+
+function loadPersistedBotState() {
+  try {
+    const raw = fs.readFileSync(
+      BOT_STATE_FILE,
+      "utf8"
+    );
+
+    const parsed = JSON.parse(raw);
+
+    global.botDisabled =
+      Boolean(parsed.botDisabled);
+
+    global.botPaused =
+      Boolean(parsed.botPaused);
+
+    console.log(
+      `[STATE] Restored persisted state: disabled=${global.botDisabled}, paused=${global.botPaused}`
+    );
+  } catch {
+    if (
+      typeof global.botDisabled !== "boolean"
+    ) {
+      global.botDisabled = false;
+    }
+
+    if (
+      typeof global.botPaused !== "boolean"
+    ) {
+      global.botPaused = false;
+    }
+  }
 }
 
-if (typeof global.botPaused !== "boolean") {
-  global.botPaused = false;
+function persistBotState() {
+  try {
+    fs.writeFileSync(
+      BOT_STATE_FILE,
+      JSON.stringify({
+        botDisabled: global.botDisabled === true,
+        botPaused: global.botPaused === true,
+        savedAt: new Date().toISOString(),
+      })
+    );
+  } catch (error) {
+    console.error(
+      "[STATE] Failed to persist bot state:",
+      error
+    );
+  }
 }
+
+loadPersistedBotState();
 
 // ============================================================
 // TIMEOUT HELPER
@@ -2381,6 +2502,55 @@ function handleMusicPauseToggle(
 }
 
 // ============================================================
+// DATABASE HEALTH CHECK
+// ============================================================
+//
+// Best-effort: db.js's exact shape isn't known here, so this
+// tries the common patterns (a pg-style pool, or an explicit
+// ping/healthCheck export) and falls back to "unknown" rather
+// than guessing wrong. Tell me what db.js exports and I'll make
+// this exact.
+// ============================================================
+
+async function checkDatabaseHealth() {
+  try {
+    if (
+      db &&
+      db.pool &&
+      typeof db.pool.query === "function"
+    ) {
+      await db.pool.query("SELECT 1");
+      return true;
+    }
+
+    if (
+      db &&
+      typeof db.ping === "function"
+    ) {
+      await db.ping();
+      return true;
+    }
+
+    if (
+      db &&
+      typeof db.healthCheck === "function"
+    ) {
+      await db.healthCheck();
+      return true;
+    }
+
+    return null; // unknown — db.js doesn't expose a health check
+  } catch (error) {
+    console.error(
+      "[DB HEALTH] Check failed:",
+      error
+    );
+
+    return false;
+  }
+}
+
+// ============================================================
 // RENDER HEALTH CHECK
 // ============================================================
 
@@ -2392,15 +2562,19 @@ app.get("/", (_req, res) => {
   );
 });
 
-app.get("/health", (_req, res) => {
+app.get("/health", async (_req, res) => {
   const music =
     getMusicStats();
 
   const watchdog =
     getWatchdogStatus();
 
+  const databaseHealthy =
+    await checkDatabaseHealth();
+
   const healthOk =
-    watchdog.ok;
+    watchdog.ok &&
+    databaseHealthy !== false;
 
   res.status(
     healthOk
@@ -2420,6 +2594,9 @@ app.get("/health", (_req, res) => {
       process.uptime(),
 
     watchdog,
+
+    database:
+      databaseHealthy,
 
     trafficGovernor: trafficSafetyStatus(),
 
@@ -2590,218 +2767,268 @@ try {
 // ============================================================
 // FACEBOOK LOGIN
 // ============================================================
+//
+// Wrapped in a retryable function with exponential backoff.
+// A raw process.exit(1) on the first failure (the old behavior)
+// combined with Render's auto-restart could produce a tight
+// crash-restart loop against Facebook's login endpoint, which
+// is exactly the kind of pattern that gets accounts flagged.
+// Backoff caps at MAX_LOGIN_BACKOFF_MS between attempts.
+// ============================================================
 
-login(
-  appState,
-  {
-    online: true,
-    updatePresence: true,
-    selfListen: false,
-    randomUserAgent: false,
-  },
+let loginAttempt = 0;
+let listenFailureCount = 0;
 
-  async (
-    loginError,
-    api
-  ) => {
-    if (loginError) {
-      console.error(
-        "Login failed:",
-        loginError
-      );
+const MAX_LOGIN_BACKOFF_MS = 5 * 60_000;
+const MAX_LISTEN_RETRIES = 5;
 
-      watchdogSetMessengerConnected(
-        false
-      );
-
-      process.exit(1);
-    }
-
-    if (!api) {
-      console.error(
-        "Login failed: Facebook API object was not returned."
-      );
-
-      watchdogSetMessengerConnected(
-        false
-      );
-
-      process.exit(1);
-    }
-
-    api = installTrafficGovernor(api) || api;
-
-    watchdogSetMessengerConnected(
-      true
-    );
-
-    console.log(
-      "Logged in successfully."
-    );
-
-    // ========================================================
-    // DATABASE
-    // ========================================================
-
-    try {
-      await db.connect();
-
-      console.log(
-        "Neon database connected successfully."
-      );
-    } catch (error) {
-      console.error(
-        "Database connection failed:",
-        error
-      );
-
-      process.exit(1);
-    }
-
-    // ========================================================
-    // LAST CHAMBER
-    // Restores any open table after a restart.
-    // ========================================================
-
-    try {
-      await initLastChamber(api);
-    } catch (error) {
-      console.error(
-        "[chamber] init failed:",
-        error
-      );
-    }
-
-    // ========================================================
-    // CLEANUP
-    // ========================================================
-
-    try {
-      startCleanupScheduler();
-
-      console.log(
-        "[CLEANUP] Cleanup scheduler started."
-      );
-    } catch (error) {
-      console.error(
-        "[CLEANUP] Failed to start cleanup scheduler:",
-        error
-      );
-    }
-
-    // ========================================================
-    // LISTENER
-    // ========================================================
-
-    api.setOptions({
-      listenEvents: true,
+function attemptLogin() {
+  login(
+    appState,
+    {
+      online: true,
+      updatePresence: true,
       selfListen: false,
-    });
+      randomUserAgent: false,
+    },
 
-    const startupThreadID =
-      process.env.STARTUP_THREAD_ID;
+    async (
+      loginError,
+      api
+    ) => {
+      if (loginError || !api) {
+        loginAttempt++;
 
-    if (startupThreadID) {
-      trafficSendMessage(api, 
-        [
-          "╭─────── ୨୧ ♡ ୨୧ ───────╮",
-          "        🎀 E C L I P S E",
-          "          ONLINE ♡",
-          "╰─────── ୨୧ ♡ ୨୧ ───────╯",
-          "",
-          "୨୧ bot is online and ready ♡",
-          "",
-          "♡ music protection: 2 / GC",
-          "♡ global downloads: 2",
-          "♡ pause system: ready",
-          "♡ watchdog: active",
-        ].join("\n"),
-        startupThreadID,
-        (sendError) => {
-          if (sendError) {
+        const backoffMs = Math.min(
+          2 ** loginAttempt * 1000,
+          MAX_LOGIN_BACKOFF_MS
+        );
+
+        console.error(
+          `Login failed (attempt ${loginAttempt}). Retrying in ${backoffMs}ms.`,
+          loginError || "No API object returned."
+        );
+
+        watchdogSetMessengerConnected(
+          false
+        );
+
+        setTimeout(
+          attemptLogin,
+          backoffMs
+        );
+
+        return;
+      }
+
+      loginAttempt = 0;
+      listenFailureCount = 0;
+
+      api = installTrafficGovernor(api) || api;
+
+      watchdogSetMessengerConnected(
+        true
+      );
+
+      console.log(
+        "Logged in successfully."
+      );
+
+      // ========================================================
+      // DATABASE
+      // ========================================================
+
+      try {
+        await db.connect();
+
+        console.log(
+          "Neon database connected successfully."
+        );
+      } catch (error) {
+        console.error(
+          "Database connection failed:",
+          error
+        );
+
+        process.exit(1);
+      }
+
+      // ========================================================
+      // LAST CHAMBER
+      // Restores any open table after a restart.
+      // ========================================================
+
+      try {
+        await initLastChamber(api);
+      } catch (error) {
+        console.error(
+          "[chamber] init failed:",
+          error
+        );
+      }
+
+      // ========================================================
+      // CLEANUP
+      // ========================================================
+
+      try {
+        startCleanupScheduler();
+
+        console.log(
+          "[CLEANUP] Cleanup scheduler started."
+        );
+      } catch (error) {
+        console.error(
+          "[CLEANUP] Failed to start cleanup scheduler:",
+          error
+        );
+      }
+
+      // ========================================================
+      // LISTENER
+      // ========================================================
+
+      api.setOptions({
+        listenEvents: true,
+        selfListen: false,
+      });
+
+      const startupThreadID =
+        process.env.STARTUP_THREAD_ID;
+
+      if (startupThreadID) {
+        trafficSendMessage(api, 
+          [
+            "╭─────── ୨୧ ♡ ୨୧ ───────╮",
+            "        🎀 E C L I P S E",
+            "          ONLINE ♡",
+            "╰─────── ୨୧ ♡ ୨୧ ───────╯",
+            "",
+            "୨୧ bot is online and ready ♡",
+            "",
+            "♡ music protection: 2 / GC",
+            "♡ global downloads: 2",
+            "♡ pause system: ready",
+            "♡ watchdog: active",
+          ].join("\n"),
+          startupThreadID,
+          (sendError) => {
+            if (sendError) {
+              console.error(
+                "Startup message failed:",
+                sendError
+              );
+            }
+          }
+        );
+      }
+
+      console.log(
+        "Listener started."
+      );
+
+      api.listenMqtt(
+        (
+          listenError,
+          event
+        ) => {
+          if (listenError) {
+            watchdogSetMessengerConnected(
+              false
+            );
+
+            listenFailureCount++;
+
             console.error(
-              "Startup message failed:",
-              sendError
+              `Listener error (failure ${listenFailureCount}/${MAX_LISTEN_RETRIES}):`,
+              listenError
+            );
+
+            if (
+              listenFailureCount <=
+              MAX_LISTEN_RETRIES
+            ) {
+              const backoffMs = Math.min(
+                2 ** listenFailureCount * 1000,
+                60_000
+              );
+
+              console.error(
+                `[LISTENER] Attempting re-login in ${backoffMs}ms.`
+              );
+
+              setTimeout(
+                attemptLogin,
+                backoffMs
+              );
+            } else {
+              console.error(
+                "[LISTENER] Retry limit reached. Exiting so Render can restart cleanly."
+              );
+
+              process.exit(1);
+            }
+
+            return;
+          }
+
+          listenFailureCount = 0;
+
+          watchdogSetMessengerConnected(
+            true
+          );
+
+          watchdogHeartbeat();
+
+          if (
+            !event ||
+            typeof event !==
+              "object"
+          ) {
+            return;
+          }
+
+          if (
+            (
+              event.type ===
+                "message" ||
+              event.type ===
+                "message_reply"
+            ) &&
+            event.threadID
+          ) {
+            const threadID =
+              String(
+                event.threadID
+              );
+
+            registerActiveThread(
+              threadID
+            );
+
+            void registerGCActivity(
+              threadID
+            ).catch(
+              (error) => {
+                console.error(
+                  "[GC ACTIVITY] Failed to register activity:",
+                  error
+                );
+              }
+            );
+
+            void handleMessage(
+              api,
+              event
             );
           }
         }
       );
     }
+  );
+}
 
-    console.log(
-      "Listener started."
-    );
-
-    api.listenMqtt(
-      (
-        listenError,
-        event
-      ) => {
-        if (listenError) {
-          watchdogSetMessengerConnected(
-            false
-          );
-
-          console.error(
-            "Listener error:",
-            listenError
-          );
-
-          return;
-        }
-
-        watchdogSetMessengerConnected(
-          true
-        );
-
-        watchdogHeartbeat();
-
-        if (
-          !event ||
-          typeof event !==
-            "object"
-        ) {
-          return;
-        }
-
-        if (
-          (
-            event.type ===
-              "message" ||
-            event.type ===
-              "message_reply"
-          ) &&
-          event.threadID
-        ) {
-          const threadID =
-            String(
-              event.threadID
-            );
-
-          registerActiveThread(
-            threadID
-          );
-
-          void registerGCActivity(
-            threadID
-          ).catch(
-            (error) => {
-              console.error(
-                "[GC ACTIVITY] Failed to register activity:",
-                error
-              );
-            }
-          );
-
-          void handleMessage(
-            api,
-            event
-          );
-        }
-      }
-    );
-  }
-);
+attemptLogin();
 
 // ============================================================
 // ACTIVE THREAD TRACKING
@@ -3098,6 +3325,8 @@ async function handleMessage(
       global.botPaused =
         false;
 
+      persistBotState();
+
       sendReplyWithTyping(
         api,
         [
@@ -3172,6 +3401,8 @@ async function handleMessage(
 
     global.botPaused =
       true;
+
+    persistBotState();
 
     sendReplyWithTyping(
       api,
@@ -3340,6 +3571,8 @@ async function handleMessage(
       global.botDisabled =
         true;
 
+      persistBotState();
+
       sendReplyWithTyping(
         api,
         [
@@ -3373,6 +3606,8 @@ async function handleMessage(
     ) {
       global.botDisabled =
         false;
+
+      persistBotState();
 
       sendReplyWithTyping(
         api,
@@ -3511,6 +3746,7 @@ async function handleMessage(
             ? "🟢 HEALTHY"
             : "🔴 UNHEALTHY"
         }`,
+        `    ♡ mode: ${String(watchdog.mode || "normal").toUpperCase()}`,
         "",
         "୨୧ process",
         "    ♡ 🟢 RUNNING",
@@ -5105,6 +5341,14 @@ function canRandomRoastThread(
 // ============================================================
 // BROADCAST
 // ============================================================
+//
+// pendingBroadcastTimers tracks each staggered setTimeout so
+// gracefulShutdown can cancel outstanding ones. Without this, a
+// large broadcast (many active threads) could still be firing
+// send calls seconds after the process began tearing down.
+// ============================================================
+
+const pendingBroadcastTimers = new Set();
 
 function broadcastToAllThreads(
   api,
@@ -5158,8 +5402,10 @@ function broadcastToAllThreads(
       threadID,
       index
     ) => {
-      setTimeout(
+      const timer = setTimeout(
         () => {
+          pendingBroadcastTimers.delete(timer);
+
           trafficSendMessage(api, 
             broadcastMessage,
             threadID,
@@ -5181,6 +5427,8 @@ function broadcastToAllThreads(
         },
         index * 500
       );
+
+      pendingBroadcastTimers.add(timer);
     }
   );
 }
@@ -5445,6 +5693,12 @@ async function gracefulShutdown(
   console.log(
     `[SYSTEM] Received ${signal}. Cleaning up ECLIPSE...`
   );
+
+  for (const timer of pendingBroadcastTimers) {
+    clearTimeout(timer);
+  }
+
+  pendingBroadcastTimers.clear();
 
   for (
     const job of musicPendingJobs
