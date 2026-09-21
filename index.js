@@ -15,6 +15,7 @@ const { handleEconomyCommand } = require("./economy");
 const {
   handleGamesCommand,
   handleGameResponse,
+  initLastChamber,
 } = require("./games");
 
 const { handleRpgCommand } = require("./rpg");
@@ -2658,6 +2659,20 @@ login(
     }
 
     // ========================================================
+    // LAST CHAMBER
+    // Restores any open table after a restart.
+    // ========================================================
+
+    try {
+      await initLastChamber(api);
+    } catch (error) {
+      console.error(
+        "[chamber] init failed:",
+        error
+      );
+    }
+
+    // ========================================================
     // CLEANUP
     // ========================================================
 
@@ -4616,7 +4631,7 @@ async function handleMessage(
 
     const gameMatch =
       text.match(
-        /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games)(?:\s+(.*))?$/i
+        /^!(trivia|rps|roll|guess|coinflip|blackjack|hit|stand|double|split|surrender|slots|math|riddle|8ball|games|chamber|roulette|lastchamber)(?:\s+(.*))?$/i
       );
 
     if (
