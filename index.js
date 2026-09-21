@@ -579,6 +579,126 @@ let trafficTotalDuplicateBlocked = 0;
 let trafficTotalCommandBlocked = 0;
 let trafficPeakQueue = 0;
 
+// ============================================================
+// INCOMING EVENT DEDUPLICATION
+// ============================================================
+// Prevents one Messenger event from executing a command twice
+// during transient listener reconnects or duplicate delivery.
+// ============================================================
+
+const INCOMING_DEDUP_WINDOW_MS = Math.max(
+  2_000,
+  Number(process.env.ECLIPSE_INCOMING_DEDUP_WINDOW_MS || 10_000)
+);
+
+const recentIncomingEvents = new Map();
+
+function incomingEventKeys(event) {
+  if (!event || typeof event !== "object") {
+    return [];
+  }
+
+  const keys = [];
+
+  const messageID = String(
+    event.messageID ||
+      event.messageId ||
+      event.message_id ||
+      ""
+  ).trim();
+
+  if (messageID) {
+    keys.push(`id:${messageID}`);
+  }
+
+  // Messenger/FCA can occasionally deliver the same logical event
+  // through a reconnect with a different/absent message ID. Keep a
+  // second semantic fingerprint so one user action cannot execute twice.
+  const timestamp = Number(
+    event.timestamp ||
+      event.timestampMS ||
+      event.timestamp_ms ||
+      NaN
+  );
+
+  const threadID = String(event.threadID || "").trim();
+  const senderID = String(event.senderID || "").trim();
+  const body = String(event.body || "").trim();
+
+  if (
+    threadID &&
+    senderID &&
+    Number.isFinite(timestamp) &&
+    body
+  ) {
+    keys.push(
+      `semantic:${threadID}:${senderID}:${timestamp}:${body}`
+    );
+
+    // Some reconnect paths can reproduce the same event with a tiny
+    // timestamp difference. A one-second bucket catches that case
+    // without using a long-lived body-only fingerprint that could
+    // suppress two legitimate identical commands minutes later.
+    keys.push(
+      `semantic1s:${threadID}:${senderID}:${Math.floor(timestamp / 1000)}:${body}`
+    );
+  }
+
+  return keys;
+}
+
+function shouldProcessIncomingEvent(event) {
+  const keys = incomingEventKeys(event);
+
+  if (!keys.length) {
+    return true;
+  }
+
+  const now = Date.now();
+
+  for (const key of keys) {
+    const previous = recentIncomingEvents.get(key);
+
+    if (
+      previous &&
+      now - previous < INCOMING_DEDUP_WINDOW_MS
+    ) {
+      console.warn(
+        `[EVENT] Duplicate Messenger event suppressed: ${key}`
+      );
+      return false;
+    }
+  }
+
+  for (const key of keys) {
+    recentIncomingEvents.set(key, now);
+  }
+
+  return true;
+}
+
+function cleanupIncomingEventDedup() {
+  const now = Date.now();
+
+  for (const [key, timestamp] of recentIncomingEvents.entries()) {
+    if (now - timestamp >= INCOMING_DEDUP_WINDOW_MS) {
+      recentIncomingEvents.delete(key);
+    }
+  }
+}
+
+const incomingEventCleanupTimer = setInterval(
+  cleanupIncomingEventDedup,
+  Math.min(INCOMING_DEDUP_WINDOW_MS, 30_000)
+);
+
+if (
+  incomingEventCleanupTimer &&
+  typeof incomingEventCleanupTimer.unref === "function"
+) {
+  incomingEventCleanupTimer.unref();
+}
+
 function trafficNow() {
   return Date.now();
 }
@@ -678,7 +798,7 @@ function trafficCanAcceptCommand(senderID, threadID) {
   return true;
 }
 
-function trafficCanSendNow(threadID, message, hasCallback = false) {
+function trafficCanSendNow(threadID, message) {
   const now = trafficNow();
   const thread = String(threadID || "");
 
@@ -700,7 +820,6 @@ function trafficCanSendNow(threadID, message, hasCallback = false) {
     trafficRecentMessages.get(fingerprint) || 0;
 
   if (
-    !hasCallback &&
     recentAt &&
     now - recentAt <
       TRAFFIC_GOVERNOR.duplicateWindowMs
@@ -939,8 +1058,7 @@ async function trafficProcessQueue() {
       const decision =
         trafficCanSendNow(
           job.threadID,
-          job.message,
-          typeof job.callback === "function"
+          job.message
         );
 
       if (!decision.ok) {
@@ -2778,11 +2896,29 @@ try {
 
 let loginAttempt = 0;
 let listenFailureCount = 0;
+let loginInProgress = false;
+let listenerGeneration = 0;
+let activeListenerGeneration = 0;
+let startupSchedulersInitialized = false;
+let loginRetryTimer = null;
+let activeMessengerApi = null;
+
+// Prevent accidentally attaching two MQTT listeners to the same
+// Messenger API object during reconnect races.
+const listenerStartedApis = new WeakSet();
 
 const MAX_LOGIN_BACKOFF_MS = 5 * 60_000;
 const MAX_LISTEN_RETRIES = 5;
 
 function attemptLogin() {
+  if (loginInProgress) {
+    console.warn("[LOGIN] Login attempt already in progress; skipping duplicate attempt.");
+    return;
+  }
+
+  loginInProgress = true;
+  const thisGeneration = ++listenerGeneration;
+
   login(
     appState,
     {
@@ -2796,6 +2932,17 @@ function attemptLogin() {
       loginError,
       api
     ) => {
+      // A previous login callback can arrive after a newer login
+      // attempt has already started. Never let that stale callback
+      // change login state, schedule another retry, or attach a
+      // second Messenger listener.
+      if (thisGeneration !== listenerGeneration) {
+        console.warn(
+          `[LOGIN] Discarding stale login callback (generation ${thisGeneration}, current ${listenerGeneration}).`
+        );
+        return;
+      }
+
       if (loginError || !api) {
         loginAttempt++;
 
@@ -2813,18 +2960,35 @@ function attemptLogin() {
           false
         );
 
-        setTimeout(
-          attemptLogin,
-          backoffMs
-        );
+        loginInProgress = false;
+
+        if (loginRetryTimer) {
+          clearTimeout(loginRetryTimer);
+        }
+
+        loginRetryTimer = setTimeout(() => {
+          loginRetryTimer = null;
+          attemptLogin();
+        }, backoffMs);
 
         return;
       }
 
       loginAttempt = 0;
       listenFailureCount = 0;
+      loginInProgress = false;
 
+      if (loginRetryTimer) {
+        clearTimeout(loginRetryTimer);
+        loginRetryTimer = null;
+      }
+
+      activeListenerGeneration = thisGeneration;
+
+      // This generation now owns message processing. Any older
+      // listener callback will fail the generation check below.
       api = installTrafficGovernor(api) || api;
+      activeMessengerApi = api;
 
       watchdogSetMessengerConnected(
         true
@@ -2872,11 +3036,18 @@ function attemptLogin() {
       // ========================================================
 
       try {
-        startCleanupScheduler();
+        if (!startupSchedulersInitialized) {
+          startCleanupScheduler();
+          startupSchedulersInitialized = true;
 
-        console.log(
-          "[CLEANUP] Cleanup scheduler started."
-        );
+          console.log(
+            "[CLEANUP] Cleanup scheduler started."
+          );
+        } else {
+          console.log(
+            "[CLEANUP] Cleanup scheduler already initialized; skipping duplicate start."
+          );
+        }
       } catch (error) {
         console.error(
           "[CLEANUP] Failed to start cleanup scheduler:",
@@ -2923,6 +3094,25 @@ function attemptLogin() {
         );
       }
 
+      const rawApiForListener =
+        api && api.__eclipseTrafficRawApi
+          ? api.__eclipseTrafficRawApi
+          : api;
+
+      if (
+        rawApiForListener &&
+        listenerStartedApis.has(rawApiForListener)
+      ) {
+        console.warn(
+          "[LISTENER] Listener already attached to this Messenger API; skipping duplicate listener."
+        );
+        return;
+      }
+
+      if (rawApiForListener) {
+        listenerStartedApis.add(rawApiForListener);
+      }
+
       console.log(
         "Listener started."
       );
@@ -2932,7 +3122,22 @@ function attemptLogin() {
           listenError,
           event
         ) => {
+          if (thisGeneration !== activeListenerGeneration) {
+            return;
+          }
+
+          if (activeMessengerApi && activeMessengerApi !== api) {
+            return;
+          }
+
           if (listenError) {
+            if (thisGeneration === activeListenerGeneration) {
+              // Invalidate this listener immediately. Do not allow an
+              // old socket to keep processing events while reconnecting.
+              activeListenerGeneration = 0;
+              activeMessengerApi = null;
+            }
+
             watchdogSetMessengerConnected(
               false
             );
@@ -2953,14 +3158,20 @@ function attemptLogin() {
                 60_000
               );
 
-              console.error(
-                `[LISTENER] Attempting re-login in ${backoffMs}ms.`
-              );
+              if (!loginRetryTimer) {
+                console.error(
+                  `[LISTENER] Attempting re-login in ${backoffMs}ms.`
+                );
 
-              setTimeout(
-                attemptLogin,
-                backoffMs
-              );
+                loginRetryTimer = setTimeout(() => {
+                  loginRetryTimer = null;
+                  attemptLogin();
+                }, backoffMs);
+              } else {
+                console.warn(
+                  "[LISTENER] Re-login already scheduled; ignoring duplicate listener error."
+                );
+              }
             } else {
               console.error(
                 "[LISTENER] Retry limit reached. Exiting so Render can restart cleanly."
@@ -2985,6 +3196,10 @@ function attemptLogin() {
             typeof event !==
               "object"
           ) {
+            return;
+          }
+
+          if (!shouldProcessIncomingEvent(event)) {
             return;
           }
 
