@@ -368,7 +368,7 @@ function formatCleanupReport(
       `    ♡ findings: ${optimizerFindings}`,
 
       `୨୧ database maintenance`,
-      `    ♡ ${report.databaseMaintenance ? "🟢 COMPLETE" : "⚪ NOT RUN"}`,
+      `    ♡ ${report.databaseMaintenance && report.databaseMaintenance.ok ? "🟢 COMPLETE" : (report.databaseMaintenance ? "🔴 FAILED" : "⚪ NOT RUN")}`,
 
       `୨୧ duration`,
       `    ♡ ${Number(
@@ -2067,24 +2067,185 @@ async function processInactiveGCs() {
   return result;
 }
 
+
+// ============================================================
+// RETENTION / STORAGE MAINTENANCE 3.0
+// ============================================================
+
+const RETENTION_POLICIES = [
+  { names: ["game_history", "games_history"], days: 90, label: "game history" },
+  { names: ["exam_attempts", "exam_history"], days: 180, label: "exam history" },
+  { names: ["debate_history", "debate_sessions"], days: 180, label: "debate history" },
+  { names: ["investigation_history", "investigations_history"], days: 180, label: "investigation history" },
+  { names: ["economy_transactions", "economy_history", "balance_history"], days: 365, label: "economy history" },
+  { names: ["ai_conversations", "ai_messages"], days: 90, label: "AI history" },
+  { names: ["simulation_events", "simulation_event_history"], days: 90, label: "simulation minor history" },
+  { names: ["simulation_history"], days: 180, label: "simulation history" },
+];
+
+const RETENTION_TIME_COLUMNS = [
+  "created_at", "occurred_at", "timestamp", "logged_at", "completed_at", "ended_at", "updated_at"
+];
+
+const RETENTION_BATCH_SIZE = 500;
+
+function quoteIdentifier(name) {
+  return `"${String(name).replace(/"/g, '""')}"`;
+}
+
+async function resolveRetentionTable(names) {
+  for (const name of names) {
+    if (PROTECTED_TABLES.has(name)) continue;
+    if (await tableExists(name)) return name;
+  }
+  return null;
+}
+
+async function resolveRetentionColumn(tableName) {
+  const columns = await getTableColumns(tableName);
+  const lower = new Map(columns.map(c => [String(c).toLowerCase(), c]));
+  for (const candidate of RETENTION_TIME_COLUMNS) {
+    if (lower.has(candidate)) return lower.get(candidate);
+  }
+  return null;
+}
+
+async function countRetentionRows(tableName, columnName, cutoff) {
+  const sql = `SELECT COUNT(*)::bigint AS count FROM ${quoteIdentifier(tableName)} WHERE ${quoteIdentifier(columnName)} < $1`;
+  const result = await db.query(sql, [new Date(cutoff)]);
+  return Number(result.rows[0]?.count || 0);
+}
+
+async function deleteRetentionRows(tableName, columnName, cutoff) {
+  let total = 0;
+  while (true) {
+    const sql = `DELETE FROM ${quoteIdentifier(tableName)} WHERE ctid IN (SELECT ctid FROM ${quoteIdentifier(tableName)} WHERE ${quoteIdentifier(columnName)} < $1 LIMIT ${RETENTION_BATCH_SIZE})`;
+    const result = await db.query(sql, [new Date(cutoff)]);
+    const count = Number(result.rowCount || 0);
+    total += count;
+    if (count < RETENTION_BATCH_SIZE) break;
+  }
+  return total;
+}
+
+async function cleanupRetentionHistory({ dryRun = false } = {}) {
+  const result = {
+    dryRun,
+    tables: [],
+    rowsEligible: 0,
+    rowsDeleted: 0,
+    skipped: 0,
+    errors: [],
+  };
+
+  for (const policy of RETENTION_POLICIES) {
+    try {
+      const tableName = await resolveRetentionTable(policy.names);
+      if (!tableName) {
+        result.skipped++;
+        continue;
+      }
+
+      const columnName = await resolveRetentionColumn(tableName);
+      if (!columnName) {
+        result.skipped++;
+        result.tables.push({ table: tableName, label: policy.label, skipped: true, reason: "no safe timestamp column" });
+        continue;
+      }
+
+      const cutoff = Date.now() - policy.days * 24 * 60 * 60 * 1000;
+      const eligible = await countRetentionRows(tableName, columnName, cutoff);
+      let deleted = 0;
+
+      if (!dryRun && eligible > 0) {
+        deleted = await deleteRetentionRows(tableName, columnName, cutoff);
+      }
+
+      result.rowsEligible += eligible;
+      result.rowsDeleted += deleted;
+      result.tables.push({
+        table: tableName,
+        label: policy.label,
+        retentionDays: policy.days,
+        timestampColumn: columnName,
+        cutoff: new Date(cutoff).toISOString(),
+        eligible,
+        deleted,
+      });
+    } catch (error) {
+      result.errors.push(`${policy.label}: ${error.message}`);
+    }
+  }
+
+  return result;
+}
+
+async function getDatabaseStorageReport() {
+  try {
+    const result = await db.query(`
+      SELECT
+        COALESCE(SUM(pg_total_relation_size(c.oid)), 0)::bigint AS total_bytes,
+        COUNT(*)::int AS table_count
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind IN ('r', 'm')
+        AND n.nspname = 'public'
+    `);
+
+    const largest = await db.query(`
+      SELECT
+        c.relname AS table_name,
+        pg_total_relation_size(c.oid)::bigint AS total_bytes
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind IN ('r', 'm')
+        AND n.nspname = 'public'
+      ORDER BY pg_total_relation_size(c.oid) DESC
+      LIMIT 15
+    `);
+
+    return {
+      totalBytes: Number(result.rows[0]?.total_bytes || 0),
+      tableCount: Number(result.rows[0]?.table_count || 0),
+      largestTables: largest.rows.map(row => ({
+        table: row.table_name,
+        bytes: Number(row.total_bytes || 0),
+      })),
+    };
+  } catch (error) {
+    return { error: error.message, totalBytes: 0, tableCount: 0, largestTables: [] };
+  }
+}
+
 // ============================================================
 // DATABASE MAINTENANCE
 // ============================================================
 
 async function databaseMaintenance() {
   try {
-    await db.query(
-      "ANALYZE"
-    );
+    const before = await getDatabaseStorageReport();
+    const retention = await cleanupRetentionHistory({ dryRun: false });
 
-    return true;
+    await db.query("ANALYZE");
+
+    const after = await getDatabaseStorageReport();
+
+    return {
+      ok: true,
+      storageBefore: before,
+      retention,
+      storageAfter: after,
+    };
   } catch (error) {
     console.error(
-      "[MAINTENANCE] ANALYZE failed:",
+      "[MAINTENANCE] Database maintenance failed:",
       error.message
     );
 
-    return false;
+    return {
+      ok: false,
+      error: error.message,
+    };
   }
 }
 
@@ -2165,6 +2326,9 @@ function createReport() {
 
       expiredSessions:
         0,
+
+      retention:
+        null,
     },
 
     repaired: {
@@ -2210,6 +2374,9 @@ function createReport() {
 
     databaseMaintenance:
       false,
+
+    storage:
+      null,
 
     durationMs:
       0,
@@ -2365,14 +2532,27 @@ async function runCleanup(
     }
 
     // --------------------------------------------------------
-    // DATABASE
+    // DATABASE / RETENTION / STORAGE
     // --------------------------------------------------------
 
-    if (
-      mode !== "monitor"
-    ) {
+    report.storage = await getDatabaseStorageReport();
+
+    if (mode === "monitor") {
+      report.cleaned.retention =
+        await cleanupRetentionHistory({ dryRun: true });
+    }
+
+    if (mode !== "monitor") {
       report.databaseMaintenance =
         await databaseMaintenance();
+
+      if (report.databaseMaintenance && report.databaseMaintenance.retention) {
+        report.cleaned.retention = report.databaseMaintenance.retention;
+      }
+
+      report.storage =
+        report.databaseMaintenance.storageAfter ||
+        report.storage;
     }
 
     report.durationMs =
