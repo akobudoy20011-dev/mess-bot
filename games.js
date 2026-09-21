@@ -3639,6 +3639,9 @@ async function handleGameRules(api, event) {
       "   push · wager refunded",
       "   !hit · !stand · !double",
       "",
+      "🌑 !chamber · last chamber (pvp pot)",
+      "   !chamber rules for the full rules",
+      "",
       thinDivider(),
       "",
       "୨୧ ECLIPSE",
@@ -3696,6 +3699,7 @@ async function handleGameCenter(api, event) {
       "♡ PLAY",
       "   ┊ !rps        · rock paper scissors",
       "   ┊ !blackjack  · beat the dealer",
+      "   ┊ !chamber    · last chamber (pvp)",
       "",
       "♡ MIND",
       "   ┊ !trivia     · test your knowledge",
@@ -3815,6 +3819,13 @@ async function handleGameCommand(api, event, command, args) {
     return true;
   }
 
+  // 🌑 LAST CHAMBER
+  if (cmd === "chamber" || cmd === "roulette" || cmd === "lastchamber") {
+    await handleChamber(api, event, normalizedArgs);
+
+    return true;
+  }
+
   if (cmd === "daily") {
     await handleDaily(api, event);
 
@@ -3919,6 +3930,2288 @@ async function handleGameResponse(api, event, responseText, originalText) {
 }
 
 // ============================================================
+// 🌑 LAST CHAMBER  ·  PvP elimination pot game
+// ------------------------------------------------------------
+// PASTE THIS WHOLE FILE INTO games.js, directly ABOVE the
+// "EXPORTS" banner at the bottom.
+//
+// Commands (aliases: !chamber / !roulette / !lastchamber)
+//   !chamber                 panel
+//   !chamber create          open a table
+//   !chamber jackpot [bet]   open a jackpot table (4-8 players)
+//   !chamber join <bet>      enter (opens a table if none exists)
+//   !chamber leave           leave before the start (refund)
+//   !chamber start           seal the chamber (host)
+//   !chamber status
+//   !chamber continue        stay in after a round
+//   !chamber cashout         take the offer after a round
+//   !chamber cancel          cancel the lobby + refund (host/admin)
+//   !chamber history         your record
+//   !chamber rules
+//
+// Design notes
+//  * Wager is removed from the wallet the moment you join, in the
+//    SAME SQL statement that seats you. Same for refunds, cash-outs
+//    and the final payout, so coins can never be lost or duplicated.
+//  * Every round is written to the database BEFORE it is revealed.
+//    After a crash, initLastChamber() restores the table and the
+//    game resumes.
+//  * RNG is crypto.randomInt on the server. Nobody sees the result
+//    before the reveal.
+//  * Fair odds: each round the chamber claims a player with
+//    probability proportional to (totalWagers - theirWager). This
+//    makes every player's chance to be the LAST survivor exactly
+//    proportional to their wager (so a 2M bet is not a free gift
+//    to a 100k bet).
+// ============================================================
+
+const chamberCrypto = require("crypto");
+
+const CHAMBER = {
+  minPlayers: 2,
+  maxPlayers: 8,
+  minBet: 100_000,
+  maxBet: 2_000_000,
+
+  jackpotMinPlayers: 4,
+  jackpotMinBet: 500_000,
+
+  lobbyTimeoutMs: 10 * 60 * 1000,
+  decisionMs: 25_000,
+  startDelayMs: 2_500,
+  revealMinMs: 1_800,
+  revealJitterMs: 900,
+  retryMs: 15_000,
+  maxRoundRetries: 5,
+  sendTimeoutMs: 20_000,
+
+  // Cash-out offer = this % of the survivor's FAIR SHARE of the pot
+  // (pot x their wager / all alive wagers). Round 1 uses [0],
+  // round 2 uses [1], ... and the last value repeats.
+  // NOTE: a % of the *whole* pot would be a free win in big lobbies
+  // (8 players, round 1: 25% of the pot for a 1-in-8 stake).
+  cashoutPct: [0.25, 0.4, 0.6, 0.8],
+};
+
+const CHAMBER_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS chamber_sessions (
+    id BIGSERIAL PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'lobby',
+    mode TEXT NOT NULL DEFAULT 'standard',
+    host_id TEXT NOT NULL,
+    pot BIGINT NOT NULL DEFAULT 0,
+    max_players INTEGER NOT NULL DEFAULT 8,
+    current_round INTEGER NOT NULL DEFAULT 0,
+    created_at BIGINT NOT NULL,
+    started_at BIGINT,
+    ended_at BIGINT,
+    winner_id TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS chamber_one_open_per_thread
+     ON chamber_sessions(thread_id)
+     WHERE status IN ('lobby', 'active')`,
+  `CREATE TABLE IF NOT EXISTS chamber_players (
+    session_id BIGINT NOT NULL REFERENCES chamber_sessions(id) ON DELETE CASCADE,
+    thread_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    display_name TEXT,
+    wager BIGINT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'alive',
+    turn_order INTEGER,
+    payout BIGINT NOT NULL DEFAULT 0,
+    survived_rounds INTEGER NOT NULL DEFAULT 0,
+    joined_at BIGINT NOT NULL,
+    eliminated_at BIGINT,
+    PRIMARY KEY (session_id, user_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS chamber_players_user_idx
+     ON chamber_players(thread_id, user_id)`,
+  `CREATE TABLE IF NOT EXISTS chamber_rounds (
+    id BIGSERIAL PRIMARY KEY,
+    session_id BIGINT NOT NULL REFERENCES chamber_sessions(id) ON DELETE CASCADE,
+    round_number INTEGER NOT NULL,
+    player_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    created_at BIGINT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS chamber_rounds_session_idx
+     ON chamber_rounds(session_id, round_number)`,
+];
+
+// threadID -> live session
+const chamberSessions = new Map();
+// threadID -> promise tail (serialises every mutation per thread)
+const chamberLocks = new Map();
+
+let chamberApi = null;
+let chamberSchemaPromise = null;
+
+// ------------------------------------------------------------
+// GENERIC HELPERS
+// ------------------------------------------------------------
+
+function withChamberLock(threadID, fn) {
+  const key = String(threadID);
+  const previous = chamberLocks.get(key) || Promise.resolve();
+  const run = previous.then(fn);
+  const tail = run.catch(() => {});
+
+  chamberLocks.set(key, tail);
+
+  tail.then(() => {
+    if (chamberLocks.get(key) === tail) {
+      chamberLocks.delete(key);
+    }
+  });
+
+  return run;
+}
+
+function chamberWithTimeout(promise, ms, label = "operation") {
+  let timer;
+
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${label} timed out`)),
+        ms
+      );
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+function chamberIsAdmin(userID) {
+  return (process.env.ADMIN_IDS || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .includes(String(userID));
+}
+
+function chamberHalted() {
+  return global.botDisabled === true || global.botPaused === true;
+}
+
+function chamberLimits(mode) {
+  if (mode === "jackpot") {
+    return {
+      minPlayers: CHAMBER.jackpotMinPlayers,
+      minBet: CHAMBER.jackpotMinBet,
+      maxBet: CHAMBER.maxBet,
+    };
+  }
+
+  return {
+    minPlayers: CHAMBER.minPlayers,
+    minBet: CHAMBER.minBet,
+    maxBet: CHAMBER.maxBet,
+  };
+}
+
+// "2000000", "2,000,000", "500k", "1.5m"
+function chamberParseBet(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[,_\s]/g, "");
+
+  const match = raw.match(/^(\d+(?:\.\d+)?)([km])?$/);
+
+  if (!match) return NaN;
+
+  let amount = Number(match[1]);
+
+  if (match[2] === "k") amount *= 1_000;
+  if (match[2] === "m") amount *= 1_000_000;
+
+  amount = Math.round(amount);
+
+  return Number.isSafeInteger(amount) ? amount : NaN;
+}
+
+function chamberRoman(value) {
+  const table = [
+    [10, "X"],
+    [9, "IX"],
+    [5, "V"],
+    [4, "IV"],
+    [1, "I"],
+  ];
+
+  let n = Math.max(1, Math.floor(Number(value) || 1));
+  let out = "";
+
+  for (const [amount, symbol] of table) {
+    while (n >= amount) {
+      out += symbol;
+      n -= amount;
+    }
+  }
+
+  return out;
+}
+
+function chamberShuffle(list) {
+  const arr = list.slice();
+
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = chamberCrypto.randomInt(0, i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+
+  return arr;
+}
+
+// Server-side hidden outcome. Elimination weight = (total - wager).
+// See design notes: this gives each player a win chance that is
+// exactly wager / total wagers.
+function chamberPickEliminated(alive) {
+  const total = alive.reduce((sum, p) => sum + p.wager, 0);
+  const weights = alive.map((p) => total - p.wager);
+  const weightSum = weights.reduce((sum, w) => sum + w, 0);
+
+  let roll = chamberCrypto.randomInt(0, weightSum);
+
+  for (let i = 0; i < alive.length; i++) {
+    roll -= weights[i];
+
+    if (roll < 0) return alive[i];
+  }
+
+  return alive[alive.length - 1];
+}
+
+function chamberAlive(s) {
+  const ids = s.order.length ? s.order : Array.from(s.players.keys());
+
+  return ids
+    .map((id) => s.players.get(id))
+    .filter((p) => p && p.status === "alive");
+}
+
+function chamberLabel(p) {
+  const raw = String(
+    p.name || `Player ${String(p.userID).slice(-4)}`
+  ).trim();
+
+  return raw.toUpperCase().slice(0, 18);
+}
+
+function chamberOdds(s, p) {
+  const pool =
+    s.status === "lobby"
+      ? Array.from(s.players.values())
+      : chamberAlive(s);
+
+  const total = pool.reduce((sum, x) => sum + x.wager, 0);
+
+  return total > 0 ? Math.round((p.wager / total) * 100) : 0;
+}
+
+function chamberCashoutPct(s) {
+  const index =
+    Math.min(Math.max(s.round, 1), CHAMBER.cashoutPct.length) - 1;
+
+  return CHAMBER.cashoutPct[index];
+}
+
+function chamberCashoutOffer(s, p) {
+  const alive = chamberAlive(s);
+  const totalWager = alive.reduce((sum, a) => sum + a.wager, 0);
+
+  if (totalWager <= 0) return 0;
+
+  const fairShare = (s.pot * p.wager) / totalWager;
+
+  return Math.max(1, Math.floor(fairShare * chamberCashoutPct(s)));
+}
+
+async function chamberSend(threadID, text) {
+  if (!chamberApi) return null;
+
+  try {
+    return await chamberWithTimeout(
+      sendMessageAsync(chamberApi, threadID, text),
+      CHAMBER.sendTimeoutMs,
+      "send"
+    );
+  } catch (error) {
+    console.error(
+      "[chamber] send failed:",
+      error && error.message ? error.message : error
+    );
+
+    return null;
+  }
+}
+
+function chamberFail(api, event, message) {
+  return safeReply(
+    api,
+    event,
+    ["🌑 LAST CHAMBER", "", String(message)].join("\n")
+  );
+}
+
+async function chamberResolveName(api, event, threadID, userID) {
+  if (event && event.senderName) {
+    return String(event.senderName).trim().slice(0, 40);
+  }
+
+  try {
+    const user = await db.getUser(threadID, userID);
+
+    if (user && user.display_name && String(user.display_name).trim()) {
+      return String(user.display_name).trim().slice(0, 40);
+    }
+  } catch {}
+
+  try {
+    if (api && typeof api.getUserInfo === "function") {
+      const info = await chamberWithTimeout(
+        new Promise((resolve, reject) => {
+          api.getUserInfo(userID, (error, data) =>
+            error ? reject(error) : resolve(data)
+          );
+        }),
+        4000,
+        "getUserInfo"
+      );
+
+      const entry = info && (info[userID] || Object.values(info)[0]);
+      const name = entry && (entry.name || entry.firstName);
+
+      if (name) {
+        db.setUserDisplayName(threadID, userID, name).catch(() => {});
+
+        return String(name).trim().slice(0, 40);
+      }
+    }
+  } catch {}
+
+  return `Player ${String(userID).slice(-4)}`;
+}
+
+// ------------------------------------------------------------
+// TEXT
+// ------------------------------------------------------------
+
+const CHAMBER_LINE = "━━━━━━━━━━━━━━━━━━━━━━";
+
+function chamberHeader(s) {
+  return [
+    "╔══════════════════════════════╗",
+    "        🌑 LAST CHAMBER",
+    s && s.mode === "jackpot" ? "          ✦ JACKPOT ✦" : "",
+    "╚══════════════════════════════╝",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function chamberLobbyText(s) {
+  const limits = chamberLimits(s.mode);
+  const players = Array.from(s.players.values());
+
+  const lines = [
+    chamberHeader(s),
+    s.mode === "jackpot"
+      ? "ONLY ONE LEAVES WITH THE POT."
+      : "A game of chance.",
+    "One survivor takes the pot.",
+    "",
+    `Players: ${players.length} / ${s.maxPlayers}`,
+    `Pot: 🪙 ${formatNumber(s.pot)}`,
+    "",
+  ];
+
+  if (players.length === 0) {
+    lines.push("The chamber is empty.");
+  } else {
+    lines.push("Current players:");
+
+    for (const p of players) {
+      lines.push(
+        `◆ ${chamberLabel(p)}   ${formatNumber(p.wager)}  (${chamberOdds(s, p)}%)`
+      );
+    }
+  }
+
+  lines.push(
+    "",
+    `Minimum bet: ${formatNumber(limits.minBet)}`,
+    `Maximum bet: ${formatNumber(limits.maxBet)}`,
+    `Needs ${limits.minPlayers}+ players to start.`,
+    "",
+    "!chamber join <bet>",
+    "!chamber leave",
+    "!chamber start"
+  );
+
+  return lines.join("\n");
+}
+
+function chamberNoTableText() {
+  return [
+    chamberHeader(null),
+    "No chamber is open.",
+    "A game of chance. One survivor takes the pot.",
+    "",
+    "!chamber join <bet>  · open + enter",
+    "!chamber create      · open a table",
+    "!chamber jackpot     · 4-8 players, 500k+",
+    "!chamber rules",
+    "!chamber history",
+    "",
+    `Bets: ${formatNumber(CHAMBER.minBet)} – ${formatNumber(CHAMBER.maxBet)}`,
+  ].join("\n");
+}
+
+function chamberOfferLines(s) {
+  const alive = chamberAlive(s);
+  const pct = Math.round(chamberCashoutPct(s) * 100);
+
+  const lines = [
+    CHAMBER_LINE,
+    "The chamber remains open.",
+    "",
+    `CASH-OUT OFFER · ${pct}% of your share`,
+  ];
+
+  for (const p of alive) {
+    lines.push(
+      `◆ ${chamberLabel(p)}  🪙 ${formatNumber(chamberCashoutOffer(s, p))}`
+    );
+  }
+
+  lines.push(
+    "",
+    "!chamber cashout  · take the offer",
+    "!chamber continue · stay in",
+    `Next round in ${Math.round(CHAMBER.decisionMs / 1000)}s.`
+  );
+
+  return lines;
+}
+
+function chamberStartText(s) {
+  const lines = [
+    chamberHeader(s),
+    `Participants: ${s.order.length}`,
+    `Pot: 🪙 ${formatNumber(s.pot)}`,
+    "",
+  ];
+
+  s.order.forEach((id, index) => {
+    const p = s.players.get(id);
+
+    lines.push(
+      `${index + 1}. ${chamberLabel(p)}  ${formatNumber(p.wager)}  (${chamberOdds(s, p)}%)`
+    );
+  });
+
+  lines.push(
+    "",
+    "Turn order has been sealed.",
+    "The losing position is hidden.",
+    "The game begins..."
+  );
+
+  return lines.join("\n");
+}
+
+function chamberRoundOpenText(s, roundNo) {
+  return [
+    chamberHeader(s),
+    "",
+    `           ROUND ${chamberRoman(roundNo)}`,
+    `        POT 🪙 ${formatNumber(s.pot)}`,
+    CHAMBER_LINE,
+    "        THE CHAMBER TURNS...",
+    "",
+    "               ◇",
+    "               ...",
+    "",
+    "        fate is choosing.",
+  ].join("\n");
+}
+
+function chamberRoundResultText(s, roundNo, turns, doomed, survivors) {
+  const lines = [
+    chamberHeader(s),
+    "",
+    `           ROUND ${chamberRoman(roundNo)}`,
+    CHAMBER_LINE,
+  ];
+
+  for (const turn of turns) {
+    lines.push(
+      turn.eliminated
+        ? `◆ ${chamberLabel(turn.player)} — CLICK. ELIMINATED.`
+        : `◇ ${chamberLabel(turn.player)} — click. survives.`
+    );
+  }
+
+  lines.push(
+    CHAMBER_LINE,
+    `☠ ${chamberLabel(doomed)} HAS FALLEN.`,
+    "Wager forfeited:",
+    `🪙 ${formatNumber(doomed.wager)}`,
+    "",
+    `Current pot: 🪙 ${formatNumber(s.pot)}`,
+    "",
+    "Remaining players:"
+  );
+
+  for (const p of survivors) {
+    lines.push(`◆ ${chamberLabel(p)}`);
+  }
+
+  if (survivors.length > 1) {
+    lines.push("", ...chamberOfferLines(s));
+  }
+
+  return lines.join("\n");
+}
+
+function chamberStatusText(s) {
+  if (s.status === "lobby") return chamberLobbyText(s);
+
+  const lines = [
+    chamberHeader(s),
+    "",
+    `ROUND ${chamberRoman(Math.max(1, s.round))}`,
+    `POT 🪙 ${formatNumber(s.pot)}`,
+    CHAMBER_LINE,
+  ];
+
+  if (s.phase === "resolving" || s.phase === "settling") {
+    lines.push("THE CHAMBER IS TURNING...");
+    return lines.join("\n");
+  }
+
+  for (const id of s.order) {
+    const p = s.players.get(id);
+
+    if (!p) continue;
+
+    if (p.status === "alive") {
+      lines.push(`◆ ${chamberLabel(p)}   ALIVE  (${chamberOdds(s, p)}%)`);
+    } else if (p.status === "cashed_out") {
+      lines.push(
+        `◇ ${chamberLabel(p)}   CASHED OUT  🪙 ${formatNumber(p.payout)}`
+      );
+    } else {
+      lines.push(`☠ ${chamberLabel(p)}   ELIMINATED`);
+    }
+  }
+
+  if (s.phase === "decision") {
+    const seconds = Math.max(
+      0,
+      Math.ceil((s.decisionEndsAt - Date.now()) / 1000)
+    );
+
+    lines.push(
+      CHAMBER_LINE,
+      `Decision window: ${seconds}s`,
+      "!chamber cashout · !chamber continue"
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function chamberWinnerText(s, winner, prize, balance) {
+  const net = prize - winner.wager;
+
+  const lines = [
+    chamberHeader(s),
+    "",
+    "        ◇ FINAL RESULT ◇",
+    "",
+    `${chamberLabel(winner)} SURVIVES.`,
+    "",
+    CHAMBER_LINE,
+    "🏆 LAST SURVIVOR",
+    chamberLabel(winner),
+    CHAMBER_LINE,
+    "Prize:",
+    `🪙 ${formatNumber(prize)}`,
+    "Wager:",
+    `🪙 ${formatNumber(winner.wager)}`,
+    "Net gain:",
+    `🪙 ${net >= 0 ? "+" : "-"}${formatNumber(Math.abs(net))}`,
+    CHAMBER_LINE,
+  ];
+
+  if (Number.isFinite(balance)) {
+    lines.push(`Wallet: 🪙 ${formatNumber(balance)}`);
+  }
+
+  return lines.join("\n");
+}
+
+function chamberRulesText() {
+  return [
+    chamberHeader(null),
+    "RULES",
+    "",
+    "◆ 2–8 players put coins into one shared pot.",
+    "◆ Every round the chamber secretly claims one player. Their wager stays in the pot.",
+    "◆ The last survivor takes the entire pot.",
+    "◆ Odds follow your wager: double the coins, double the chance to be the survivor. The lobby shows your %.",
+    "",
+    "◆ After each round survivors may:",
+    "   !chamber cashout  · guaranteed offer",
+    "   !chamber continue · stay in",
+    "   The offer rises each round (25% → 80% of your share). No answer in 25s = continue.",
+    "",
+    `◆ Bets ${formatNumber(CHAMBER.minBet)} – ${formatNumber(CHAMBER.maxBet)}.`,
+    `◆ Jackpot: 4–8 players, ${formatNumber(CHAMBER.jackpotMinBet)}+ each.`,
+    "◆ Wagers are sealed once you join. You may leave only before the start.",
+    "◆ A cancelled table refunds everyone.",
+  ].join("\n");
+}
+
+// ------------------------------------------------------------
+// DATABASE
+// Every money movement is ONE SQL statement (CTEs), so it is
+// atomic: wallet + pot + player row change together or not at all.
+// ------------------------------------------------------------
+
+function chamberEnsureReady() {
+  if (!chamberSchemaPromise) {
+    chamberSchemaPromise = (async () => {
+      for (const statement of CHAMBER_SCHEMA) {
+        await db.query(statement);
+      }
+    })().catch((error) => {
+      chamberSchemaPromise = null;
+      throw error;
+    });
+  }
+
+  return chamberSchemaPromise;
+}
+
+const chamberStore = {
+  async createSession(threadID, mode, hostID, maxPlayers) {
+    const { rows } = await db.query(
+      `
+      INSERT INTO chamber_sessions(
+        thread_id, status, mode, host_id, pot,
+        max_players, current_round, created_at
+      )
+      VALUES($1, 'lobby', $2, $3, 0, $4, 0, $5)
+      RETURNING id
+      `,
+      [String(threadID), mode, String(hostID), maxPlayers, Date.now()]
+    );
+
+    return Number(rows[0].id);
+  },
+
+  // -> { balance, pot } or null (not enough coins / lobby closed)
+  async join(sessionId, threadID, userID, wager, name) {
+    const { rows } = await db.query(
+      `
+      WITH s AS (
+        SELECT id FROM chamber_sessions
+        WHERE id = $1 AND status = 'lobby'
+      ),
+      spent AS (
+        UPDATE users
+        SET balance = balance - $4::bigint
+        WHERE thread_id = $2 AND user_id = $3
+          AND balance >= $4::bigint
+          AND EXISTS (SELECT 1 FROM s)
+        RETURNING balance
+      ),
+      ins AS (
+        INSERT INTO chamber_players(
+          session_id, thread_id, user_id, display_name,
+          wager, status, joined_at
+        )
+        SELECT $1::bigint, $2::text, $3::text, $5::text,
+               $4::bigint, 'alive', $6::bigint
+        FROM spent
+        RETURNING user_id
+      ),
+      sess AS (
+        UPDATE chamber_sessions
+        SET pot = pot + $4::bigint
+        WHERE id = $1 AND EXISTS (SELECT 1 FROM ins)
+        RETURNING pot
+      ),
+      tx AS (
+        INSERT INTO economy_transactions(
+          thread_id, user_id, type, amount, description, created_at
+        )
+        SELECT $2::text, $3::text, 'chamber_wager', $4::int,
+               'Last Chamber wager', $6::bigint
+        FROM ins
+        RETURNING 1
+      )
+      SELECT
+        (SELECT balance FROM spent) AS balance,
+        (SELECT pot FROM sess) AS pot
+      `,
+      [
+        Number(sessionId),
+        String(threadID),
+        String(userID),
+        wager,
+        String(name || ""),
+        Date.now(),
+      ]
+    );
+
+    const row = rows[0];
+
+    if (!row || row.balance === null || row.pot === null) return null;
+
+    return { balance: Number(row.balance), pot: Number(row.pot) };
+  },
+
+  // -> { balance, pot, wager } or null
+  async leave(sessionId, threadID, userID) {
+    const { rows } = await db.query(
+      `
+      WITH del AS (
+        DELETE FROM chamber_players
+        WHERE session_id = $1 AND user_id = $3 AND status = 'alive'
+          AND EXISTS (
+            SELECT 1 FROM chamber_sessions
+            WHERE id = $1 AND status = 'lobby'
+          )
+        RETURNING wager
+      ),
+      back AS (
+        UPDATE users
+        SET balance = balance + (SELECT wager FROM del)
+        WHERE thread_id = $2 AND user_id = $3
+          AND EXISTS (SELECT 1 FROM del)
+        RETURNING balance
+      ),
+      sess AS (
+        UPDATE chamber_sessions
+        SET pot = pot - (SELECT wager FROM del)
+        WHERE id = $1 AND EXISTS (SELECT 1 FROM del)
+        RETURNING pot
+      ),
+      tx AS (
+        INSERT INTO economy_transactions(
+          thread_id, user_id, type, amount, description, created_at
+        )
+        SELECT $2::text, $3::text, 'chamber_refund', wager::int,
+               'Last Chamber refund', $4::bigint
+        FROM del
+        RETURNING 1
+      )
+      SELECT
+        (SELECT balance FROM back) AS balance,
+        (SELECT pot FROM sess) AS pot,
+        (SELECT wager FROM del) AS wager
+      `,
+      [Number(sessionId), String(threadID), String(userID), Date.now()]
+    );
+
+    const row = rows[0];
+
+    if (!row || row.balance === null) return null;
+
+    return {
+      balance: Number(row.balance),
+      pot: Number(row.pot),
+      wager: Number(row.wager),
+    };
+  },
+
+  async setHost(sessionId, hostID) {
+    await db.query(
+      `UPDATE chamber_sessions SET host_id = $2 WHERE id = $1`,
+      [Number(sessionId), String(hostID)]
+    );
+  },
+
+  // Refunds every seated player. -> { cancelled, refunded }
+  async cancel(sessionId) {
+    const { rows } = await db.query(
+      `
+      WITH s AS (
+        UPDATE chamber_sessions
+        SET status = 'cancelled', ended_at = $2::bigint, pot = 0
+        WHERE id = $1 AND status = 'lobby'
+        RETURNING id
+      ),
+      refunded AS (
+        UPDATE users u
+        SET balance = u.balance + cp.wager
+        FROM chamber_players cp
+        WHERE cp.session_id = $1 AND cp.status = 'alive'
+          AND u.thread_id = cp.thread_id AND u.user_id = cp.user_id
+          AND EXISTS (SELECT 1 FROM s)
+        RETURNING u.user_id
+      ),
+      tx AS (
+        INSERT INTO economy_transactions(
+          thread_id, user_id, type, amount, description, created_at
+        )
+        SELECT cp.thread_id, cp.user_id, 'chamber_refund', cp.wager::int,
+               'Last Chamber refund', $2::bigint
+        FROM chamber_players cp
+        WHERE cp.session_id = $1 AND cp.status = 'alive'
+          AND EXISTS (SELECT 1 FROM s)
+        RETURNING 1
+      ),
+      pl AS (
+        UPDATE chamber_players
+        SET status = 'refunded', payout = wager
+        WHERE session_id = $1 AND status = 'alive'
+          AND EXISTS (SELECT 1 FROM s)
+        RETURNING 1
+      )
+      SELECT
+        (SELECT COUNT(*) FROM s)::int AS cancelled,
+        (SELECT COUNT(*) FROM refunded)::int AS refunded
+      `,
+      [Number(sessionId), Date.now()]
+    );
+
+    return {
+      cancelled: Number(rows[0]?.cancelled) > 0,
+      refunded: Number(rows[0]?.refunded) || 0,
+    };
+  },
+
+  // -> true when the lobby was moved to 'active'
+  async start(sessionId, order) {
+    const { rows } = await db.query(
+      `
+      WITH s AS (
+        UPDATE chamber_sessions
+        SET status = 'active', started_at = $3::bigint
+        WHERE id = $1 AND status = 'lobby'
+        RETURNING id
+      ),
+      o AS (
+        SELECT t.uid, t.ord::int AS ord
+        FROM unnest($2::text[]) WITH ORDINALITY AS t(uid, ord)
+      ),
+      p AS (
+        UPDATE chamber_players cp
+        SET turn_order = o.ord
+        FROM o
+        WHERE cp.session_id = $1 AND cp.user_id = o.uid
+          AND EXISTS (SELECT 1 FROM s)
+        RETURNING 1
+      )
+      SELECT (SELECT COUNT(*) FROM s)::int AS started
+      `,
+      [Number(sessionId), order.map(String), Date.now()]
+    );
+
+    return Number(rows[0]?.started) > 0;
+  },
+
+  // Persists one round (result BEFORE it is revealed). -> true if stored
+  async recordRound(
+    sessionId,
+    roundNo,
+    eliminatedId,
+    survivorIds,
+    turnIds,
+    turnOutcomes
+  ) {
+    const { rows } = await db.query(
+      `
+      WITH e AS (
+        UPDATE chamber_players
+        SET status = 'eliminated', eliminated_at = $7::bigint
+        WHERE session_id = $1 AND user_id = $3 AND status = 'alive'
+          AND $2::int > (
+            SELECT current_round FROM chamber_sessions
+            WHERE id = $1 AND status = 'active'
+          )
+        RETURNING 1
+      ),
+      sv AS (
+        UPDATE chamber_players
+        SET survived_rounds = survived_rounds + 1
+        WHERE session_id = $1 AND user_id = ANY($4::text[])
+          AND status = 'alive'
+          AND $2::int > (
+            SELECT current_round FROM chamber_sessions
+            WHERE id = $1 AND status = 'active'
+          )
+        RETURNING 1
+      ),
+      r AS (
+        INSERT INTO chamber_rounds(
+          session_id, round_number, player_id, outcome, created_at
+        )
+        SELECT $1::bigint, $2::int, t.uid, t.oc, $7::bigint
+        FROM unnest($5::text[], $6::text[]) AS t(uid, oc)
+        WHERE $2::int > (
+          SELECT current_round FROM chamber_sessions
+          WHERE id = $1 AND status = 'active'
+        )
+        RETURNING 1
+      ),
+      s AS (
+        UPDATE chamber_sessions
+        SET current_round = $2::int
+        WHERE id = $1 AND status = 'active'
+          AND current_round < $2::int
+        RETURNING id
+      )
+      SELECT
+        (SELECT COUNT(*) FROM s)::int AS ok,
+        (SELECT COUNT(*) FROM e)::int AS eliminated
+      `,
+      [
+        Number(sessionId),
+        roundNo,
+        String(eliminatedId),
+        survivorIds.map(String),
+        turnIds.map(String),
+        turnOutcomes,
+        Date.now(),
+      ]
+    );
+
+    return (
+      Number(rows[0]?.ok) > 0 && Number(rows[0]?.eliminated) > 0
+    );
+  },
+
+  // -> { balance, pot } or null
+  async cashout(sessionId, threadID, userID, amount) {
+    const { rows } = await db.query(
+      `
+      WITH pl AS (
+        UPDATE chamber_players
+        SET status = 'cashed_out', payout = $3::bigint
+        WHERE session_id = $1 AND user_id = $2 AND status = 'alive'
+          AND EXISTS (
+            SELECT 1 FROM chamber_sessions
+            WHERE id = $1 AND status = 'active'
+          )
+        RETURNING user_id
+      ),
+      sp AS (
+        UPDATE chamber_sessions
+        SET pot = pot - $3::bigint
+        WHERE id = $1 AND EXISTS (SELECT 1 FROM pl)
+        RETURNING pot
+      ),
+      bk AS (
+        UPDATE users
+        SET balance = balance + $3::bigint
+        WHERE thread_id = $4 AND user_id = $2
+          AND EXISTS (SELECT 1 FROM pl)
+        RETURNING balance
+      ),
+      tx AS (
+        INSERT INTO economy_transactions(
+          thread_id, user_id, type, amount, description, created_at
+        )
+        SELECT $4::text, $2::text, 'chamber_cashout', $3::int,
+               'Last Chamber cash-out', $5::bigint
+        FROM pl
+        RETURNING 1
+      )
+      SELECT
+        (SELECT balance FROM bk) AS balance,
+        (SELECT pot FROM sp) AS pot
+      `,
+      [
+        Number(sessionId),
+        String(userID),
+        amount,
+        String(threadID),
+        Date.now(),
+      ]
+    );
+
+    const row = rows[0];
+
+    if (!row || row.balance === null || row.pot === null) return null;
+
+    return { balance: Number(row.balance), pot: Number(row.pot) };
+  },
+
+  // Pays the pot to the winner and closes the session (once only).
+  // -> { settled, prize, balance }
+  async settle(sessionId, threadID, winnerId) {
+    const { rows } = await db.query(
+      `
+      WITH s AS (
+        UPDATE chamber_sessions
+        SET status = 'ended', ended_at = $4::bigint, winner_id = $2::text
+        WHERE id = $1 AND status = 'active'
+        RETURNING pot
+      ),
+      pl AS (
+        UPDATE chamber_players
+        SET status = 'winner', payout = (SELECT pot FROM s)
+        WHERE session_id = $1 AND user_id = $2
+          AND EXISTS (SELECT 1 FROM s)
+        RETURNING user_id
+      ),
+      bk AS (
+        UPDATE users
+        SET balance = balance + (SELECT pot FROM s)
+        WHERE thread_id = $3 AND user_id = $2
+          AND EXISTS (SELECT 1 FROM s)
+        RETURNING balance
+      ),
+      tx AS (
+        INSERT INTO economy_transactions(
+          thread_id, user_id, type, amount, description, created_at
+        )
+        SELECT $3::text, $2::text, 'chamber_win', pot::int,
+               'Last Chamber prize', $4::bigint
+        FROM s
+        RETURNING 1
+      )
+      SELECT
+        (SELECT COUNT(*) FROM s)::int AS settled,
+        (SELECT pot FROM s) AS prize,
+        (SELECT balance FROM bk) AS balance
+      `,
+      [Number(sessionId), String(winnerId), String(threadID), Date.now()]
+    );
+
+    const row = rows[0] || {};
+
+    return {
+      settled: Number(row.settled) > 0,
+      prize: Number(row.prize) || 0,
+      balance: row.balance === null ? NaN : Number(row.balance),
+    };
+  },
+
+  async loadOpen() {
+    const sessions = await db.query(
+      `
+      SELECT * FROM chamber_sessions
+      WHERE status IN ('lobby', 'active')
+      ORDER BY id
+      `
+    );
+
+    if (!sessions.rows.length) return { sessions: [], players: [] };
+
+    const players = await db.query(
+      `
+      SELECT * FROM chamber_players
+      WHERE session_id = ANY($1::bigint[])
+      ORDER BY turn_order NULLS LAST, joined_at, user_id
+      `,
+      [sessions.rows.map((row) => String(row.id))]
+    );
+
+    return { sessions: sessions.rows, players: players.rows };
+  },
+
+  async stats(threadID, userID) {
+    const totals = await db.query(
+      `
+      SELECT
+        COUNT(*)::int AS games,
+        COALESCE(SUM(p.survived_rounds), 0)::int AS survived,
+        COUNT(*) FILTER (WHERE p.status = 'winner')::int AS victories,
+        COUNT(*) FILTER (WHERE p.status = 'eliminated')::int AS eliminations,
+        COALESCE(SUM(GREATEST(p.payout - p.wager, 0)), 0)::bigint AS coins_won,
+        COALESCE(SUM(GREATEST(p.wager - p.payout, 0)), 0)::bigint AS coins_lost
+      FROM chamber_players p
+      JOIN chamber_sessions s ON s.id = p.session_id
+      WHERE p.thread_id = $1 AND p.user_id = $2 AND s.status = 'ended'
+      `,
+      [String(threadID), String(userID)]
+    );
+
+    const recent = await db.query(
+      `
+      SELECT s.id, p.status, p.wager, p.payout
+      FROM chamber_players p
+      JOIN chamber_sessions s ON s.id = p.session_id
+      WHERE p.thread_id = $1 AND p.user_id = $2 AND s.status = 'ended'
+      ORDER BY s.ended_at DESC
+      LIMIT 5
+      `,
+      [String(threadID), String(userID)]
+    );
+
+    return { totals: totals.rows[0] || {}, recent: recent.rows };
+  },
+};
+
+// ------------------------------------------------------------
+// TIMERS
+// ------------------------------------------------------------
+
+function chamberClearTimers(s) {
+  clearTimeout(s.lobbyTimer);
+  clearTimeout(s.decisionTimer);
+  clearTimeout(s.retryTimer);
+
+  s.lobbyTimer = null;
+  s.decisionTimer = null;
+  s.retryTimer = null;
+}
+
+function chamberArmLobbyTimer(s, ms = CHAMBER.lobbyTimeoutMs) {
+  clearTimeout(s.lobbyTimer);
+
+  s.lobbyTimer = setTimeout(() => {
+    s.lobbyTimer = null;
+
+    withChamberLock(s.threadID, () => chamberExpireLobby(s)).catch(
+      (error) => console.error("[chamber] lobby expiry:", error)
+    );
+  }, ms);
+}
+
+function chamberArmDecisionTimer(s, ms = CHAMBER.decisionMs) {
+  clearTimeout(s.decisionTimer);
+
+  s.decisionEndsAt = Date.now() + ms;
+
+  s.decisionTimer = setTimeout(() => {
+    s.decisionTimer = null;
+
+    withChamberLock(s.threadID, () => chamberAdvance(s)).catch((error) =>
+      console.error("[chamber] advance:", error)
+    );
+  }, ms);
+}
+
+// ------------------------------------------------------------
+// LOBBY LIFECYCLE
+// ------------------------------------------------------------
+
+async function chamberOpenTable(threadID, hostID, mode) {
+  const id = await chamberStore.createSession(
+    threadID,
+    mode,
+    hostID,
+    CHAMBER.maxPlayers
+  );
+
+  const s = {
+    id,
+    threadID: String(threadID),
+    status: "lobby",
+    phase: "lobby",
+    mode,
+    hostID: String(hostID),
+    pot: 0,
+    maxPlayers: CHAMBER.maxPlayers,
+    round: 0,
+    players: new Map(),
+    order: [],
+    lobbyTimer: null,
+    decisionTimer: null,
+    retryTimer: null,
+    retryCount: 0,
+    decisionEndsAt: 0,
+    createdAt: Date.now(),
+  };
+
+  chamberSessions.set(s.threadID, s);
+  chamberArmLobbyTimer(s);
+
+  return s;
+}
+
+async function chamberCancelLobby(s, reason) {
+  const result = await chamberStore.cancel(s.id);
+
+  chamberClearTimers(s);
+
+  s.status = "cancelled";
+  s.phase = "done";
+
+  if (chamberSessions.get(s.threadID) === s) {
+    chamberSessions.delete(s.threadID);
+  }
+
+  const refunded = result.refunded;
+
+  await chamberSend(
+    s.threadID,
+    [
+      chamberHeader(s),
+      "",
+      "THE CHAMBER HAS CLOSED.",
+      reason,
+      "",
+      refunded > 0
+        ? `All ${refunded} wager${refunded === 1 ? "" : "s"} refunded.`
+        : "No wagers were placed.",
+    ].join("\n")
+  );
+}
+
+async function chamberExpireLobby(s) {
+  if (chamberSessions.get(s.threadID) !== s || s.status !== "lobby") {
+    return;
+  }
+
+  try {
+    await chamberCancelLobby(s, "The lobby expired.");
+  } catch (error) {
+    console.error("[chamber] expire failed, retrying:", error);
+
+    chamberArmLobbyTimer(s, 60_000);
+  }
+}
+
+// Joins under the thread lock. Opens a table if none exists.
+async function chamberDoJoin(api, event, betText, forcedMode) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
+
+  let s = chamberSessions.get(threadID) || null;
+
+  const mode = s ? s.mode : forcedMode || "standard";
+  const limits = chamberLimits(mode);
+  const bet = chamberParseBet(betText);
+
+  if (!Number.isFinite(bet) || bet < limits.minBet || bet > limits.maxBet) {
+    await chamberFail(
+      api,
+      event,
+      [
+        "usage · !chamber join <bet>",
+        "",
+        `minimum · ${formatNumber(limits.minBet)}`,
+        `maximum · ${formatNumber(limits.maxBet)}`,
+        "",
+        "you can write 500k or 1.5m.",
+      ].join("\n")
+    );
+
+    return;
+  }
+
+  if (s && s.status !== "lobby") {
+    await chamberFail(
+      api,
+      event,
+      "the chamber is already sealed.\nwait for the next one."
+    );
+
+    return;
+  }
+
+  if (s && s.players.has(userID)) {
+    await chamberFail(
+      api,
+      event,
+      "you are already inside.\nwagers are sealed once placed."
+    );
+
+    return;
+  }
+
+  if (s && s.players.size >= s.maxPlayers) {
+    await chamberFail(api, event, "the chamber is full.");
+
+    return;
+  }
+
+  let created = false;
+
+  if (!s) {
+    try {
+      s = await chamberOpenTable(threadID, userID, mode);
+      created = true;
+    } catch (error) {
+      if (error && error.code === "23505") {
+        await chamberFail(
+          api,
+          event,
+          "a chamber is still being restored here.\ntry again in a moment."
+        );
+
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  await db.getUser(threadID, userID);
+
+  const name = await chamberResolveName(api, event, threadID, userID);
+
+  let joined = null;
+
+  try {
+    joined = await chamberStore.join(s.id, threadID, userID, bet, name);
+  } catch (error) {
+    console.error("[chamber] join failed:", error);
+  }
+
+  if (!joined) {
+    let balance = 0;
+
+    try {
+      balance = Number((await db.getUser(threadID, userID))?.balance) || 0;
+    } catch {}
+
+    if (created && s.players.size === 0) {
+      await chamberStore.cancel(s.id).catch(() => {});
+      chamberClearTimers(s);
+      chamberSessions.delete(threadID);
+    }
+
+    await chamberFail(
+      api,
+      event,
+      [
+        "you cannot afford that wager.",
+        "",
+        `wager  · ${formatNumber(bet)}`,
+        `wallet · ${formatNumber(balance)}`,
+      ].join("\n")
+    );
+
+    return;
+  }
+
+  s.players.set(userID, {
+    userID,
+    name,
+    wager: bet,
+    status: "alive",
+    turnOrder: null,
+    payout: 0,
+    survivedRounds: 0,
+    ready: false,
+  });
+
+  s.pot = joined.pot;
+
+  chamberArmLobbyTimer(s);
+
+  await sendMessageAsync(
+    api,
+    threadID,
+    [
+      created ? chamberHeader(s) : "",
+      `🌑 ${name.toUpperCase().slice(0, 18)} ENTERED THE CHAMBER.`,
+      `Wager: 🪙 ${formatNumber(bet)}`,
+      `Pot: 🪙 ${formatNumber(s.pot)}`,
+      `The chamber now contains ${s.players.size} player${
+        s.players.size === 1 ? "" : "s"
+      }.`,
+      "",
+      `Win chance: ${chamberOdds(s, s.players.get(userID))}%  ·  players ${
+        s.players.size
+      }/${s.maxPlayers}`,
+    ]
+      .filter((line, index) => line !== "" || index > 0)
+      .join("\n")
+  );
+}
+
+// ------------------------------------------------------------
+// GAME ENGINE  (every function below runs with the thread lock)
+// ------------------------------------------------------------
+
+async function chamberAdvance(s) {
+  if (
+    chamberSessions.get(s.threadID) !== s ||
+    s.status !== "active" ||
+    s.phase !== "decision"
+  ) {
+    return;
+  }
+
+  if (chamberHalted()) {
+    chamberArmDecisionTimer(s, 5_000);
+
+    return;
+  }
+
+  await chamberRunRound(s);
+}
+
+async function chamberRunRound(s) {
+  const threadID = s.threadID;
+
+  clearTimeout(s.decisionTimer);
+  clearTimeout(s.retryTimer);
+
+  s.decisionTimer = null;
+  s.retryTimer = null;
+  s.phase = "resolving";
+
+  for (const p of s.players.values()) p.ready = false;
+
+  const alive = chamberAlive(s);
+
+  if (alive.length <= 1) {
+    await chamberFinish(s);
+
+    return;
+  }
+
+  const roundNo = s.round + 1;
+
+  // Hidden result, decided on the server.
+  const doomed = chamberPickEliminated(alive);
+  const doomIndex = alive.findIndex((p) => p.userID === doomed.userID);
+
+  const turns = alive.slice(0, doomIndex + 1).map((player, index) => ({
+    player,
+    eliminated: index === doomIndex,
+  }));
+
+  const survivors = alive.filter((p) => p.userID !== doomed.userID);
+
+  // Persist FIRST, reveal second.
+  let stored = false;
+
+  try {
+    stored = await chamberStore.recordRound(
+      s.id,
+      roundNo,
+      doomed.userID,
+      survivors.map((p) => p.userID),
+      turns.map((t) => t.player.userID),
+      turns.map((t) => (t.eliminated ? "eliminated" : "survived"))
+    );
+  } catch (error) {
+    console.error("[chamber] recordRound failed:", error);
+  }
+
+  if (!stored) {
+    s.retryCount = (s.retryCount || 0) + 1;
+
+    if (s.retryCount > CHAMBER.maxRoundRetries) {
+      await chamberSend(
+        threadID,
+        [
+          chamberHeader(s),
+          "",
+          "THE CHAMBER IS JAMMED.",
+          "All wagers are safe in the database.",
+          "An admin needs to restart the bot to resume this table.",
+        ].join("\n")
+      );
+
+      return;
+    }
+
+    s.retryTimer = setTimeout(() => {
+      s.retryTimer = null;
+
+      withChamberLock(threadID, () => chamberRunRound(s)).catch((error) =>
+        console.error("[chamber] retry round:", error)
+      );
+    }, CHAMBER.retryMs);
+
+    return;
+  }
+
+  s.retryCount = 0;
+
+  doomed.status = "eliminated";
+
+  for (const p of survivors) p.survivedRounds += 1;
+
+  s.round = roundNo;
+
+  try {
+    const sent = await chamberSend(threadID, chamberRoundOpenText(s, roundNo));
+
+    await sleep(
+      CHAMBER.revealMinMs + randInt(0, CHAMBER.revealJitterMs)
+    );
+
+    const resultText = chamberRoundResultText(
+      s,
+      roundNo,
+      turns,
+      doomed,
+      survivors
+    );
+
+    let shown = false;
+
+    if (sent && sent.messageID) {
+      shown = await updateGameMessage(
+        chamberApi,
+        threadID,
+        sent.messageID,
+        resultText
+      );
+    }
+
+    if (!shown) {
+      await chamberSend(threadID, resultText);
+    }
+  } catch (error) {
+    console.error("[chamber] reveal failed:", error);
+  }
+
+  if (survivors.length <= 1) {
+    await chamberFinish(s);
+
+    return;
+  }
+
+  s.phase = "decision";
+
+  chamberArmDecisionTimer(s);
+}
+
+async function chamberFinish(s) {
+  chamberClearTimers(s);
+
+  s.phase = "settling";
+
+  const alive = chamberAlive(s);
+
+  if (alive.length !== 1) {
+    console.error(
+      `[chamber] session ${s.id} cannot settle: ${alive.length} players alive.`
+    );
+
+    return;
+  }
+
+  const winner = alive[0];
+
+  let result = null;
+
+  try {
+    result = await chamberStore.settle(s.id, s.threadID, winner.userID);
+  } catch (error) {
+    console.error("[chamber] settle failed, retrying:", error);
+
+    s.retryTimer = setTimeout(() => {
+      s.retryTimer = null;
+
+      withChamberLock(s.threadID, () => chamberFinish(s)).catch((err) =>
+        console.error("[chamber] settle retry:", err)
+      );
+    }, CHAMBER.retryMs);
+
+    return;
+  }
+
+  s.status = "ended";
+  s.phase = "done";
+
+  if (chamberSessions.get(s.threadID) === s) {
+    chamberSessions.delete(s.threadID);
+  }
+
+  if (!result.settled) return; // already paid earlier
+
+  winner.status = "winner";
+  winner.payout = result.prize;
+  s.pot = result.prize;
+
+  await chamberSend(
+    s.threadID,
+    chamberWinnerText(s, winner, result.prize, result.balance)
+  );
+}
+
+// ------------------------------------------------------------
+// RECOVERY  (call once at boot, after db.connect())
+// ------------------------------------------------------------
+
+async function chamberRecover() {
+  const { sessions, players } = await chamberStore.loadOpen();
+
+  let resumed = 0;
+
+  for (const row of sessions) {
+    const threadID = String(row.thread_id);
+
+    const s = {
+      id: Number(row.id),
+      threadID,
+      status: row.status,
+      phase: row.status === "lobby" ? "lobby" : "resolving",
+      mode: row.mode,
+      hostID: String(row.host_id),
+      pot: Number(row.pot) || 0,
+      maxPlayers: Number(row.max_players) || CHAMBER.maxPlayers,
+      round: Number(row.current_round) || 0,
+      players: new Map(),
+      order: [],
+      lobbyTimer: null,
+      decisionTimer: null,
+      retryTimer: null,
+      retryCount: 0,
+      decisionEndsAt: 0,
+      createdAt: Number(row.created_at) || Date.now(),
+    };
+
+    for (const pr of players.filter(
+      (p) => String(p.session_id) === String(row.id)
+    )) {
+      s.players.set(String(pr.user_id), {
+        userID: String(pr.user_id),
+        name: pr.display_name || "",
+        wager: Number(pr.wager) || 0,
+        status: pr.status,
+        turnOrder: pr.turn_order === null ? null : Number(pr.turn_order),
+        payout: Number(pr.payout) || 0,
+        survivedRounds: Number(pr.survived_rounds) || 0,
+        ready: false,
+      });
+    }
+
+    if (s.status === "active") {
+      s.order = Array.from(s.players.values())
+        .sort((a, b) => (a.turnOrder || 0) - (b.turnOrder || 0))
+        .map((p) => p.userID);
+    }
+
+    chamberSessions.set(threadID, s);
+
+    if (s.status === "lobby") {
+      chamberArmLobbyTimer(s);
+    } else {
+      const delay = 5_000 + resumed * 2_000;
+
+      resumed += 1;
+
+      setTimeout(() => {
+        withChamberLock(threadID, () => chamberResume(s)).catch((error) =>
+          console.error("[chamber] resume:", error)
+        );
+      }, delay);
+    }
+  }
+
+  return sessions.length;
+}
+
+async function chamberResume(s) {
+  if (chamberSessions.get(s.threadID) !== s || s.status !== "active") return;
+
+  if (chamberHalted()) {
+    setTimeout(() => {
+      withChamberLock(s.threadID, () => chamberResume(s)).catch(() => {});
+    }, 5_000);
+
+    return;
+  }
+
+  const alive = chamberAlive(s);
+
+  if (alive.length <= 1) {
+    await chamberFinish(s);
+
+    return;
+  }
+
+  await chamberSend(
+    s.threadID,
+    [
+      chamberHeader(s),
+      "",
+      "THE CHAMBER FLICKERS BACK TO LIFE.",
+      "The game resumes where it stopped.",
+      "",
+      `Round ${chamberRoman(s.round + 1)} · Pot 🪙 ${formatNumber(s.pot)}`,
+      "",
+      ...alive.map((p) => `◆ ${chamberLabel(p)}`),
+    ].join("\n")
+  );
+
+  await sleep(3_000);
+  await chamberRunRound(s);
+}
+
+async function initLastChamber(api) {
+  chamberApi = api;
+
+  await chamberEnsureReady();
+
+  const count = await chamberRecover();
+
+  console.log(
+    `[chamber] Last Chamber ready. Restored ${count} open table${
+      count === 1 ? "" : "s"
+    }.`
+  );
+}
+
+// ------------------------------------------------------------
+// COMMANDS
+// ------------------------------------------------------------
+
+async function chamberPanelCmd(api, event) {
+  const s = chamberSessions.get(String(event.threadID));
+
+  await sendMessageAsync(
+    api,
+    String(event.threadID),
+    s ? chamberStatusText(s) : chamberNoTableText()
+  );
+}
+
+async function chamberCreateCmd(api, event, mode) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
+
+  await withChamberLock(threadID, async () => {
+    const existing = chamberSessions.get(threadID);
+
+    if (existing) {
+      await sendMessageAsync(
+        api,
+        threadID,
+        "🌑 a chamber is already open here.\n\n" +
+          chamberStatusText(existing)
+      );
+
+      return;
+    }
+
+    let s;
+
+    try {
+      s = await chamberOpenTable(threadID, userID, mode);
+    } catch (error) {
+      if (error && error.code === "23505") {
+        await chamberFail(
+          api,
+          event,
+          "a chamber is still being restored here.\ntry again in a moment."
+        );
+
+        return;
+      }
+
+      throw error;
+    }
+
+    await sendMessageAsync(api, threadID, chamberLobbyText(s));
+  });
+}
+
+async function chamberJoinCmd(api, event, betText, forcedMode = null) {
+  await withChamberLock(String(event.threadID), () =>
+    chamberDoJoin(api, event, betText, forcedMode)
+  );
+}
+
+async function chamberJackpotCmd(api, event, betText) {
+  const threadID = String(event.threadID);
+
+  const existing = chamberSessions.get(threadID);
+
+  if (existing) {
+    if (existing.mode === "jackpot" && betText) {
+      await chamberJoinCmd(api, event, betText, "jackpot");
+
+      return;
+    }
+
+    await chamberFail(
+      api,
+      event,
+      "a chamber is already open here.\nuse !chamber status."
+    );
+
+    return;
+  }
+
+  if (betText) {
+    await chamberJoinCmd(api, event, betText, "jackpot");
+
+    return;
+  }
+
+  await chamberCreateCmd(api, event, "jackpot");
+}
+
+async function chamberLeaveCmd(api, event) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
+
+  await withChamberLock(threadID, async () => {
+    const s = chamberSessions.get(threadID);
+
+    if (!s || !s.players.has(userID)) {
+      await chamberFail(api, event, "you are not inside a chamber.");
+
+      return;
+    }
+
+    if (s.status !== "lobby") {
+      await chamberFail(
+        api,
+        event,
+        "the chamber is sealed.\nno one leaves once it begins."
+      );
+
+      return;
+    }
+
+    const p = s.players.get(userID);
+
+    const result = await chamberStore.leave(s.id, threadID, userID);
+
+    if (!result) {
+      await chamberFail(api, event, "could not leave right now.");
+
+      return;
+    }
+
+    s.players.delete(userID);
+    s.pot = result.pot;
+
+    let extra = "";
+
+    if (s.hostID === userID && s.players.size > 0) {
+      s.hostID = s.players.keys().next().value;
+
+      await chamberStore.setHost(s.id, s.hostID).catch(() => {});
+
+      extra = `\n${chamberLabel(s.players.get(s.hostID))} is now the host.`;
+    }
+
+    await sendMessageAsync(
+      api,
+      threadID,
+      [
+        `🌑 ${chamberLabel(p)} LEFT THE CHAMBER.`,
+        `Refunded: 🪙 ${formatNumber(result.wager)}`,
+        `Pot: 🪙 ${formatNumber(s.pot)}`,
+        `Players: ${s.players.size} / ${s.maxPlayers}`,
+      ].join("\n") + extra
+    );
+
+    if (s.players.size === 0 && s.hostID === userID) {
+      await chamberCancelLobby(s, "Everyone left.");
+    }
+  });
+}
+
+async function chamberStartCmd(api, event) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
+
+  await withChamberLock(threadID, async () => {
+    const s = chamberSessions.get(threadID);
+
+    if (!s || s.status !== "lobby") {
+      await chamberFail(
+        api,
+        event,
+        s
+          ? "the chamber has already begun."
+          : "no chamber is open.\nuse !chamber join <bet>."
+      );
+
+      return;
+    }
+
+    const hostIsSeated = s.players.has(s.hostID);
+
+    const allowed =
+      userID === s.hostID ||
+      chamberIsAdmin(userID) ||
+      (!hostIsSeated && s.players.has(userID));
+
+    if (!allowed) {
+      await chamberFail(
+        api,
+        event,
+        "only the host can seal the chamber."
+      );
+
+      return;
+    }
+
+    const limits = chamberLimits(s.mode);
+
+    if (s.players.size < limits.minPlayers) {
+      await chamberFail(
+        api,
+        event,
+        `the chamber needs at least ${limits.minPlayers} players.\n` +
+          `currently ${s.players.size}.`
+      );
+
+      return;
+    }
+
+    const order = chamberShuffle(Array.from(s.players.keys()));
+
+    const started = await chamberStore.start(s.id, order);
+
+    if (!started) {
+      await chamberFail(api, event, "could not seal the chamber.");
+
+      return;
+    }
+
+    chamberClearTimers(s);
+
+    s.status = "active";
+    s.phase = "resolving";
+    s.order = order;
+
+    order.forEach((id, index) => {
+      s.players.get(id).turnOrder = index + 1;
+    });
+
+    await chamberSend(threadID, chamberStartText(s));
+
+    await sleep(CHAMBER.startDelayMs);
+
+    await chamberRunRound(s);
+  });
+}
+
+async function chamberStatusCmd(api, event) {
+  await chamberPanelCmd(api, event);
+}
+
+async function chamberContinueCmd(api, event) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
+
+  const early = chamberSessions.get(threadID);
+
+  if (!early || early.status !== "active") {
+    await chamberFail(api, event, "no chamber is running.");
+
+    return;
+  }
+
+  if (early.phase !== "decision") {
+    await chamberFail(
+      api,
+      event,
+      "the chamber is turning.\nanswer when the window opens."
+    );
+
+    return;
+  }
+
+  await withChamberLock(threadID, async () => {
+    const s = chamberSessions.get(threadID);
+
+    if (!s || s !== early || s.phase !== "decision") {
+      await chamberFail(api, event, "the window has closed.");
+
+      return;
+    }
+
+    const p = s.players.get(userID);
+
+    if (!p || p.status !== "alive") {
+      await chamberFail(api, event, "you are not alive in this chamber.");
+
+      return;
+    }
+
+    if (p.ready) {
+      await chamberFail(api, event, "you already chose to continue.");
+
+      return;
+    }
+
+    p.ready = true;
+
+    const alive = chamberAlive(s);
+    const readyCount = alive.filter((a) => a.ready).length;
+
+    if (readyCount >= alive.length) {
+      await chamberSend(
+        threadID,
+        `🌑 ${chamberLabel(p)} HOLDS. ALL SURVIVORS STAND.\nThe chamber turns again...`
+      );
+
+      await chamberRunRound(s);
+
+      return;
+    }
+
+    await sendMessageAsync(
+      api,
+      threadID,
+      `🌑 ${chamberLabel(p)} HOLDS THEIR PLACE. (${readyCount}/${alive.length} ready)`
+    );
+  });
+}
+
+async function chamberCashoutCmd(api, event) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
+
+  const early = chamberSessions.get(threadID);
+
+  if (!early || early.status !== "active") {
+    await chamberFail(api, event, "no chamber is running.");
+
+    return;
+  }
+
+  if (early.phase !== "decision") {
+    await chamberFail(
+      api,
+      event,
+      "the chamber is turning.\ncash-out opens after each round."
+    );
+
+    return;
+  }
+
+  await withChamberLock(threadID, async () => {
+    const s = chamberSessions.get(threadID);
+
+    if (!s || s !== early || s.phase !== "decision") {
+      await chamberFail(api, event, "the window has closed.");
+
+      return;
+    }
+
+    const p = s.players.get(userID);
+
+    if (!p || p.status !== "alive") {
+      await chamberFail(api, event, "you are not alive in this chamber.");
+
+      return;
+    }
+
+    const amount = chamberCashoutOffer(s, p);
+    const pct = Math.round(chamberCashoutPct(s) * 100);
+
+    let result = null;
+
+    try {
+      result = await chamberStore.cashout(s.id, threadID, userID, amount);
+    } catch (error) {
+      console.error("[chamber] cashout failed:", error);
+    }
+
+    if (!result) {
+      await chamberFail(api, event, "could not cash out right now.");
+
+      return;
+    }
+
+    p.status = "cashed_out";
+    p.payout = amount;
+    s.pot = result.pot;
+
+    const alive = chamberAlive(s);
+
+    await sendMessageAsync(
+      api,
+      threadID,
+      [
+        `🌑 ${chamberLabel(p)} LEFT THE CHAMBER ALIVE.`,
+        `Cashed out: 🪙 ${formatNumber(amount)}  (${pct}% offer)`,
+        `Pot: 🪙 ${formatNumber(s.pot)}`,
+        "",
+        "Remaining players:",
+        ...alive.map((a) => `◆ ${chamberLabel(a)}`),
+      ].join("\n")
+    );
+
+    if (alive.length === 1) {
+      await chamberFinish(s);
+
+      return;
+    }
+
+    if (alive.every((a) => a.ready)) {
+      await chamberRunRound(s);
+    }
+  });
+}
+
+async function chamberCancelCmd(api, event) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
+
+  await withChamberLock(threadID, async () => {
+    const s = chamberSessions.get(threadID);
+
+    if (!s) {
+      await chamberFail(api, event, "no chamber is open.");
+
+      return;
+    }
+
+    if (s.status !== "lobby") {
+      await chamberFail(
+        api,
+        event,
+        "a running chamber cannot be cancelled."
+      );
+
+      return;
+    }
+
+    if (userID !== s.hostID && !chamberIsAdmin(userID)) {
+      await chamberFail(
+        api,
+        event,
+        "only the host can cancel the chamber."
+      );
+
+      return;
+    }
+
+    await chamberCancelLobby(s, "The host cancelled the table.");
+  });
+}
+
+async function chamberHistoryCmd(api, event) {
+  const threadID = String(event.threadID);
+  const userID = String(event.senderID);
+
+  const { totals, recent } = await chamberStore.stats(threadID, userID);
+
+  const lines = [
+    chamberHeader(null),
+    "YOUR RECORD",
+    "",
+    `Games:         ${Number(totals.games) || 0}`,
+    `Rounds survived: ${Number(totals.survived) || 0}`,
+    `Victories:     ${Number(totals.victories) || 0}`,
+    `Eliminations:  ${Number(totals.eliminations) || 0}`,
+    `Coins won:     🪙 ${formatNumber(Number(totals.coins_won) || 0)}`,
+    `Coins lost:    🪙 ${formatNumber(Number(totals.coins_lost) || 0)}`,
+  ];
+
+  if (recent.length) {
+    lines.push("", "Recent:");
+
+    for (const row of recent) {
+      const net = Number(row.payout) - Number(row.wager);
+
+      const tag =
+        row.status === "winner"
+          ? "WON"
+          : row.status === "cashed_out"
+            ? "CASHED"
+            : "OUT";
+
+      lines.push(
+        `#${row.id}  ${tag}  🪙 ${net >= 0 ? "+" : "-"}${formatNumber(Math.abs(net))}`
+      );
+    }
+  }
+
+  await sendMessageAsync(api, threadID, lines.join("\n"));
+}
+
+async function handleChamber(api, event, args) {
+  chamberApi = api;
+
+  const list = Array.isArray(args) ? args : [];
+  const sub = String(list[0] || "").toLowerCase();
+  const rest = list.slice(1);
+
+  try {
+    await chamberEnsureReady();
+
+    switch (sub) {
+      case "":
+      case "panel":
+      case "info":
+      case "status":
+        await chamberStatusCmd(api, event);
+        break;
+
+      case "create":
+      case "open":
+      case "new":
+        await chamberCreateCmd(api, event, "standard");
+        break;
+
+      case "jackpot":
+        await chamberJackpotCmd(api, event, rest[0]);
+        break;
+
+      case "join":
+      case "enter":
+        await chamberJoinCmd(api, event, rest[0]);
+        break;
+
+      case "leave":
+      case "exit":
+        await chamberLeaveCmd(api, event);
+        break;
+
+      case "start":
+      case "begin":
+        await chamberStartCmd(api, event);
+        break;
+
+      case "continue":
+      case "hold":
+        await chamberContinueCmd(api, event);
+        break;
+
+      case "cashout":
+      case "cash":
+        await chamberCashoutCmd(api, event);
+        break;
+
+      case "cancel":
+        await chamberCancelCmd(api, event);
+        break;
+
+      case "history":
+      case "stats":
+      case "record":
+        await chamberHistoryCmd(api, event);
+        break;
+
+      case "rules":
+      case "help":
+        await sendMessageAsync(
+          api,
+          String(event.threadID),
+          chamberRulesText()
+        );
+        break;
+
+      default:
+        await sendMessageAsync(
+          api,
+          String(event.threadID),
+          chamberNoTableText()
+        );
+    }
+  } catch (error) {
+    console.error("[chamber] command failed:", error);
+
+    await safeReply(
+      api,
+      event,
+      "🌑 LAST CHAMBER\n\nthe chamber hit an error.\ncheck !chamber status to see where things stand."
+    );
+  }
+
+  return true;
+}
+
+// ============================================================
 // EXPORTS
 // ============================================================
 
@@ -3926,6 +6219,9 @@ module.exports = {
   handleGameCommand,
   handleGamesCommand: handleGameCommand,
   handleGameResponse,
+
+  handleChamber,
+  initLastChamber,
 
   handleDaily,
   handleWork,
