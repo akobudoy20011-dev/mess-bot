@@ -1,3 +1,4 @@
+
 "use strict";
 
 const path = require("path");
@@ -21,13 +22,41 @@ const MODE_INFO = {
 
 function normalizePool(value) {
   if (Array.isArray(value)) return value;
-  if (value && Array.isArray(value.scenarios)) return value.scenarios;
-  if (value && Array.isArray(value.data)) return value.data;
-  if (value && Array.isArray(value.pool)) return value.pool;
-  if (value && value.default && Array.isArray(value.default)) return value.default;
-  if (value && value.default && Array.isArray(value.default.scenarios)) {
-    return value.default.scenarios;
+  if (!value || typeof value !== "object") return [];
+
+  const preferredKeys = [
+    "scenarios", "data", "pool", "cases", "case", "haunt",
+    "haunts", "incidents", "incident", "heists", "heist",
+    "trials", "trial", "lost", "lostCases", "investigations",
+  ];
+
+  for (const key of preferredKeys) {
+    if (Array.isArray(value[key])) return value[key];
   }
+
+  if (value.default) {
+    const nested = normalizePool(value.default);
+    if (nested.length) return nested;
+  }
+
+  // Some older investigation files export an object whose values are the
+  // actual scenarios rather than wrapping them in an array.
+  const values = Object.values(value);
+  const scenarioValues = values.filter(
+    (entry) =>
+      entry &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      (entry.title || entry.intro || entry.clues || entry.choices || entry.answer)
+  );
+
+  if (scenarioValues.length) return scenarioValues;
+
+  // A single scenario object is also valid.
+  if (value.title && (value.intro || value.clues || value.choices || value.answer)) {
+    return [value];
+  }
+
   return [];
 }
 
