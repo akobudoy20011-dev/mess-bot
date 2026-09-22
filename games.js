@@ -3682,6 +3682,12 @@ async function handleGameCenter(api, event) {
   await sendMessageAsync(
     api,
     threadID,
+    async function handleGameCenter(api, event) {
+  const threadID = String(event.threadID);
+
+  await sendMessageAsync(
+    api,
+    threadID,
     [
       "╭──────────────────────────────╮",
       "          ♡ ECLIPSE ♡",
@@ -3702,12 +3708,20 @@ async function handleGameCenter(api, event) {
       "   ┊ !chamber    · last chamber (pvp)",
       "",
       "♡ MIND",
-      "   ┊ !trivia     · test your knowledge",
-      "   ┊ !riddle     · solve a mystery",
-      "   ┊ !math       · quick calculation",
+      "   ┊ !trivia       · test your knowledge",
+      "   ┊ !riddle       · solve a mystery",
+      "   ┊ !math         · quick calculation",
+      "   ┊ !exam         · take a little test",
+      "   ┊ !investigator · solve the case",
       "",
       "♡ ECLIPSE",
       "   ┊ !8ball      · ask me anything",
+      "",
+      thinDivider(),
+      "",
+      "♡ COMING SOON",
+      "   ┊ !simulation · coming soon",
+      "   ┊ !debate     · coming soon",
       "",
       thinDivider(),
       "",
