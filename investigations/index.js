@@ -19,14 +19,55 @@ const MODE_INFO = {
   lost: { command: "lost", label: "EXPLORATION MYSTERY", icon: "🌲", file: "lost.json", final: "escape" },
 };
 
+function normalizePool(value) {
+  if (Array.isArray(value)) return value;
+  if (value && Array.isArray(value.scenarios)) return value.scenarios;
+  if (value && Array.isArray(value.data)) return value.data;
+  if (value && Array.isArray(value.pool)) return value.pool;
+  if (value && value.default && Array.isArray(value.default)) return value.default;
+  if (value && value.default && Array.isArray(value.default.scenarios)) {
+    return value.default.scenarios;
+  }
+  return [];
+}
+
+function loadPool(info) {
+  const jsonPath = path.join(DATA_DIR, info.file);
+  const jsPath = path.join(DATA_DIR, info.file.replace(/\.json$/i, ".js"));
+
+  // Prefer the JSON format, but also support the JS scenario files that are
+  // currently present in the repository. This keeps the loader compatible
+  // with both investigation data layouts.
+  if (fs.existsSync(jsonPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+      const pool = normalizePool(parsed);
+      if (pool.length) return pool;
+      console.warn(`[INVESTIGATIONS] ${info.file} loaded but contains no scenarios.`);
+    } catch (error) {
+      console.error(`[INVESTIGATIONS] Failed parsing ${info.file}:`, error);
+    }
+  }
+
+  if (fs.existsSync(jsPath)) {
+    try {
+      delete require.cache[require.resolve(jsPath)];
+      const loaded = require(jsPath);
+      const pool = normalizePool(loaded);
+      if (pool.length) return pool;
+      console.warn(`[INVESTIGATIONS] ${path.basename(jsPath)} loaded but contains no scenarios.`);
+    } catch (error) {
+      console.error(`[INVESTIGATIONS] Failed loading ${path.basename(jsPath)}:`, error);
+    }
+  }
+
+  return [];
+}
+
 const pools = {};
 for (const [mode, info] of Object.entries(MODE_INFO)) {
-  try {
-    pools[mode] = JSON.parse(fs.readFileSync(path.join(DATA_DIR, info.file), "utf8"));
-  } catch (error) {
-    console.error(`[INVESTIGATIONS] Failed loading ${info.file}:`, error);
-    pools[mode] = [];
-  }
+  pools[mode] = loadPool(info);
+  console.log(`[INVESTIGATIONS] Loaded ${pools[mode].length} ${mode} scenario(s).`);
 }
 
 function key(threadID, userID) {
