@@ -1,4 +1,32 @@
+"use strict";
+
 const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+
+// ============================================================
+// GEMINI KEY POOL
+// ------------------------------------------------------------
+// Keys are rotated instead of always starting at KEY_1.
+// 429 / 5xx failures put only the affected key into cooldown.
+// If several requests arrive at once, the pool still distributes
+// work across healthy keys instead of hammering the first key.
+//
+// IMPORTANT:
+// Multiple API keys created in the same Google project generally
+// share that project's Gemini quota. Key rotation cannot create
+// extra quota in that situation; this pool only prevents one key
+// from being needlessly hammered and supports genuinely separate
+// quotas when they exist.
+// ============================================================
+
+const KEY_COOLDOWN_MIN_MS = 5_000;
+const KEY_COOLDOWN_MAX_MS = 120_000;
+const DEFAULT_429_COOLDOWN_MS = 35_000;
+const TRANSIENT_COOLDOWN_MS = 8_000;
+const MAX_KEY_FAILURES_BEFORE_LONG_COOLDOWN = 3;
+const LONG_COOLDOWN_MS = 60_000;
+
+const geminiKeyState = new Map();
+let geminiRoundRobin = 0;
 
 function contentToText(content) {
   if (typeof content === "string") return content;
@@ -33,7 +61,6 @@ function toGeminiRequest(messages) {
     });
   }
 
-  // Gemini does not like a conversation beginning with a model message.
   const openingMessage =
     rawContents[0]?.role === "model" ? rawContents.shift() : null;
 
@@ -85,7 +112,6 @@ function toGeminiRequest(messages) {
 function cleanJsonText(text) {
   let cleaned = String(text || "").trim();
 
-  // Remove markdown fences if Gemini happens to add them.
   cleaned = cleaned
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
@@ -171,11 +197,6 @@ function parseGeneratedResponse(text) {
       emotion: normalizeEmotion(parsed.emotion),
     };
   } catch (error) {
-    /*
-     * Fallback:
-     * If Gemini unexpectedly ignores the JSON instruction,
-     * don't break the bot. Use its raw response as the reply.
-     */
     console.warn(
       "[Gemini] Could not parse structured response. Using raw response."
     );
@@ -238,13 +259,147 @@ function configuredGeminiKeys() {
     .filter((entry) => entry.value);
 }
 
-function providerError(message, status, retryable) {
+function providerError(message, status, retryable, extra = {}) {
   const error = new Error(message);
 
   error.status = status;
   error.retryable = retryable;
 
+  Object.assign(error, extra);
+
   return error;
+}
+
+function getKeyState(keyName) {
+  let state = geminiKeyState.get(keyName);
+
+  if (!state) {
+    state = {
+      cooldownUntil: 0,
+      failures: 0,
+      lastStatus: null,
+      lastFailureAt: 0,
+      successCount: 0,
+      failureCount: 0,
+    };
+
+    geminiKeyState.set(keyName, state);
+  }
+
+  return state;
+}
+
+function parseRetryDelayMs(message) {
+  const text = String(message || "");
+
+  // Handles messages such as:
+  // "Please retry in 30.094537179s."
+  const secondsMatch = text.match(
+    /retry\s+in\s+([0-9]+(?:\.[0-9]+)?)\s*s/i
+  );
+
+  if (secondsMatch) {
+    const seconds = Number(secondsMatch[1]);
+
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return Math.min(
+        KEY_COOLDOWN_MAX_MS,
+        Math.max(
+          KEY_COOLDOWN_MIN_MS,
+          Math.ceil(seconds * 1000) + 1000
+        )
+      );
+    }
+  }
+
+  return DEFAULT_429_COOLDOWN_MS;
+}
+
+function markKeyFailure(key, status, message) {
+  const state = getKeyState(key.name);
+
+  state.failures += 1;
+  state.failureCount += 1;
+  state.lastStatus = status;
+  state.lastFailureAt = Date.now();
+
+  let cooldownMs;
+
+  if (status === 429) {
+    cooldownMs = parseRetryDelayMs(message);
+  } else if ([500, 502, 503, 504].includes(status)) {
+    cooldownMs = TRANSIENT_COOLDOWN_MS;
+  } else {
+    cooldownMs = 0;
+  }
+
+  if (state.failures >= MAX_KEY_FAILURES_BEFORE_LONG_COOLDOWN) {
+    cooldownMs = Math.max(cooldownMs, LONG_COOLDOWN_MS);
+  }
+
+  if (cooldownMs > 0) {
+    state.cooldownUntil = Date.now() + cooldownMs;
+  }
+
+  return cooldownMs;
+}
+
+function markKeySuccess(key) {
+  const state = getKeyState(key.name);
+
+  state.failures = 0;
+  state.lastStatus = null;
+  state.cooldownUntil = 0;
+  state.successCount += 1;
+}
+
+function isKeyReady(key) {
+  const state = getKeyState(key.name);
+  return state.cooldownUntil <= Date.now();
+}
+
+function keyCooldownRemaining(key) {
+  const state = getKeyState(key.name);
+  return Math.max(0, state.cooldownUntil - Date.now());
+}
+
+function chooseNextKey(keys, excludedNames = new Set()) {
+  if (!keys.length) return null;
+
+  const start = geminiRoundRobin % keys.length;
+
+  for (let offset = 0; offset < keys.length; offset += 1) {
+    const index = (start + offset) % keys.length;
+    const key = keys[index];
+
+    if (excludedNames.has(key.name)) continue;
+    if (!isKeyReady(key)) continue;
+
+    geminiRoundRobin = (index + 1) % keys.length;
+    return key;
+  }
+
+  return null;
+}
+
+function nextAvailableKey(keys, excludedNames = new Set()) {
+  let earliest = null;
+
+  for (const key of keys) {
+    if (excludedNames.has(key.name)) continue;
+
+    const remaining = keyCooldownRemaining(key);
+
+    if (remaining <= 0) {
+      return key;
+    }
+
+    if (!earliest || remaining < earliest.remaining) {
+      earliest = { key, remaining };
+    }
+  }
+
+  return earliest;
 }
 
 async function requestGemini(messages, model, key) {
@@ -269,9 +424,7 @@ async function requestGemini(messages, model, key) {
         "Content-Type": "application/json",
       },
 
-      body: JSON.stringify(
-        toGeminiRequest(messages)
-      ),
+      body: JSON.stringify(toGeminiRequest(messages)),
 
       signal: controller.signal,
     });
@@ -291,9 +444,14 @@ async function requestGemini(messages, model, key) {
         504,
       ].includes(response.status);
 
+      const cooldownMs = retryable
+        ? markKeyFailure(key, response.status, providerMessage)
+        : 0;
+
       console.error("[Gemini] API request failed:", {
         keySlot: key.name,
         status: response.status,
+        cooldownMs,
         message: providerMessage,
       });
 
@@ -303,15 +461,24 @@ async function requestGemini(messages, model, key) {
           "): " +
           providerMessage,
         response.status,
-        retryable
+        retryable,
+        {
+          cooldownMs,
+          providerMessage,
+        }
       );
     }
 
     const rawText = getGeneratedText(data);
+    const result = parseGeneratedResponse(rawText);
 
-    return parseGeneratedResponse(rawText);
+    markKeySuccess(key);
+
+    return result;
   } catch (error) {
     if (error?.name === "AbortError") {
+      markKeyFailure(key, null, "timeout");
+
       console.error("[Gemini] API request timed out:", {
         keySlot: key.name,
       });
@@ -326,6 +493,8 @@ async function requestGemini(messages, model, key) {
     if (error?.status !== undefined) {
       throw error;
     }
+
+    markKeyFailure(key, null, error?.message || "network error");
 
     console.error("[Gemini] Network request failed:", {
       keySlot: key.name,
@@ -366,38 +535,76 @@ async function generateReply(messages) {
     ""
   );
 
-  let lastError;
+  const attemptedKeys = new Set();
+  let lastError = null;
 
-  for (
-    let index = 0;
-    index < keys.length;
-    index += 1
-  ) {
+  // Try every currently configured key at most once for this request.
+  // The starting key rotates between requests, so KEY_1 is not always
+  // the first key hit.
+  while (attemptedKeys.size < keys.length) {
+    const key = chooseNextKey(keys, attemptedKeys);
+
+    if (!key) {
+      break;
+    }
+
+    attemptedKeys.add(key.name);
+
     try {
-      return await requestGemini(
-        messages,
-        model,
-        keys[index]
-      );
+      return await requestGemini(messages, model, key);
     } catch (error) {
       lastError = error;
 
-      const hasNextKey =
-        index < keys.length - 1;
-
-      if (!error?.retryable || !hasNextKey) {
+      if (!error?.retryable) {
         throw error;
       }
 
-      console.error(
-        "[Gemini] Trying next configured key after transient failure.",
-        {
-          failedKeySlot: keys[index].name,
-          nextKeySlot: keys[index + 1].name,
-          status: error.status || null,
-        }
+      const remainingReadyKeys = keys.filter(
+        (candidate) =>
+          !attemptedKeys.has(candidate.name) &&
+          isKeyReady(candidate)
       );
+
+      if (remainingReadyKeys.length) {
+        const nextKey = remainingReadyKeys[0];
+
+        console.error(
+          "[Gemini] Switching to next healthy key after transient failure.",
+          {
+            failedKeySlot: key.name,
+            nextKeySlot: nextKey.name,
+            status: error.status || null,
+            cooldownMs: error.cooldownMs || null,
+          }
+        );
+      }
     }
+  }
+
+  // All configured keys were either attempted or are cooling down.
+  // If one becomes available very shortly, report the cooldown rather
+  // than hammering the same exhausted quota repeatedly.
+  const next = nextAvailableKey(keys);
+
+  if (next && next.remaining > 0) {
+    const seconds = Math.ceil(next.remaining / 1000);
+
+    console.warn("[Gemini] All configured keys are cooling down.", {
+      nextKeySlot: next.key.name,
+      retryInSeconds: seconds,
+    });
+
+    throw providerError(
+      "All configured Gemini API keys are temporarily rate-limited. Retry in about " +
+        seconds +
+        " seconds.",
+      429,
+      true,
+      {
+        cooldownMs: next.remaining,
+        allKeysCoolingDown: true,
+      }
+    );
   }
 
   throw (
