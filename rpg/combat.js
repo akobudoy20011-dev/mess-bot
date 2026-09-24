@@ -1984,21 +1984,45 @@ async function enemyTurn({
     };
   }
 
+  /*
+   * Infinite Darkness is a true multi-turn battlefield
+   * control effect. The restored special freezes the enemy
+   * for its full duration (five turns), rather than merely
+   * applying a one-turn stun.
+   */
+  const infiniteDarkness =
+    await effects.getEffect(
+      threadID,
+      combatID,
+      enemyTargetID(),
+      effects.EFFECT_IDS.INFINITE_DARKNESS
+    );
+
   if (
     enemyStart.stunned ||
+    infiniteDarkness ||
     await effects.isStunned(
       threadID,
       combatID,
       enemyTargetID()
     )
   ) {
+    const frozen =
+      Boolean(infiniteDarkness);
+
     return {
       ok: true,
       damage: 0,
       skipped: true,
       messages: [
         ...enemyStart.messages,
-        `${enemy.name} loses its turn.`,
+        frozen
+          ? `${getEnemy(
+              session.enemy_id
+            )?.name || "Enemy"} is frozen in Infinite Darkness and loses its turn.`
+          : `${getEnemy(
+              session.enemy_id
+            )?.name || "Enemy"} loses its turn.`,
       ],
     };
   }
@@ -4832,6 +4856,30 @@ async function executeSpecial({
       )
     ) + 1
   );
+
+  /*
+   * Persist successful special progression only after the
+   * special has fully resolved. Tracking failure must never
+   * turn a successful combat action into a failed action.
+   */
+  try {
+    if (
+      typeof specials.recordSpecialUse ===
+      "function"
+    ) {
+      await specials.recordSpecialUse(
+        threadID,
+        userID,
+        id,
+        25
+      );
+    }
+  } catch (error) {
+    console.error(
+      "[RPG] Failed to record special mastery:",
+      error
+    );
+  }
 
   return {
     ok: true,
