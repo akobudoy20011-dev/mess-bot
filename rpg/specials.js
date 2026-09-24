@@ -2176,7 +2176,145 @@ async function addSpecialMastery(
 
 // ============================================================
 
+// ============================================================
+
+// SPECIAL USE TRACKING
+
+// ============================================================
+
+async function recordSpecialUse(
+
+  threadID,
+
+  userID,
+
+  specialID,
+
+  masteryGain = 25
+
+) {
+
+  const special =
+
+    getSpecial(
+
+      specialID
+
+    );
+
+  if (!special) {
+
+    throw new Error(
+
+      `Unknown special move: ${specialID}`
+
+    );
+
+  }
+
+  const value =
+
+    Math.max(
+
+      0,
+
+      Math.floor(
+
+        Number(
+
+          masteryGain
+
+        ) || 0
+
+      )
+
+    );
+
+  const result =
+
+    await db.query(
+
+      `
+
+        UPDATE rpg_player_special_moves
+
+        SET
+
+          uses = COALESCE(uses, 0) + 1,
+
+          mastery = COALESCE(mastery, 0) + $4,
+
+          updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT * 1000
+
+        WHERE thread_id = $1
+
+          AND user_id = $2
+
+          AND special_id = $3
+
+          AND unlocked = TRUE
+
+        RETURNING *
+
+      `,
+
+      [
+
+        String(threadID),
+
+        String(userID),
+
+        special.id,
+
+        value,
+
+      ]
+
+    );
+
+  if (!result.rows.length) {
+
+    return {
+
+      ok: false,
+
+      reason:
+
+        "Special move has not been unlocked.",
+
+      special,
+
+    };
+
+  }
+
+  return {
+
+    ok: true,
+
+    special,
+
+    masteryGained: value,
+
+    record:
+
+      normalizePlayerSpecialRow(
+
+        result.rows[0]
+
+      ),
+
+  };
+
+}
+
+// ============================================================
+
 // SPECIAL USE VALIDATION
+
+// ============================================================
+
+
 
 // ============================================================
 
@@ -2779,6 +2917,8 @@ module.exports = {
   unlockSpecial,
 
   addSpecialMastery,
+
+  recordSpecialUse,
 
   canUseSpecial,
 
