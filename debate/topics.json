@@ -1,0 +1,242 @@
+[
+  {
+    "id": "ai-in-classrooms",
+    "topic": "Should AI tools be allowed in classrooms?",
+    "positions": [
+      "AI tools should be allowed with clear rules.",
+      "AI tools should be restricted in most classroom work."
+    ]
+  },
+  {
+    "id": "four-day-school",
+    "topic": "Should schools move to a four-day academic week?",
+    "positions": [
+      "A four-day academic week would improve learning and wellbeing.",
+      "Schools should keep a five-day academic week."
+    ]
+  },
+  {
+    "id": "school-uniforms",
+    "topic": "Should schools require uniforms?",
+    "positions": [
+      "School uniforms should be required.",
+      "Students should be allowed to choose their own school clothing within basic rules."
+    ]
+  },
+  {
+    "id": "remote-work",
+    "topic": "Is remote work better than office-first work?",
+    "positions": [
+      "Remote work should be the default when the job allows it.",
+      "Office-first work is better for most teams."
+    ]
+  },
+  {
+    "id": "social-media-age",
+    "topic": "Should social media platforms have stricter age limits?",
+    "positions": [
+      "Platforms should enforce stricter age limits.",
+      "Current age limits are sufficient when properly enforced."
+    ]
+  },
+  {
+    "id": "public-speaking",
+    "topic": "Should public speaking be a required school skill?",
+    "positions": [
+      "Every student should complete formal public-speaking work.",
+      "Public speaking should remain optional."
+    ]
+  },
+  {
+    "id": "group-projects",
+    "topic": "Are group projects worth keeping in education?",
+    "positions": [
+      "Group projects teach skills that individual work cannot.",
+      "Group projects create too many unfair grading problems."
+    ]
+  },
+  {
+    "id": "cashless",
+    "topic": "Should businesses move toward cashless payments?",
+    "positions": [
+      "Businesses should be encouraged to become cashless.",
+      "Businesses should always retain a cash-payment option."
+    ]
+  },
+  {
+    "id": "four-day-workweek",
+    "topic": "Should companies adopt a four-day workweek?",
+    "positions": [
+      "A four-day workweek should become a common option.",
+      "A five-day workweek remains more practical for most businesses."
+    ]
+  },
+  {
+    "id": "uniform-workplace",
+    "topic": "Should workplaces have formal dress codes?",
+    "positions": [
+      "Formal dress codes improve professionalism.",
+      "Workplaces should judge performance rather than clothing."
+    ]
+  },
+  {
+    "id": "school-start-time",
+    "topic": "Should schools start later in the morning?",
+    "positions": [
+      "Schools should start later.",
+      "Schools should keep early start times for scheduling and family needs."
+    ]
+  },
+  {
+    "id": "homework",
+    "topic": "Should homework be reduced?",
+    "positions": [
+      "Schools should substantially reduce homework.",
+      "Homework remains an important part of learning."
+    ]
+  },
+  {
+    "id": "competitive-games",
+    "topic": "Should competitive gaming be treated as a legitimate sport?",
+    "positions": [
+      "Competitive gaming should be recognized as a sport.",
+      "Competitive gaming should remain a separate category from traditional sport."
+    ]
+  },
+  {
+    "id": "library-funding",
+    "topic": "Should public libraries receive more funding?",
+    "positions": [
+      "Public libraries should receive increased public funding.",
+      "Libraries should operate mainly within existing budgets."
+    ]
+  },
+  {
+    "id": "public-transport",
+    "topic": "Should cities prioritize public transportation over private cars?",
+    "positions": [
+      "Cities should prioritize public transportation infrastructure.",
+      "Cities should balance public transport with private-car infrastructure."
+    ]
+  },
+  {
+    "id": "fast-fashion",
+    "topic": "Should fast fashion face stricter environmental rules?",
+    "positions": [
+      "Fast fashion needs stronger environmental regulation.",
+      "Consumer choice and industry innovation are better than stricter rules."
+    ]
+  },
+  {
+    "id": "animal-testing",
+    "topic": "Should animal testing be reduced wherever alternatives exist?",
+    "positions": [
+      "Animal testing should be reduced whenever reliable alternatives exist.",
+      "Animal testing should remain available where it is scientifically necessary."
+    ]
+  },
+  {
+    "id": "space-exploration",
+    "topic": "Should governments spend more on space exploration?",
+    "positions": [
+      "Space exploration deserves greater public investment.",
+      "Governments should prioritize terrestrial needs over additional space spending."
+    ]
+  },
+  {
+    "id": "school-lunch",
+    "topic": "Should schools provide free meals to every student?",
+    "positions": [
+      "Schools should provide free meals to all students.",
+      "Free school meals should be targeted to students who need them."
+    ]
+  },
+  {
+    "id": "exam-or-coursework",
+    "topic": "Should major exams carry less weight than coursework?",
+    "positions": [
+      "Coursework should carry more weight than final exams.",
+      "Major exams should remain the main measure of academic performance."
+    ]
+  },
+  {
+    "id": "smartphones-school",
+    "topic": "Should smartphones be banned during class?",
+    "positions": [
+      "Smartphones should be prohibited during lessons.",
+      "Students should be allowed to use smartphones under classroom rules."
+    ]
+  },
+  {
+    "id": "online-learning",
+    "topic": "Can online learning replace most traditional classroom learning?",
+    "positions": [
+      "Online learning can replace much traditional classroom work.",
+      "Traditional classrooms remain essential for most students."
+    ]
+  },
+  {
+    "id": "creative-education",
+    "topic": "Should schools spend more time on arts and creative subjects?",
+    "positions": [
+      "Arts and creative subjects deserve more curriculum time.",
+      "Core academic subjects should remain the priority."
+    ]
+  },
+  {
+    "id": "automation-jobs",
+    "topic": "Will workplace automation create more opportunities than it removes?",
+    "positions": [
+      "Automation will create more opportunities in the long run.",
+      "Automation will remove more opportunities than it creates without strong adaptation."
+    ]
+  },
+  {
+    "id": "privacy-convenience",
+    "topic": "Should people trade some digital privacy for convenience?",
+    "positions": [
+      "Limited privacy tradeoffs can be reasonable for useful services.",
+      "Digital privacy should take priority over convenience."
+    ]
+  },
+  {
+    "id": "news-literacy",
+    "topic": "Should media literacy be a required school subject?",
+    "positions": [
+      "Media literacy should be a required subject.",
+      "Media literacy should be integrated into existing subjects instead."
+    ]
+  },
+  {
+    "id": "merit-pay",
+    "topic": "Should employees receive more pay based on individual performance?",
+    "positions": [
+      "Performance-based pay can reward strong contributions.",
+      "Pay should primarily reflect role, responsibility, and stable salary structures."
+    ]
+  },
+  {
+    "id": "open-book-exams",
+    "topic": "Should more exams be open-book?",
+    "positions": [
+      "Open-book exams can better test reasoning and application.",
+      "Closed-book exams remain important for testing independent recall."
+    ]
+  },
+  {
+    "id": "volunteering-school",
+    "topic": "Should community service be required for graduation?",
+    "positions": [
+      "Community service should be a graduation requirement.",
+      "Community service should remain voluntary."
+    ]
+  },
+  {
+    "id": "failure-learning",
+    "topic": "Is failure an essential part of learning?",
+    "positions": [
+      "Meaningful failure is an essential part of learning.",
+      "Learning can be effective without deliberately relying on failure."
+    ]
+  }
+]\n
