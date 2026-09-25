@@ -5148,7 +5148,7 @@ async function handleMessage(
 
     const debateMatch =
       text.match(
-
+        /^!debate(?:\s+(.*))?$/i
       );
 
     if (debateMatch) {
