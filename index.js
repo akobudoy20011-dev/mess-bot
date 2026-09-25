@@ -28,6 +28,15 @@ const {
 } = require("./exam-manager");
 
 // ============================================================
+// ECLIPSE DEBATE
+// ============================================================
+
+const {
+  handleDebateCommand,
+  initDebate,
+} = require("./debate");
+
+// ============================================================
 // ECLIPSE INVESTIGATIONS
 // ============================================================
 
@@ -3049,6 +3058,20 @@ function attemptLogin() {
       }
 
       // ========================================================
+      // DEBATE
+      // Restores open debate sessions after a restart.
+      // ========================================================
+
+      try {
+        await initDebate(api);
+      } catch (error) {
+        console.error(
+          "[debate] init failed:",
+          error
+        );
+      }
+
+      // ========================================================
       // CLEANUP
       // ========================================================
 
@@ -4471,7 +4494,7 @@ async function handleMessage(
         "♡ !heist / !trial / !lost",
         "♡ !investigator / !investigations",
         "◇ !simulation — COMING SOON",
-        "◇ !debate — COMING SOON",
+        "♡ !debate — debate challenge + human admin judgment",
         "",
         "╰────── ♡ ୨୧ 🎀 ୨୧ ♡ ──────╯",
       ].join("\n"),
@@ -5117,6 +5140,47 @@ async function handleMessage(
       }
 
       return;
+    }
+
+    // --------------------------------------------------------
+    // DEBATE COMMANDS
+    // --------------------------------------------------------
+
+    const debateMatch =
+      text.match(
+        /^!debate(?:\\s+(.*))?$/i
+      );
+
+    if (debateMatch) {
+      const debateArgs = debateMatch[1]
+        ? debateMatch[1].trim().split(/\\s+/)
+        : [];
+
+      try {
+        if (
+          await handleDebateCommand(
+            api,
+            event,
+            "debate",
+            debateArgs
+          )
+        ) {
+          return;
+        }
+      } catch (error) {
+        console.error(
+          "[DEBATE] Command failed:",
+          error
+        );
+
+        await sendReplyWithTyping(
+          api,
+          "🎀 The debate system encountered an error. Please try again.",
+          threadID
+        );
+
+        return;
+      }
     }
 
     // --------------------------------------------------------
