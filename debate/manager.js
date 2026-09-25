@@ -1009,9 +1009,7 @@ function normalizeRestoredSession(data) {
     style: STYLES[data.style] ? data.style : "analyst",
     styleLabel:
       data.styleLabel ||
-      STYLES[data.style] ?
-        STYLES[data.style]?.label :
-        STYLES.analyst.label,
+      (STYLES[data.style] ? STYLES[data.style].label : STYLES.analyst.label),
     round: data.round || "opening",
     roundStartedAt: Number(data.roundStartedAt) || Date.now(),
     timeLimitMs:
