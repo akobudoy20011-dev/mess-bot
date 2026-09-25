@@ -5148,12 +5148,12 @@ async function handleMessage(
 
     const debateMatch =
       text.match(
-        /^!debate(?:\\s+(.*))?$/i
+
       );
 
     if (debateMatch) {
       const debateArgs = debateMatch[1]
-        ? debateMatch[1].trim().split(/\\s+/)
+        ? debateMatch[1].trim().split(/\s+/)
         : [];
 
       try {
