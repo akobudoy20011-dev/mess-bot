@@ -9,6 +9,8 @@ const { recordResult, incrementPlayed, getProfile, formatProfile } = require("./
 
 const DATA_DIR = path.join(__dirname, "data");
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
+const MIN_EVIDENCE_TO_SOLVE = 2;
+const HINT_REWARD_PENALTY = 0.25;
 const sessions = new Map();
 
 const MODE_INFO = {
@@ -180,44 +182,107 @@ function pick(pool) {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
+function inspectableEntries(scenario, mode) {
+  const entries = [];
+  const source = scenario.clues || scenario.choices || {};
+
+  for (const key of Object.keys(source)) {
+    entries.push({
+      key,
+      label: key,
+      type: "evidence",
+      value: source[key],
+    });
+  }
+
+  if (mode === "case" && scenario.suspects && typeof scenario.suspects === "object") {
+    for (const key of Object.keys(scenario.suspects)) {
+      entries.push({
+        key: "suspect " + key,
+        label: "suspect " + key,
+        type: "suspect",
+        value: scenario.suspects[key],
+      });
+    }
+  }
+
+  return entries;
+}
+
+function answerLabel(session) {
+  const answer = normalize(session.scenario.answer);
+  if (session.mode === "case" && session.scenario.suspects && session.scenario.suspects[answer]) {
+    return "!case accuse " + answer;
+  }
+  return "!" + session.mode + " conclude " + answer;
+}
+
 function sessionText(session) {
   const info = MODE_INFO[session.mode];
   const scenario = session.scenario;
   const elapsed = Math.floor((Date.now() - session.startedAt) / 1000);
   const remaining = Math.max(0, Math.ceil((SESSION_TIMEOUT_MS / 1000) - elapsed));
-
-  const commands = {
-    case: [
-      "!case inspect window",
-      "!case inspect clock",
-      "!case inspect glass",
-      "!case inspect desk",
-      "!case inspect suspect <name>",
-      "!case accuse <name>",
-    ],
-    haunt: ["!haunt explore library", "!haunt explore basement", "!haunt explore stairs", "!haunt choose fireplace"],
-    incident: ["!incident inspect logs", "!incident inspect lab3", "!incident inspect security", "!incident inspect terminal", "!incident conclude <clue>"],
-    heist: ["!heist plan scout", "!heist plan hack", "!heist plan disguise", "!heist execute stealth"],
-    trial: ["!trial examine witness", "!trial examine keycard", "!trial examine photo", "!trial verdict"],
-    lost: ["!lost explore north", "!lost explore cave", "!lost explore structure", "!lost choose river"],
-  };
-
-  return [
-    `${info.icon} ${info.label}`,
+  const entries = inspectableEntries(scenario, session.mode);
+  const lines = [
+    info.icon + " " + info.label,
     "",
-    `📁 ${scenario.title}`,
+    "📁 " + scenario.title,
     "",
     scenario.intro,
     "",
-    `⏳ ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")} remaining`,
+    "⏳ " + Math.floor(remaining / 60) + ":" + String(remaining % 60).padStart(2, "0") + " remaining",
     "",
-    "Available actions:",
-    ...(commands[session.mode] || []),
-    "",
-    `Evidence found: ${session.evidenceFound}`,
-  ].join("\n");
-}
+    "🔎 INSPECT:",
+  ];
 
+  const evidenceEntries = entries.filter((entry) => entry.type === "evidence");
+  const suspectEntries = entries.filter((entry) => entry.type === "suspect");
+
+  if (evidenceEntries.length) {
+    lines.push(
+      ...evidenceEntries.map(
+        (entry) => "!" + session.mode + " inspect " + entry.label
+      )
+    );
+  }
+
+  if (suspectEntries.length) {
+    lines.push(
+      "",
+      "👤 SUSPECTS / TESTIMONY:",
+      ...suspectEntries.map(
+        (entry) => "!" + session.mode + " inspect " + entry.label
+      )
+    );
+  }
+
+  lines.push(
+    "",
+    "🧩 SOLVE:",
+    "!" + session.mode + " status",
+    "!" + session.mode + " hint",
+    answerLabel(session),
+    "!" + session.mode + " quit",
+    "",
+    "Evidence found: " + session.evidenceFound + "/" + session.totalClues,
+    "Minimum to solve: " + Math.min(MIN_EVIDENCE_TO_SOLVE, session.totalClues),
+    session.hintUsed
+      ? "💡 Hint used: reward reduced."
+      : "💡 Hints reveal direction but reduce the final reward."
+  );
+
+  if (session.discovered.size) {
+    lines.push(
+      "",
+      "✓ Investigated: " +
+        Array.from(session.discovered)
+          .map((x) => x.split(":").pop())
+          .join(", ")
+    );
+  }
+
+  return lines.join("\n");
+}
 function helpText() {
   return [
     "╭──── 🕵️ ECLIPSE INVESTIGATIONS ────╮",
@@ -276,11 +341,24 @@ async function finish(api, session, outcome) {
 
   const seconds = Math.floor((Date.now() - session.startedAt) / 1000);
   const completed = outcome.completed === true;
-  const perfect = completed && session.evidenceFound >= session.totalClues;
+  const perfect =
+    completed &&
+    session.evidenceFound >= session.totalClues &&
+    !session.hintUsed;
   const baseReward = completed ? Number(session.scenario.reward || 0) : 0;
   const bonus = perfect ? Number(session.scenario.perfectBonus || 0) : 0;
-  const reward = baseReward + bonus;
-  const xp = completed ? Number(session.scenario.xp || 0) + (perfect ? 50 : 0) : 0;
+  const hintPenalty = session.hintUsed
+    ? Math.floor((baseReward + bonus) * HINT_REWARD_PENALTY)
+    : 0;
+  const reward = Math.max(0, baseReward + bonus - hintPenalty);
+  const xp = completed
+    ? Math.max(
+        0,
+        Number(session.scenario.xp || 0) +
+          (perfect ? 50 : 0) -
+          (session.hintUsed ? 20 : 0)
+      )
+    : 0;
 
   try {
     await recordResult(session.threadID, session.userID, session.mode, {
@@ -337,12 +415,60 @@ async function finish(api, session, outcome) {
   }
 }
 
-function clueCount(scenario) {
-  if (scenario.clues) return Object.keys(scenario.clues).length;
-  if (scenario.choices) return Object.keys(scenario.choices).length;
-  return 0;
+function clueCount(scenario, mode) {
+  return inspectableEntries(scenario, mode).length;
 }
 
+function answerIsKnown(session, answer) {
+  const normalized = normalize(answer);
+  if (!normalized) return false;
+  if (normalized === normalize(session.scenario.answer)) return true;
+
+  const source = session.scenario.clues || session.scenario.choices || {};
+  return Boolean(source[normalized]);
+}
+
+function hintText(session) {
+  if (session.hintUsed) {
+    return "💡 You already used your hint. Keep working with the evidence.";
+  }
+
+  const answer = normalize(session.scenario.answer);
+  const source = session.scenario.clues || session.scenario.choices || {};
+  const direct = source[answer];
+
+  session.hintUsed = true;
+
+  if (direct) {
+    return [
+      "💡 DETECTIVE'S HINT",
+      "",
+      "One of the strongest leads concerns: " + answer + ".",
+      "Inspect it and compare it against the rest of the evidence.",
+      "",
+      "Your final reward will be reduced because a hint was used.",
+    ].join("\n");
+  }
+
+  if (session.mode === "case" && session.scenario.suspects && session.scenario.suspects[answer]) {
+    return [
+      "💡 DETECTIVE'S HINT",
+      "",
+      "Pay close attention to " + answer + " and whether their statement survives the physical evidence.",
+      "",
+      "Your final reward will be reduced because a hint was used.",
+    ].join("\n");
+  }
+
+  return [
+    "💡 DETECTIVE'S HINT",
+    "",
+    "The answer is tied to the strongest contradiction in the evidence you can inspect.",
+    "Look for the clue that explains the anomaly rather than the most dramatic detail.",
+    "",
+    "Your final reward will be reduced because a hint was used.",
+  ].join("\n");
+}
 async function start(api, event, mode) {
   const threadID = String(event.threadID);
   const userID = String(event.senderID);
@@ -369,7 +495,8 @@ async function start(api, event, mode) {
     startedAt: Date.now(),
     evidenceFound: 0,
     discovered: new Set(),
-    totalClues: clueCount(scenario),
+    totalClues: clueCount(scenario, mode),
+    hintUsed: false,
     timer: null,
     lastMessageID: null,
   };
@@ -385,44 +512,76 @@ async function start(api, event, mode) {
 }
 
 async function inspect(session, target) {
-  const scenario = session.scenario;
   const normalized = normalize(target);
   if (!normalized) return "Tell me what you want to inspect.";
 
-  let source = scenario.clues || scenario.choices || {};
-  let keyName = normalized;
+  const entries = inspectableEntries(session.scenario, session.mode);
+  const entry = entries.find((item) => normalize(item.key) === normalized);
 
-  if (session.mode === "case" && normalized.startsWith("suspect ")) {
-    keyName = normalized;
-    source = scenario.suspects || {};
+  if (!entry) {
+    const available = entries.map((item) => item.label).join(", ");
+    return [
+      "❔ I can't find anything matching \"" + target + "\".",
+      "",
+      "Try one of these:",
+      available || "No inspectable evidence is configured for this scenario.",
+    ].join("\n");
   }
 
-  const value = source[keyName];
-  if (!value) return `❔ I can't find anything matching "${target}".`;
+  const discoveryKey = session.mode + ":" + entry.key;
+  const firstDiscovery = !session.discovered.has(discoveryKey);
 
-  if (!session.discovered.has(`${session.mode}:${keyName}`)) {
-    session.discovered.add(`${session.mode}:${keyName}`);
+  if (firstDiscovery) {
+    session.discovered.add(discoveryKey);
     session.evidenceFound += 1;
   }
 
   return [
-    "🔎 EVIDENCE FOUND",
+    firstDiscovery ? "🔎 NEW EVIDENCE" : "🔎 EVIDENCE REVIEW",
     "",
-    String(value),
+    String(entry.value),
     "",
-    `Evidence found: ${session.evidenceFound}/${session.totalClues}`,
+    "Evidence found: " + session.evidenceFound + "/" + session.totalClues,
+    firstDiscovery
+      ? "✓ This evidence is now added to your investigation."
+      : "↻ You already examined this evidence.",
   ].join("\n");
 }
-
 async function conclude(api, session, answer) {
   const normalized = normalize(answer);
+  const requiredEvidence = Math.min(MIN_EVIDENCE_TO_SOLVE, session.totalClues);
+
+  if (session.evidenceFound < requiredEvidence) {
+    await send(api, session.threadID, [
+      "🔒 NOT ENOUGH EVIDENCE",
+      "",
+      "You need at least " + requiredEvidence + " pieces of evidence before making the final call.",
+      "Evidence found: " + session.evidenceFound + "/" + session.totalClues,
+      "",
+      "Use !" + session.mode + " inspect <clue> to investigate further.",
+    ].join("\n"));
+    return true;
+  }
+
+  if (!answerIsKnown(session, normalized)) {
+    await send(api, session.threadID, [
+      "❔ \"" + answer + "\" is not a valid conclusion for this investigation.",
+      "",
+      "Review the available evidence with !" + session.mode + " status.",
+    ].join("\n"));
+    return true;
+  }
+
   const correct = normalized === normalize(session.scenario.answer);
+
   if (!correct) {
     await send(api, session.threadID, [
-      "❌ That conclusion does not fit the evidence.",
+      "❌ WRONG CONCLUSION",
       "",
-      "You can continue investigating and try again.",
-      `Evidence found: ${session.evidenceFound}/${session.totalClues}`,
+      "That theory does not fit the complete evidence.",
+      "The investigation remains open. Keep examining clues.",
+      "",
+      "Evidence found: " + session.evidenceFound + "/" + session.totalClues,
     ].join("\n"));
     return true;
   }
@@ -430,14 +589,18 @@ async function conclude(api, session, answer) {
   await send(api, session.threadID, [
     "✓ CONCLUSION ACCEPTED",
     "",
-    session.scenario.explanation,
+    session.scenario.explanation || "The evidence supports your conclusion.",
+    "",
+    session.hintUsed
+      ? "💡 You solved it with a hint."
+      : "🧠 You solved it from the evidence.",
     "",
     "Closing the investigation...",
   ].join("\n"));
+
   await finish(api, session, { completed: true });
   return true;
 }
-
 async function handleSession(api, event, mode, args) {
   const session = sessions.get(key(event.threadID, event.senderID));
   if (!session || session.mode !== mode) return false;
@@ -445,32 +608,52 @@ async function handleSession(api, event, mode, args) {
   const action = normalize(args[0]);
   const target = args.slice(1).join(" ").trim();
 
-  if (!action || action === "status") {
+  if (!action || action === "status" || action === "help") {
     await send(api, event.threadID, sessionText(session));
     return true;
   }
 
-  if (["inspect", "examine", "explore", "investigate"].includes(action)) {
-    const text = await inspect(session, target);
-    await send(api, event.threadID, text);
+  if (action === "hint") {
+    await send(api, event.threadID, hintText(session));
     return true;
   }
 
-  const finalActions = ["accuse", "conclude", "execute", "verdict", "choose", "escape"];
+  if (["inspect", "examine", "explore", "investigate", "search", "look"].includes(action)) {
+    const result = await inspect(session, target);
+    await send(api, event.threadID, result);
+    return true;
+  }
+
+  const finalActions = [
+    "accuse",
+    "conclude",
+    "execute",
+    "verdict",
+    "choose",
+    "escape",
+    "solve",
+    "final",
+  ];
+
   if (finalActions.includes(action)) {
-    const answer = target || action;
-    return conclude(api, session, answer);
+    return conclude(api, session, target || action);
   }
 
-  if (action === "quit" || action === "abandon") {
-    await finish(api, session, { completed: false, reason: "You abandoned the investigation." });
+  if (action === "quit" || action === "abandon" || action === "cancel") {
+    await finish(api, session, {
+      completed: false,
+      reason: "You abandoned the investigation.",
+    });
     return true;
   }
 
-  await send(api, event.threadID, sessionText(session));
+  await send(api, event.threadID, [
+    "❔ I don't recognize \"" + args[0] + "\".",
+    "",
+    "Use !" + mode + " status to see the available actions.",
+  ].join("\n"));
   return true;
 }
-
 async function handleInvestigationCommand(api, event, command, args) {
   const cmd = normalize(command);
   const normalizedArgs = Array.isArray(args)
