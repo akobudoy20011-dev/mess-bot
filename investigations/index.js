@@ -80,13 +80,37 @@ function loadPool(info) {
 
   if (fs.existsSync(jsPath)) {
     try {
-      delete require.cache[require.resolve(jsPath)];
-      const loaded = require(jsPath);
-      const pool = normalizePool(loaded);
-      if (pool.length) return pool;
-      console.warn(`[INVESTIGATIONS] ${path.basename(jsPath)} loaded but contains no scenarios.`);
+      /*
+       * The investigation data files in this repository use the .js
+       * extension but contain raw JSON arrays rather than
+       * `module.exports = ...`. Requiring one of those files succeeds
+       * but returns an empty exports object, which made every mode look
+       * like it had no available investigations.
+       *
+       * Parse the file as JSON first. If it is a real CommonJS module,
+       * fall back to require() for backwards compatibility.
+       */
+      const source = fs.readFileSync(jsPath, "utf8").replace(/^\\uFEFF/, "").trim();
+
+      try {
+        const parsed = JSON.parse(source);
+        const pool = normalizePool(parsed);
+        if (pool.length) return pool;
+      } catch {
+        delete require.cache[require.resolve(jsPath)];
+        const loaded = require(jsPath);
+        const pool = normalizePool(loaded);
+        if (pool.length) return pool;
+      }
+
+      console.warn(
+        `[INVESTIGATIONS] ${path.basename(jsPath)} loaded but contains no scenarios.`
+      );
     } catch (error) {
-      console.error(`[INVESTIGATIONS] Failed loading ${path.basename(jsPath)}:`, error);
+      console.error(
+        `[INVESTIGATIONS] Failed loading ${path.basename(jsPath)}:`,
+        error
+      );
     }
   }
 
