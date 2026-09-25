@@ -12,6 +12,7 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const MIN_EVIDENCE_TO_SOLVE = 2;
 const HINT_REWARD_PENALTY = 0.25;
 const sessions = new Map();
+const scenarioHistory = new Map();
 
 const MODE_INFO = {
   case: { command: "case", label: "MURDER / MYSTERY", icon: "🕵️", file: "cases.json", final: "accuse" },
@@ -180,6 +181,22 @@ function normalize(value) {
 function pick(pool) {
   if (!pool.length) return null;
   return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function pickForSession(pool, sessionKey) {
+  if (!pool.length) return null;
+
+  const history = scenarioHistory.get(sessionKey) || [];
+  const recent = new Set(history);
+  const available = pool.filter((scenario) => !recent.has(String(scenario.id || scenario.title)));
+
+  const scenario = pick(available.length ? available : pool);
+  if (!scenario) return null;
+
+  const id = String(scenario.id || scenario.title);
+  const nextHistory = [...history.filter((value) => value !== id), id].slice(-5);
+  scenarioHistory.set(sessionKey, nextHistory);
+  return scenario;
 }
 
 function inspectableEntries(scenario, mode) {
@@ -479,13 +496,11 @@ async function start(api, event, mode) {
     return true;
   }
 
-  const scenario = pick(pools[mode] || []);
+  const scenario = pickForSession(pools[mode] || [], sessionKey);
   if (!scenario) {
     await send(api, threadID, "🕯️ No investigations are currently available for this mode.");
     return true;
   }
-
-  await incrementPlayed(threadID, userID);
 
   const session = {
     threadID,
@@ -501,11 +516,26 @@ async function start(api, event, mode) {
     lastMessageID: null,
   };
 
+  // Reserve the session before the database call so two rapid !case
+  // messages cannot create two simultaneous investigations for the same user.
+  sessions.set(sessionKey, session);
+
+  try {
+    await incrementPlayed(threadID, userID);
+  } catch (error) {
+    sessions.delete(sessionKey);
+    console.error("[INVESTIGATIONS] Failed to start profile session:", error);
+    await send(api, threadID, "🕯️ The investigation could not be started. Please try again.");
+    return true;
+  }
+
   session.timer = setTimeout(() => {
-    void finish(api, session, { completed: false, reason: "⏰ Time expired. The case remains unsolved." });
+    void finish(api, session, {
+      completed: false,
+      reason: "⏰ Time expired. The case remains unsolved.",
+    });
   }, SESSION_TIMEOUT_MS);
 
-  sessions.set(sessionKey, session);
   const sent = await send(api, threadID, sessionText(session));
   if (sent && sent.messageID) session.lastMessageID = sent.messageID;
   return true;
