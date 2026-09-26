@@ -85,6 +85,7 @@ function loadState() {
     for (const [threadID, enabled] of Object.entries(parsed)) {
       if (enabled === true) {
         setThreadEnabled(threadID, true);
+        activeThreads.add(String(threadID));
       }
     }
 
