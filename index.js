@@ -114,11 +114,6 @@ const {
   getBanatMediaDecision,
 } = require("./triggers");
 
-const {
-  getRandomResiboProfile,
-  getResiboImagePath,
-} = require("./resibo");
-
 // ============================================================
 // CONFIGURATION
 // ============================================================
@@ -5578,40 +5573,23 @@ async function handleMessage(
         const mediaDecision =
           getBanatMediaDecision();
 
-        const resiboProfile =
-          mediaDecision.attachLink
-            ? getRandomResiboProfile()
-            : null;
-
         const triggerLink =
-          resiboProfile?.url ||
           mediaDecision.link;
 
         const triggerMessage =
-          resiboProfile
+          triggerLink
             ? [
                 triggerReply,
                 "",
                 "୨୧ resibo",
-                resiboProfile.name,
-                "♡ view profile",
                 triggerLink,
               ].join("\n")
-            : triggerLink
-              ? [
-                  triggerReply,
-                  "",
-                  "୨୧ resibo",
-                  triggerLink,
-                ].join("\n")
-              : triggerReply;
+            : triggerReply;
 
         const triggerPicturePath =
-          resiboProfile
-            ? getResiboImagePath(resiboProfile)
-            : mediaDecision.attachPicture
-              ? getRandomMemePath()
-              : null;
+          mediaDecision.attachPicture
+            ? getRandomMemePath()
+            : null;
 
         sendReplyWithTyping(
           api,
