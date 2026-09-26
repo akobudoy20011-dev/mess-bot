@@ -1,5 +1,6 @@
 "use strict";
 
+const fs = require("fs");
 const path = require("path");
 
 const RESIBO_PROFILES = Object.freeze([
@@ -26,7 +27,7 @@ function getRandomResiboProfile() {
 }
 
 function getResiboImagePath(profile) {
-  return profile && profile.image ? profile.image : null;
+  return profile && profile.image && fs.existsSync(profile.image) ? profile.image : null;
 }
 
 module.exports = {
