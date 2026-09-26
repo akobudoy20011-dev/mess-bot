@@ -5600,7 +5600,7 @@ async function handleMessage(
                   "",
                   "୨୧ resibo",
                   triggerLink,
-                ].join("\\n")
+                ].join("\n")
               : triggerReply;
 
         const triggerPicturePath =
