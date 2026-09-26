@@ -25,9 +25,11 @@ Set:
 
 - FB_COOKIES — JSON cookie/app-state array for the Messenger account
 - PORT — optional HTTP health-check port; Render supplies this automatically
-- WEH_ADMIN_IDS — comma-separated Messenger user IDs allowed to control WEH
+- WEH_ADMIN_IDS — comma-separated Messenger user IDs allowed to control WEH; if omitted, the bot also accepts the parent ECLIPSE `ADMIN_IDS` value
 
 Do not commit cookies or app state.
+
+**Important:** run WEH with its own Messenger session/cookie set. Do not run the same Facebook session simultaneously in ECLIPSE and WEH, because two `ws3-fca` listeners using the same account can interfere with each other.
 
 ## Render
 
