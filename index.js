@@ -111,7 +111,6 @@ const {
 const {
   getTriggerReply,
   getNextPublicReply,
-  getBanatMediaDecision,
 } = require("./triggers");
 
 // ============================================================
@@ -5570,23 +5569,11 @@ async function handleMessage(
       if (
         triggerReply
       ) {
-        const mediaDecision =
-          getBanatMediaDecision();
-
-        const triggerMessage =
-          triggerReply;
-
-        const triggerPicturePath =
-          mediaDecision.attachPicture
-            ? getRandomMemePath()
-            : null;
-
         sendReplyWithTyping(
           api,
-          triggerMessage,
+          triggerReply,
           threadID,
-          false,
-          triggerPicturePath
+          false
         );
 
         return;
@@ -5916,8 +5903,7 @@ function sendReplyWithTyping(
   api,
   message,
   threadID,
-  attachMeme = false,
-  picturePath = null
+  attachMeme = false
 ) {
   const typingDelayMs =
     1200;
@@ -5956,18 +5942,15 @@ function sendReplyWithTyping(
             ? getRandomMemePath()
             : null;
 
-        const attachmentPath =
-          picturePath || memePath;
-
         const outgoingMessage =
-          attachmentPath
+          memePath
             ? {
                 body:
                   message,
 
                 attachment:
                   fs.createReadStream(
-                    attachmentPath
+                    memePath
                   ),
               }
             : message;
