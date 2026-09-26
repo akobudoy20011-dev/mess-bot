@@ -114,7 +114,10 @@ const {
   getBanatMediaDecision,
 } = require("./triggers");
 
-const {\n  getRandomResiboProfile,\n  getResiboImagePath,\n} = require("./resibo");
+const {
+  getRandomResiboProfile,
+  getResiboImagePath,
+} = require("./resibo");
 
 // ============================================================
 // CONFIGURATION
