@@ -150,18 +150,36 @@ function getRandomBanat() {
   return insult + "\n\n୨୧ resibo: " + link;
 }
 
-function shouldReply(threadID) {
+function classifyMessage(body) {
+  const text = String(body || "").toLowerCase();
+
+  if (/(^|\s)(weh|wehh|weh\?|weh!)(\s|$)/i.test(text)) return "weh";
+  if (/\b(ako|akin|mine|best|number ?1|top ?1|pinakamagaling|panalo|winner)\b|\b(ang galing ko|magaling ako|ako na|ako lang)\b/i.test(text)) return "brag";
+  if (/\b(bobo|tanga|stupid|idiot|mali ka|wrong|cap|sinungaling|fake|walang kwenta)\b|\b(hindi totoo|source\?|resibo\?)\b/i.test(text)) return "argument";
+  if (/(😭|💀|🤣|😂|lmao|lol|haha)/i.test(text)) return "chaos";
+  if (/(\?|\b(bakit|paano|ano ba|saan ba|seryoso)\b)/i.test(text)) return "question";
+  return "normal";
+}
+
+function getResponseChance(category) {
+  switch (category) {
+    case "weh": return 0.90;
+    case "brag": return 0.65;
+    case "argument": return 0.60;
+    case "chaos": return 0.45;
+    case "question": return 0.35;
+    default: return 0.15;
+  }
+}
+
+function shouldReply(threadID, body) {
   const key = String(threadID);
   const now = Date.now();
   const last = lastReplyAt.get(key) || 0;
+  const category = classifyMessage(body);
 
-  if (now - last < 25_000) {
-    return false;
-  }
-
-  if (Math.random() > 0.30) {
-    return false;
-  }
+  if (now - last < 25_000) return false;
+  if (Math.random() > getResponseChance(category)) return false;
 
   lastReplyAt.set(key, now);
   return true;
@@ -180,5 +198,7 @@ module.exports = {
   setThreadEnabled,
   getRandomBanat,
   shouldReply,
+  classifyMessage,
+  getResponseChance,
   clearThreadRuntime,
 };
