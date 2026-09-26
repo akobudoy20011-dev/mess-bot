@@ -67,11 +67,6 @@ const {
 // PICTURES
 // ============================================================
 
-const {
-  sendRandomPicture,
-  getRandomPicturePath,
-} = require("./pictures");
-
 // ============================================================
 // RPG CHARACTER AI
 // ============================================================
@@ -5593,7 +5588,7 @@ async function handleMessage(
 
         const triggerPicturePath =
           mediaDecision.attachPicture
-            ? getRandomPicturePath()
+            ? getRandomMemePath()
             : null;
 
         sendReplyWithTyping(
