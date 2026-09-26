@@ -276,22 +276,6 @@ const groups = [
 // PUBLIC ROAST
 // ============================================================
 
-const banatLinks = [
-  "https://www.facebook.com/share/1PWwWcuVAm/",
-  "https://www.facebook.com/share/1BQG8iRTE1/",
-  "https://www.facebook.com/share/19NaYjAYMu/",
-];
-
-function getRandomBanatLink() {
-  if (banatLinks.length === 0) {
-    return null;
-  }
-
-  return banatLinks[
-    Math.floor(Math.random() * banatLinks.length)
-  ];
-}
-
 const publicRoastGroup = {
   name: "public",
   triggers: [],
@@ -666,20 +650,11 @@ function getNextPublicReply() {
    return Math.random() < 0.30;
  }
 
- function shouldAttachBanatLink() {
-   return Math.random() < 0.12;
- }
-
- function getBanatMediaDecision() {
-   const attachPicture = shouldAttachBanatPicture();
-   const attachLink = shouldAttachBanatLink();
-
-   return {
-     attachPicture,
-     attachLink,
-     link: attachLink ? getRandomBanatLink() : null,
-   };
- }
+function getBanatMediaDecision() {
+  return {
+    attachPicture: shouldAttachBanatPicture(),
+  };
+}
 
 
 // ============================================================
@@ -790,7 +765,6 @@ module.exports = {
   getTriggerReply,
   getRandomRoastReply,
   getNextPublicReply,
-  getRandomBanatLink,
   getBanatMediaDecision,
 
   normalizeText,
