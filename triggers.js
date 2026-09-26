@@ -4,37 +4,6 @@
 
 const groups = [
   {
-    name: "banat-link-1",
-    triggers: ["https://www.facebook.com/share/1PWwWcuVAm/?mibextid=wwXIfr"],
-    index: 0,
-    replies: [
-      "ayan na naman ang banat mo 😭 eto na link, sabayan mo ng tapang: https://www.facebook.com/share/1PWwWcuVAm/?mibextid=wwXIfr",
-      "sige lapag mo pa, pero dapat may banat din 💀 https://www.facebook.com/share/1PWwWcuVAm/?mibextid=wwXIfr",
-      "eto na, may resibo na may kasamang banat ୨୧ https://www.facebook.com/share/1PWwWcuVAm/?mibextid=wwXIfr"
-    ],
-  },
-  {
-    name: "banat-link-2",
-    triggers: ["https://www.facebook.com/share/1BQG8iRTE1/?mibextid=wwXIfr"],
-    index: 0,
-    replies: [
-      "lapag na, pero wag puro link—banat din 😭 https://www.facebook.com/share/1BQG8iRTE1/?mibextid=wwXIfr",
-      "eto ang resibo, baka sakaling may maibanat ka pa 💀 https://www.facebook.com/share/1BQG8iRTE1/?mibextid=wwXIfr",
-      "ayan, link secured. ngayon sabihin mo na banat mo 🎀 https://www.facebook.com/share/1BQG8iRTE1/?mibextid=wwXIfr"
-    ],
-  },
-  {
-    name: "banat-link-3",
-    triggers: ["https://www.facebook.com/share/19NaYjAYMu/?mibextid=wwXIfr"],
-    index: 0,
-    replies: [
-      "ayan ang link, may bonus banat para di bitin 😭 https://www.facebook.com/share/19NaYjAYMu/?mibextid=wwXIfr",
-      "resibo muna bago yabang—eto oh 💀 https://www.facebook.com/share/19NaYjAYMu/?mibextid=wwXIfr",
-      "lapag mo na yan, tapos banat tayo ୨୧ https://www.facebook.com/share/19NaYjAYMu/?mibextid=wwXIfr"
-    ],
-  },
-
-  {
     name: "jaiden",
     triggers: ["jaiden"],
     index: 0,
@@ -306,6 +275,15 @@ const groups = [
 // ============================================================
 // PUBLIC ROAST
 // ============================================================
+
+const banatLinkReplies = [
+  "ayan na naman, eto na yung resibo 😭 https://www.facebook.com/share/1PWwWcuVAm/?mibextid=wwXIfr",
+  "lapag na—may banat na, may link pa 💀 https://www.facebook.com/share/1BQG8iRTE1/?mibextid=wwXIfr",
+  "eto ang resibo, wag puro yabang ୨୧ https://www.facebook.com/share/19NaYjAYMu/?mibextid=wwXIfr",
+  "sige, dagdagan natin ng konting banat 😭 https://www.facebook.com/share/1PWwWcuVAm/?mibextid=wwXIfr",
+  "ayan oh, may pang-resibo ka na 🎀 https://www.facebook.com/share/1BQG8iRTE1/?mibextid=wwXIfr",
+  "link drop muna bago ang next banat 💀 https://www.facebook.com/share/19NaYjAYMu/?mibextid=wwXIfr",
+];
 
 const publicRoastGroup = {
   name: "public",
@@ -673,6 +651,18 @@ function getNextPublicReply() {
   return getNextReply(group);
 }
 
+function getRandomBanatLinkReply() {
+  if (banatLinkReplies.length === 0) {
+    return null;
+  }
+
+  return banatLinkReplies[
+    Math.floor(
+      Math.random() * banatLinkReplies.length
+    )
+  ];
+}
+
 
 // ============================================================
 // RANDOM GENERIC ROAST
@@ -782,6 +772,7 @@ module.exports = {
   getTriggerReply,
   getRandomRoastReply,
   getNextPublicReply,
+  getRandomBanatLinkReply,
 
   normalizeText,
   normalizeId,
