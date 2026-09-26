@@ -19,8 +19,11 @@ const MAX_LOGIN_BACKOFF_MS = 5 * 60_000;
 
 function getAdminIDs() {
   return new Set(
-    String(process.env.WEH_ADMIN_IDS || "")
-      .split(",")
+    [
+      process.env.WEH_ADMIN_IDS || "",
+      process.env.ADMIN_IDS || "",
+    ]
+      .flatMap((value) => String(value).split(","))
       .map((id) => id.trim())
       .filter(Boolean)
   );
