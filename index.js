@@ -115,6 +115,7 @@ const {
 const {
   getTriggerReply,
   getNextPublicReply,
+  getRandomBanatLinkReply,
 } = require("./triggers");
 
 // ============================================================
@@ -5606,8 +5607,17 @@ async function handleMessage(
       threadId
     )
   ) {
+    // Most automatic banat replies stay as normal public roasts.
+    // Occasionally, when Banat is enabled, naturally drop one of
+    // the configured Facebook links without requiring anyone to
+    // mention the link first.
+    const useBanatLink =
+      Math.random() < 0.20;
+
     const publicReply =
-      getNextPublicReply();
+      useBanatLink
+        ? getRandomBanatLinkReply()
+        : getNextPublicReply();
 
     if (
       publicReply
