@@ -5593,7 +5593,7 @@ async function handleMessage(
                 resiboProfile.name,
                 "♡ view profile",
                 triggerLink,
-              ].join("\\n")
+              ].join("\n")
             : triggerLink
               ? [
                   triggerReply,
