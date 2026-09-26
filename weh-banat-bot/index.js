@@ -17,6 +17,19 @@ const PORT = Number(process.env.PORT || 10000);
 const STATE_FILE = path.join(__dirname, "weh-state.json");
 const MAX_LOGIN_BACKOFF_MS = 5 * 60_000;
 
+function getAdminIDs() {
+  return new Set(
+    String(process.env.WEH_ADMIN_IDS || "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean)
+  );
+}
+
+function isAdmin(senderID) {
+  return Boolean(senderID) && getAdminIDs().has(String(senderID));
+}
+
 let api = null;
 let botUserID = null;
 let loginAttempt = 0;
@@ -166,7 +179,7 @@ function send(threadID, message) {
   }
 }
 
-function handleWehCommand(threadID, body) {
+function handleWehCommand(threadID, body, senderID) {
   const args = body
     .trim()
     .split(/\s+/)
@@ -187,6 +200,10 @@ function handleWehCommand(threadID, body) {
   }
 
   if (action === "on") {
+    if (!isAdmin(senderID)) {
+      send(threadID, "୨୧ WEH controls are admin-only. 🎀");
+      return;
+    }
     if (enabled) {
       send(
         threadID,
@@ -213,6 +230,10 @@ function handleWehCommand(threadID, body) {
   }
 
   if (action === "off") {
+    if (!isAdmin(senderID)) {
+      send(threadID, "୨୧ WEH controls are admin-only. 🎀");
+      return;
+    }
     if (!enabled) {
       send(
         threadID,
@@ -227,6 +248,11 @@ function handleWehCommand(threadID, body) {
       threadID,
       "୨୧ WEH is OFF. Tahimik muna. 🎀"
     );
+    return;
+  }
+
+  if (!isAdmin(senderID)) {
+    send(threadID, "୨୧ WEH controls are admin-only. 🎀");
     return;
   }
 
@@ -286,7 +312,7 @@ function handleEvent(event) {
     lower === "/weh" ||
     lower.startsWith("/weh ")
   ) {
-    handleWehCommand(threadID, body);
+    handleWehCommand(threadID, body, event.senderID);
     return;
   }
 
@@ -298,7 +324,7 @@ function handleEvent(event) {
     return;
   }
 
-  if (!shouldReply(threadID)) {
+  if (!shouldReply(threadID, body)) {
     return;
   }
 
