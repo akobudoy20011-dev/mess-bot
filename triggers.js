@@ -642,20 +642,6 @@ function getNextPublicReply() {
   return getNextReply(group);
 }
 
-// ============================================================
- // BANAT MEDIA / LINK HELPERS
- // ============================================================
-
- function shouldAttachBanatPicture() {
-   return Math.random() < 0.30;
- }
-
-function getBanatMediaDecision() {
-  return {
-    attachPicture: shouldAttachBanatPicture(),
-  };
-}
-
 
 // ============================================================
 // RANDOM GENERIC ROAST
@@ -765,7 +751,6 @@ module.exports = {
   getTriggerReply,
   getRandomRoastReply,
   getNextPublicReply,
-  getBanatMediaDecision,
 
   normalizeText,
   normalizeId,
