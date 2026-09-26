@@ -1,9 +1,9 @@
 "use strict";
 
 const LINKS = [
-  "https://www.facebook.com/share/1PWwWcuVAm/?mibextid=wwXIfr",
-  "https://www.facebook.com/share/1BQG8iRTE1/?mibextid=wwXIfr",
-  "https://www.facebook.com/share/19NaYjAYMu/?mibextid=wwXIfr",
+  "https://www.facebook.com/share/1PWwWcuVAm/",
+  "https://www.facebook.com/share/1BQG8iRTE1/",
+  "https://www.facebook.com/share/19NaYjAYMu/",
 ];
 
 const BASE_INSULTS = [
@@ -147,7 +147,10 @@ function setThreadEnabled(threadID, enabled) {
 function getRandomBanat() {
   const insult = randomItem(INSULTS);
   const link = randomItem(LINKS);
-  return insult + "\n\n୨୧ resibo: " + link;
+
+  // Keep the URL completely isolated so Messenger has the
+  // cleanest chance to render its Facebook link preview.
+  return insult + "\n\n୨୧ resibo\n" + link;
 }
 
 function classifyMessage(body) {
