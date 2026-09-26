@@ -3,7 +3,6 @@
 // ============================================================
 
 const groups = [
-const banatLinkGroups = [
   {
     name: "banat-link-1",
     triggers: ["https://www.facebook.com/share/1PWwWcuVAm/?mibextid=wwXIfr"],
@@ -34,7 +33,6 @@ const banatLinkGroups = [
       "lapag mo na yan, tapos banat tayo ୨୧ https://www.facebook.com/share/19NaYjAYMu/?mibextid=wwXIfr"
     ],
   },
-];
 
   {
     name: "jaiden",
