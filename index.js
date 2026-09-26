@@ -5603,7 +5603,8 @@ async function handleMessage(
     )
   ) {
     // Random public roasts remain text-only.
-    // Triggered banats may receive a randomized meme.
+    const publicReply =
+      getNextPublicReply();
 
     if (
       publicReply
@@ -5617,7 +5618,7 @@ async function handleMessage(
         api,
         publicReply,
         threadID,
-        true
+        false
       );
     }
   }
