@@ -5573,18 +5573,8 @@ async function handleMessage(
         const mediaDecision =
           getBanatMediaDecision();
 
-        const triggerLink =
-          mediaDecision.link;
-
         const triggerMessage =
-          triggerLink
-            ? [
-                triggerReply,
-                "",
-                "୨୧ resibo",
-                triggerLink,
-              ].join("\n")
-            : triggerReply;
+          triggerReply;
 
         const triggerPicturePath =
           mediaDecision.attachPicture
@@ -5626,8 +5616,7 @@ async function handleMessage(
     )
   ) {
     // Random public roasts remain text-only.
-    // Triggered banats are the ones that receive the
-    // randomized picture/link media layer.
+    // Triggered banats may receive a randomized meme.
 
     if (
       publicReply
