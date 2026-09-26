@@ -6,10 +6,12 @@ It does not modify or depend on ECLIPSE's existing !banat on/off system.
 
 ## Features
 
-- /weh — toggle automatic banat on/off for the current thread
-- /weh on — enable it
-- /weh off — disable it
+- /weh — admin-only toggle for automatic banat
+- /weh on — admin-only enable it
+- /weh off — admin-only disable it
 - /weh status — show the current state
+- Reaction-based banat categories
+- Dynamic response chance based on message type
 - Automatic random Tagalog banat replies
 - Every generated banat includes one of the three configured Facebook links
 - Link selection is randomized
@@ -23,6 +25,7 @@ Set:
 
 - FB_COOKIES — JSON cookie/app-state array for the Messenger account
 - PORT — optional HTTP health-check port; Render supplies this automatically
+- WEH_ADMIN_IDS — comma-separated Messenger user IDs allowed to control WEH
 
 Do not commit cookies or app state.
 
