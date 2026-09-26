@@ -69,6 +69,7 @@ const {
 
 const {
   sendRandomPicture,
+  getRandomPicturePath,
 } = require("./pictures");
 
 // ============================================================
@@ -115,7 +116,7 @@ const {
 const {
   getTriggerReply,
   getNextPublicReply,
-  getRandomBanatLinkReply,
+  getBanatMediaDecision,
 } = require("./triggers");
 
 // ============================================================
@@ -5574,11 +5575,33 @@ async function handleMessage(
       if (
         triggerReply
       ) {
+        const mediaDecision =
+          getBanatMediaDecision();
+
+        const triggerLink =
+          mediaDecision.link;
+
+        const triggerMessage =
+          triggerLink
+            ? [
+                triggerReply,
+                "",
+                "୨୧ resibo",
+                triggerLink,
+              ].join("\n")
+            : triggerReply;
+
+        const triggerPicturePath =
+          mediaDecision.attachPicture
+            ? getRandomPicturePath()
+            : null;
+
         sendReplyWithTyping(
           api,
-          triggerReply,
+          triggerMessage,
           threadID,
-          true
+          false,
+          triggerPicturePath
         );
 
         return;
@@ -5917,7 +5940,8 @@ function sendReplyWithTyping(
   api,
   message,
   threadID,
-  attachMeme = false
+  attachMeme = false,
+  picturePath = null
 ) {
   const typingDelayMs =
     1200;
@@ -5956,15 +5980,18 @@ function sendReplyWithTyping(
             ? getRandomMemePath()
             : null;
 
+        const attachmentPath =
+          picturePath || memePath;
+
         const outgoingMessage =
-          memePath
+          attachmentPath
             ? {
                 body:
                   message,
 
                 attachment:
                   fs.createReadStream(
-                    memePath
+                    attachmentPath
                   ),
               }
             : message;
