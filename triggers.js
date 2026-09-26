@@ -276,14 +276,21 @@ const groups = [
 // PUBLIC ROAST
 // ============================================================
 
-const banatLinkReplies = [
-  "ayan na naman, eto na yung resibo 😭 https://www.facebook.com/share/1PWwWcuVAm/?mibextid=wwXIfr",
-  "lapag na—may banat na, may link pa 💀 https://www.facebook.com/share/1BQG8iRTE1/?mibextid=wwXIfr",
-  "eto ang resibo, wag puro yabang ୨୧ https://www.facebook.com/share/19NaYjAYMu/?mibextid=wwXIfr",
-  "sige, dagdagan natin ng konting banat 😭 https://www.facebook.com/share/1PWwWcuVAm/?mibextid=wwXIfr",
-  "ayan oh, may pang-resibo ka na 🎀 https://www.facebook.com/share/1BQG8iRTE1/?mibextid=wwXIfr",
-  "link drop muna bago ang next banat 💀 https://www.facebook.com/share/19NaYjAYMu/?mibextid=wwXIfr",
+const banatLinks = [
+  "https://www.facebook.com/share/1PWwWcuVAm/",
+  "https://www.facebook.com/share/1BQG8iRTE1/",
+  "https://www.facebook.com/share/19NaYjAYMu/",
 ];
+
+function getRandomBanatLink() {
+  if (banatLinks.length === 0) {
+    return null;
+  }
+
+  return banatLinks[
+    Math.floor(Math.random() * banatLinks.length)
+  ];
+}
 
 const publicRoastGroup = {
   name: "public",
@@ -651,17 +658,28 @@ function getNextPublicReply() {
   return getNextReply(group);
 }
 
-function getRandomBanatLinkReply() {
-  if (banatLinkReplies.length === 0) {
-    return null;
-  }
+// ============================================================
+ // BANAT MEDIA / LINK HELPERS
+ // ============================================================
 
-  return banatLinkReplies[
-    Math.floor(
-      Math.random() * banatLinkReplies.length
-    )
-  ];
-}
+ function shouldAttachBanatPicture() {
+   return Math.random() < 0.30;
+ }
+
+ function shouldAttachBanatLink() {
+   return Math.random() < 0.12;
+ }
+
+ function getBanatMediaDecision() {
+   const attachPicture = shouldAttachBanatPicture();
+   const attachLink = shouldAttachBanatLink();
+
+   return {
+     attachPicture,
+     attachLink,
+     link: attachLink ? getRandomBanatLink() : null,
+   };
+ }
 
 
 // ============================================================
@@ -772,7 +790,8 @@ module.exports = {
   getTriggerReply,
   getRandomRoastReply,
   getNextPublicReply,
-  getRandomBanatLinkReply,
+  getRandomBanatLink,
+  getBanatMediaDecision,
 
   normalizeText,
   normalizeId,
